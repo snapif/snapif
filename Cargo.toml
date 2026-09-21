@@ -13,6 +13,12 @@ categories = []
 [features]
 default = []
 http = ["dep:reqwest", "dep:tokio", "dep:url"]
+cli = ["dep:clap", "dep:pollster"]
+
+[[bin]]
+name = "snapif"
+path = "src/bin/snapif.rs"
+required-features = ["cli"]
 
 [dependencies]
 indexmap = { version = "2", features = ["serde"] }
@@ -23,6 +29,8 @@ toml = "0.8.23"
 reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", optional = true, features = ["rt", "macros", "time"] }
 url = { version = "2", optional = true }
+clap = { version = "4", optional = true, features = ["derive"] }
+pollster = { version = "0.4", optional = true }
 
 [dev-dependencies]
 pollster = "0.4"
