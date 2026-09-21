@@ -1,6 +1,3 @@
-use std::pin::pin;
-use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-
 use serde_json::{Value, json};
 use snapif::question::{ChoiceLabels, ChoiceQ};
 use snapif::{Client, Decision, FakeBackend, Policy, Question, QuestionId, State};
@@ -16,7 +13,7 @@ snapif::choice! {
 fn main() {
     let backend = FakeBackend::new().on_choice("department", "billing", 0.91);
     let client = Client::new(backend).policy(shipped());
-    let out = block_on(client.ask(
+    let out = pollster::block_on(client.ask(
         State {
             trusted: json!({"user_request": "invoice"}),
             untrusted: Value::Null,
@@ -60,26 +57,4 @@ fn department_question() -> Question {
 
 fn shipped() -> Policy {
     Policy::shipped("tool-gate").expect("shipped tool-gate")
-}
-
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    let mut future = pin!(future);
-    let waker = noop_waker();
-    let mut context = Context::from_waker(&waker);
-    match future.as_mut().poll(&mut context) {
-        Poll::Ready(value) => value,
-        Poll::Pending => panic!("observation future was not ready"),
-    }
-}
-
-fn noop_waker() -> Waker {
-    fn clone(data: *const ()) -> RawWaker {
-        RawWaker::new(data, vtable())
-    }
-    fn wake(_: *const ()) {}
-    fn vtable() -> &'static RawWakerVTable {
-        &RawWakerVTable::new(clone, wake, wake, wake)
-    }
-    // SAFETY: the vtable never reads the data pointer.
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), vtable())) }
 }
