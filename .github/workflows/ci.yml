@@ -51,7 +51,7 @@ jobs:
         with:
           toolchain: "1.95"
           components: rustfmt, clippy
-      - uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2
         with:
           tool: cargo-deny@0.20.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -89,7 +89,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: rhysd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca # v1.7.12
-      - uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e # v2
+      - uses: taiki-e/install-action@4076c08d76dba979c11a7285295b0716c1d67908 # v2
         with:
           tool: zizmor@1.16.0
       - run: zizmor --min-severity=high .github/workflows
