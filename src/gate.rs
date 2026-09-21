@@ -111,12 +111,19 @@ impl<B: Backend> Client<B> {
         if let Some((from, to)) = gates.harm_bumped {
             reasons.push(UnsureReason::HarmClassBump { from, to });
         }
+        if crate::backends::cascade::fallback_still_below(
+            &evaluated.meta,
+            &evaluated.wire.answers,
+            policy.cascade_min,
+        ) {
+            reasons.push(UnsureReason::CascadeStillUnsure);
+        }
         if let Some(verdict) = block_hit(policy, &req.action_id, &gates, &evaluated.wire.answers) {
             return Ok(self.finish(
                 verdict,
                 evaluated.wire.usage,
                 evaluated.backend_id,
-                policy.shadow,
+                self.shadow_on(policy.shadow),
                 Some(harm.label),
                 reasons,
             ));
@@ -148,7 +155,7 @@ impl<B: Backend> Client<B> {
             verdict,
             evaluated.wire.usage,
             evaluated.backend_id,
-            policy.shadow,
+            self.shadow_on(policy.shadow),
             Some(harm.label),
             reasons,
         ))
@@ -162,7 +169,7 @@ impl<B: Backend> Client<B> {
         usage: Usage,
         backend_id: &str,
     ) -> Verdict {
-        let shadow = self.policy.as_ref().is_some_and(|policy| policy.shadow);
+        let shadow = self.shadow_on(self.policy.as_ref().is_some_and(|policy| policy.shadow));
         let verdict = if self
             .policy
             .as_ref()
