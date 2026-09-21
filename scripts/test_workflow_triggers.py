@@ -31,6 +31,7 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("merge_group:", on_block)
         self.assertNotIn("push:", on_block)
         self.assertNotIn("tags:", on_block)
+        self.assertNotIn("branches:", on_block)
 
     def test_actionlint_is_not_an_install_action_tool(self) -> None:
         text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
@@ -43,6 +44,7 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("pull_request:", on_block)
         self.assertIn("merge_group:", on_block)
         self.assertIn("workflow_dispatch:", on_block)
+        self.assertNotIn("branches:", on_block)
         self.assertIn("Signed-off-by:", text)
 
 
