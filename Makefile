@@ -7,8 +7,9 @@ help: ## Show this help
 fmt: ## rustfmt check
 	cargo fmt --check
 
-test: ## cargo test --locked
+test: ## cargo test --locked, including the http feature
 	RUSTFLAGS="-D warnings" cargo test --locked
+	RUSTFLAGS="-D warnings" cargo test --locked --features http
 
 deny: ## cargo deny plus forbidden crates
 	cargo deny check
@@ -20,8 +21,10 @@ stealth: ## empty About, no topics, no README pitch
 check: ## fmt, clippy, test, deny, workflow trigger lock
 	cargo fmt --check
 	RUSTFLAGS="-D warnings" cargo clippy --locked --all-targets -- -D warnings
+	RUSTFLAGS="-D warnings" cargo clippy --locked --all-targets --features http -- -D warnings
 	RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 	RUSTFLAGS="-D warnings" cargo test --locked
+	RUSTFLAGS="-D warnings" cargo test --locked --features http
 	cargo deny check
 	bash scripts/forbid-deps.sh
 	python3 scripts/test_workflow_triggers.py

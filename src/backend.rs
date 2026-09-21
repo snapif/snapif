@@ -16,6 +16,9 @@ use crate::wire::{
     self, Usage, WireAnswer, WireQuestion, WireRequest, WireResponse, renormalize_probabilities,
 };
 
+/// TypeSafe API origin. The path is always `/v1/systemone`.
+pub const TYPESAFE_ORIGIN: &str = "https://api.typesafe.ai";
+
 #[derive(Debug)]
 pub struct Evaluated {
     pub wire: WireResponse,
@@ -47,12 +50,16 @@ pub trait Backend: Send + Sync {
 
 pub enum AnyBackend {
     Fake(FakeBackend),
+    #[cfg(feature = "http")]
+    Http(crate::backends::http::HttpBackend),
 }
 
 impl Backend for AnyBackend {
     fn id(&self) -> &str {
         match self {
             AnyBackend::Fake(backend) => backend.id(),
+            #[cfg(feature = "http")]
+            AnyBackend::Http(backend) => backend.id(),
         }
     }
 
@@ -63,6 +70,8 @@ impl Backend for AnyBackend {
     ) -> Result<Evaluated, BackendError> {
         match self {
             AnyBackend::Fake(backend) => backend.evaluate(req, deadline).await,
+            #[cfg(feature = "http")]
+            AnyBackend::Http(backend) => backend.evaluate(req, deadline).await,
         }
     }
 }
@@ -151,15 +160,48 @@ impl<B: Backend> Client<B> {
     }
 }
 
+#[derive(Debug, Default)]
+struct BackendEnv {
+    #[cfg(feature = "http")]
+    typesafe_key: Option<String>,
+    #[cfg(feature = "http")]
+    snapif_key: Option<String>,
+    #[cfg(feature = "http")]
+    base_url: Option<String>,
+    cascade: Option<String>,
+}
+
 impl Client<AnyBackend> {
-    /// `SNAPIF_BACKEND` is required. `NotPresent` and `NotUnicode` are
-    /// [`Error::Policy`], not a silent fake.
+    /// `SNAPIF_BACKEND` is required (`fake`, `typesafe`, or `compatible`).
+    ///
+    /// Unset or non-Unicode is [`Error::Policy`], not a silent fake.
+    /// `typesafe` reads `TYPESAFE_API_KEY` and fails with [`Error::Auth`] when
+    /// that key is missing. `compatible` reads `SNAPIF_BASE_URL` (origin only)
+    /// and `SNAPIF_API_KEY` (optional on loopback). `SNAPIF_CASCADE_BASE_URL`
+    /// is rejected until cascade exists. Without the `http` feature, `typesafe`
+    /// and `compatible` stay [`Error::Policy`].
     pub fn from_env() -> Result<Self, Error> {
-        // NotPresent and NotUnicode. Neither selects a fake backend.
-        Self::from_name(std::env::var("SNAPIF_BACKEND").ok().as_deref())
+        let name = std::env::var("SNAPIF_BACKEND").ok();
+        let env = BackendEnv {
+            #[cfg(feature = "http")]
+            typesafe_key: std::env::var("TYPESAFE_API_KEY").ok(),
+            #[cfg(feature = "http")]
+            snapif_key: std::env::var("SNAPIF_API_KEY").ok(),
+            #[cfg(feature = "http")]
+            base_url: std::env::var("SNAPIF_BASE_URL").ok(),
+            cascade: std::env::var("SNAPIF_CASCADE_BASE_URL").ok(),
+        };
+        Self::from_parts(name.as_deref(), &env)
     }
 
-    fn from_name(name: Option<&str>) -> Result<Self, Error> {
+    fn from_parts(name: Option<&str>, env: &BackendEnv) -> Result<Self, Error> {
+        if name.is_some_and(|name| name != "fake")
+            && env.cascade.as_ref().is_some_and(|value| !value.is_empty())
+        {
+            return Err(Error::Policy(PolicyError::Invariant(
+                "SNAPIF_CASCADE_BASE_URL".to_string(),
+            )));
+        }
         match name {
             None => Err(Error::Policy(PolicyError::Invariant(
                 "SNAPIF_BACKEND".to_string(),
@@ -168,6 +210,32 @@ impl Client<AnyBackend> {
                 let policy = Policy::shipped("tool-gate")?;
                 Ok(Self::new(AnyBackend::Fake(FakeBackend::new())).policy(policy))
             }
+            #[cfg(feature = "http")]
+            Some("typesafe") => {
+                let key = env.typesafe_key.clone().unwrap_or_default();
+                let backend = crate::backends::http::HttpBackend::typesafe(key)?;
+                let policy = Policy::shipped("tool-gate")?;
+                Ok(Self::new(AnyBackend::Http(backend)).policy(policy))
+            }
+            #[cfg(feature = "http")]
+            Some("compatible") => {
+                let Some(raw) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
+                    return Err(Error::Policy(PolicyError::Invariant(
+                        "SNAPIF_BASE_URL".to_string(),
+                    )));
+                };
+                let url = url::Url::parse(raw).map_err(|_| {
+                    Error::Policy(PolicyError::Invariant("SNAPIF_BASE_URL".to_string()))
+                })?;
+                let backend =
+                    crate::backends::http::HttpBackend::compatible(url, env.snapif_key.clone())?;
+                let policy = Policy::shipped("tool-gate")?;
+                Ok(Self::new(AnyBackend::Http(backend)).policy(policy))
+            }
+            #[cfg(not(feature = "http"))]
+            Some("typesafe" | "compatible") => Err(Error::Policy(PolicyError::Invariant(
+                name.unwrap_or("backend").to_string(),
+            ))),
             Some(other) => Err(Error::Policy(PolicyError::Invariant(other.to_string()))),
         }
     }
@@ -378,7 +446,8 @@ mod tests {
 
     #[test]
     fn from_name_selects_without_env() {
-        let Err(unset) = Client::<AnyBackend>::from_name(None) else {
+        let Err(unset) = Client::<AnyBackend>::from_parts(None, &super::BackendEnv::default())
+        else {
             panic!("unset must be policy");
         };
         assert!(matches!(
@@ -386,15 +455,50 @@ mod tests {
             Error::Policy(PolicyError::Invariant(message)) if message == "SNAPIF_BACKEND"
         ));
 
-        let client = Client::<AnyBackend>::from_name(Some("fake")).expect("fake");
+        let client = Client::<AnyBackend>::from_parts(Some("fake"), &super::BackendEnv::default())
+            .expect("fake");
         assert_eq!(client.backend().id(), "fake");
 
-        let Err(unknown) = Client::<AnyBackend>::from_name(Some("typesafe")) else {
-            panic!("typesafe must be policy");
-        };
-        assert!(matches!(
-            unknown,
-            Error::Policy(PolicyError::Invariant(message)) if message == "typesafe"
-        ));
+        #[cfg(not(feature = "http"))]
+        {
+            let Err(unknown) =
+                Client::<AnyBackend>::from_parts(Some("typesafe"), &super::BackendEnv::default())
+            else {
+                panic!("typesafe must be policy");
+            };
+            assert!(matches!(
+                unknown,
+                Error::Policy(PolicyError::Invariant(message)) if message == "typesafe"
+            ));
+        }
+        #[cfg(feature = "http")]
+        {
+            let Err(missing_key) =
+                Client::<AnyBackend>::from_parts(Some("typesafe"), &super::BackendEnv::default())
+            else {
+                panic!("typesafe without a key must be auth");
+            };
+            assert!(matches!(missing_key, Error::Auth(_)));
+            let selected = Client::<AnyBackend>::from_parts(
+                Some("typesafe"),
+                &super::BackendEnv {
+                    typesafe_key: Some("secret".to_string()),
+                    ..super::BackendEnv::default()
+                },
+            )
+            .expect("typesafe");
+            assert_eq!(selected.backend().id(), "typesafe");
+            let Err(cascade) = Client::<AnyBackend>::from_parts(
+                Some("typesafe"),
+                &super::BackendEnv {
+                    typesafe_key: Some("secret".to_string()),
+                    cascade: Some("http://127.0.0.1:9".to_string()),
+                    ..super::BackendEnv::default()
+                },
+            ) else {
+                panic!("cascade is not built in this PR");
+            };
+            assert!(matches!(cascade, Error::Policy(_)));
+        }
     }
 }
