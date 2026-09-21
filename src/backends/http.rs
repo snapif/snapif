@@ -1,4 +1,4 @@
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
@@ -56,7 +56,7 @@ impl HttpBackend {
             .build()
             .map_err(|err| Error::Backend(err.to_string()))?;
         Ok(Self {
-            origin: origin_string(&origin),
+            origin: origin.origin().ascii_serialization(),
             api_key,
             typesafe,
             client,
@@ -212,26 +212,11 @@ fn host_is_loopback(url: &Url) -> bool {
     let mut saw = false;
     for addr in addrs {
         saw = true;
-        if !is_loopback(addr.ip()) {
+        if !addr.ip().is_loopback() {
             return false;
         }
     }
     saw
-}
-
-fn is_loopback(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_loopback(),
-        IpAddr::V6(ip) => ip.is_loopback(),
-    }
-}
-
-fn origin_string(url: &Url) -> String {
-    let mut origin = url.clone();
-    origin.set_path("");
-    origin.set_query(None);
-    origin.set_fragment(None);
-    origin.to_string().trim_end_matches('/').to_string()
 }
 
 fn policy(message: &str) -> Error {
