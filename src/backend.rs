@@ -152,16 +152,23 @@ impl<B: Backend> Client<B> {
 }
 
 impl Client<AnyBackend> {
-    /// `SNAPIF_BACKEND` is required. Unset is [`Error::Policy`], not a silent fake.
+    /// `SNAPIF_BACKEND` is required. `NotPresent` and `NotUnicode` are
+    /// [`Error::Policy`], not a silent fake.
     pub fn from_env() -> Result<Self, Error> {
-        let name = std::env::var("SNAPIF_BACKEND")
-            .map_err(|_| Error::Policy(PolicyError::Invariant("SNAPIF_BACKEND".to_string())))?;
-        match name.as_str() {
-            "fake" => {
+        // NotPresent and NotUnicode. Neither selects a fake backend.
+        Self::from_name(std::env::var("SNAPIF_BACKEND").ok().as_deref())
+    }
+
+    fn from_name(name: Option<&str>) -> Result<Self, Error> {
+        match name {
+            None => Err(Error::Policy(PolicyError::Invariant(
+                "SNAPIF_BACKEND".to_string(),
+            ))),
+            Some("fake") => {
                 let policy = Policy::shipped("tool-gate")?;
-                Ok(Client::new(AnyBackend::Fake(FakeBackend::new())).policy(policy))
+                Ok(Self::new(AnyBackend::Fake(FakeBackend::new())).policy(policy))
             }
-            other => Err(Error::Policy(PolicyError::Invariant(other.to_string()))),
+            Some(other) => Err(Error::Policy(PolicyError::Invariant(other.to_string()))),
         }
     }
 }
@@ -361,5 +368,33 @@ fn untyped(
         _ => Err(DecodeError::TypeMismatch {
             key: QuestionId::new("answer"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AnyBackend, Backend, Client};
+    use crate::error::{Error, PolicyError};
+
+    #[test]
+    fn from_name_selects_without_env() {
+        let Err(unset) = Client::<AnyBackend>::from_name(None) else {
+            panic!("unset must be policy");
+        };
+        assert!(matches!(
+            unset,
+            Error::Policy(PolicyError::Invariant(message)) if message == "SNAPIF_BACKEND"
+        ));
+
+        let client = Client::<AnyBackend>::from_name(Some("fake")).expect("fake");
+        assert_eq!(client.backend().id(), "fake");
+
+        let Err(unknown) = Client::<AnyBackend>::from_name(Some("typesafe")) else {
+            panic!("typesafe must be policy");
+        };
+        assert!(matches!(
+            unknown,
+            Error::Policy(PolicyError::Invariant(message)) if message == "typesafe"
+        ));
     }
 }

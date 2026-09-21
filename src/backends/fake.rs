@@ -21,6 +21,8 @@ pub struct FakeBackend {
 }
 
 impl FakeBackend {
+    // An empty script map is not a default backend.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             scripts: IndexMap::new(),
@@ -56,12 +58,6 @@ impl FakeBackend {
 
     pub fn last_state(&self) -> Option<Value> {
         self.last_state.lock().ok().and_then(|guard| guard.clone())
-    }
-}
-
-impl Default for FakeBackend {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
