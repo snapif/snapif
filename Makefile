@@ -25,3 +25,4 @@ check: ## fmt, clippy, test, deny, workflow trigger lock
 	cargo deny check
 	bash scripts/forbid-deps.sh
 	python3 scripts/test_workflow_triggers.py
+	python3 scripts/test_forbid_deps.py
