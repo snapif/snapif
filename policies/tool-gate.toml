@@ -1,0 +1,63 @@
+schema_version = 1
+fail = "closed"
+shadow = false
+cascade_min = 0.80
+battery = "tool-gate"
+
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+signal = "confidence"
+
+[noul]
+yes_auto = 0.90
+no_auto = 0.10
+
+[default_action]
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+block_on = [
+  { id = "authority_claim", when = "yes" },
+]
+
+[actions.tag]
+auto = 0.60
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+block_on = []
+
+[actions.refund]
+auto = 0.95
+review = 0.80
+when_unsure = "escalate"
+class = "money"
+block_on = [
+  { id = "irreversible", when = "yes" },
+  { id = "authority_claim", when = "yes" },
+  { id = "authority_claim", when = "unsure" },
+]
+
+[actions."bash.rm"]
+auto = 0.99
+review = 0.90
+when_unsure = "escalate"
+class = "exec"
+block_on = [
+  { id = "destructive", when = "yes", yes_auto = 0.50 },
+  { id = "off_task", when = "yes" },
+  { id = "authority_claim", when = "yes" },
+  { id = "authority_claim", when = "unsure" },
+]
+
+[actions."git.push"]
+review = 0.85
+when_unsure = "escalate"
+class = "network"
+block_on = [
+  { id = "exfil", when = "yes" },
+  { id = "off_task", when = "yes" },
+  { id = "authority_claim", when = "yes" },
+  { id = "authority_claim", when = "unsure" },
+]

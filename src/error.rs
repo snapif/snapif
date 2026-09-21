@@ -1,4 +1,4 @@
-use crate::ids::QuestionId;
+use crate::ids::{ActionId, QuestionId};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -29,6 +29,19 @@ pub enum DecodeError {
     TypeMismatch { key: QuestionId },
     #[error("missing answer {key}")]
     MissingAnswer { key: QuestionId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum PolicyError {
+    #[error("unknown schema_version {0}")]
+    Schema(u32),
+    #[error("missing unsure path: escalate_below must be > 0")]
+    MissingUnsure,
+    #[error("threshold invariant violated: {0}")]
+    Invariant(String),
+    #[error("unknown action {0} and no default_action")]
+    UnknownAction(ActionId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
