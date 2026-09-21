@@ -6,6 +6,8 @@ use thiserror::Error;
 pub enum WireError {
     #[error("unknown question/answer type {0}")]
     UnknownType(String),
+    #[error("invalid json: {0}")]
+    Json(String),
     #[error("empty choice criteria")]
     EmptyChoice,
     #[error("choice has more than 255 options")]
@@ -23,6 +25,8 @@ pub enum DecodeError {
     UnknownLabel { key: QuestionId, label: String },
     #[error("out of range on {key}")]
     OutOfRange { key: QuestionId },
+    #[error("answer type mismatch on {key}")]
+    TypeMismatch { key: QuestionId },
     #[error("missing answer {key}")]
     MissingAnswer { key: QuestionId },
 }

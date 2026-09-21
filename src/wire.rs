@@ -2,7 +2,7 @@ use crate::error::{DecodeError, WireError};
 use crate::ids::QuestionId;
 use indexmap::IndexMap;
 use serde::Serialize;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 pub const ENCODE_CAP: usize = 256 * 1024;
 
@@ -81,8 +81,12 @@ pub struct Usage {
     pub output_tokens: u32,
 }
 
+fn json_error(err: impl ToString) -> WireError {
+    WireError::Json(err.to_string())
+}
+
 fn to_vec(value: &impl Serialize) -> Result<Vec<u8>, WireError> {
-    serde_json::to_vec(value).map_err(|err| WireError::UnknownType(err.to_string()))
+    serde_json::to_vec(value).map_err(json_error)
 }
 
 fn known_type(value: &Value) -> Result<(), WireError> {
@@ -123,28 +127,25 @@ fn validate(request: &WireRequest) -> Result<(), WireError> {
 }
 
 pub fn decode_request(bytes: &[u8]) -> Result<WireRequest, WireError> {
-    let value: Value =
-        serde_json::from_slice(bytes).map_err(|err| WireError::UnknownType(err.to_string()))?;
+    let value: Value = serde_json::from_slice(bytes).map_err(json_error)?;
     if let Some(questions) = value.get("questions").and_then(Value::as_object) {
         for question in questions.values() {
             known_type(question)?;
         }
     }
-    let request: WireRequest =
-        serde_json::from_value(value).map_err(|err| WireError::UnknownType(err.to_string()))?;
+    let request: WireRequest = serde_json::from_value(value).map_err(json_error)?;
     validate(&request)?;
     Ok(request)
 }
 
 pub fn decode_response(bytes: &[u8]) -> Result<WireResponse, WireError> {
-    let value: Value =
-        serde_json::from_slice(bytes).map_err(|err| WireError::UnknownType(err.to_string()))?;
+    let value: Value = serde_json::from_slice(bytes).map_err(json_error)?;
     if let Some(answers) = value.get("answers").and_then(Value::as_object) {
         for answer in answers.values() {
             known_type(answer)?;
         }
     }
-    serde_json::from_value(value).map_err(|err| WireError::UnknownType(err.to_string()))
+    serde_json::from_value(value).map_err(json_error)
 }
 
 pub fn encode(request: &WireRequest) -> Result<EncodedRequest, WireError> {
@@ -156,16 +157,14 @@ pub fn encode(request: &WireRequest) -> Result<EncodedRequest, WireError> {
             truncated_untrusted: false,
         });
     }
-    let Value::Object(map) = &request.state else {
+    let mut trimmed = request.clone();
+    let Value::Object(map) = &mut trimmed.state else {
         return Err(WireError::BodyCap(body.len()));
     };
-    let mut map: Map<String, Value> = map.clone();
     map.insert(
         "untrusted".to_string(),
         serde_json::json!({"truncated": true}),
     );
-    let mut trimmed = request.clone();
-    trimmed.state = Value::Object(map);
     let body = to_vec(&trimmed)?;
     if body.len() <= ENCODE_CAP {
         Ok(EncodedRequest {
@@ -212,7 +211,7 @@ pub fn check_response(
                 }
             }
             _ => {
-                return Err(DecodeError::OutOfRange {
+                return Err(DecodeError::TypeMismatch {
                     key: QuestionId::new(key),
                 });
             }

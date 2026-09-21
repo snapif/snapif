@@ -72,6 +72,44 @@ fn quickstart_response_checks() {
 }
 
 #[test]
+fn object_key_order_is_preserved() {
+    let department = decode_request(DEPARTMENT.as_bytes()).unwrap();
+    let Some(WireQuestion::Choice { criteria, .. }) = department.questions.get("department") else {
+        panic!("department is choice");
+    };
+    assert_eq!(
+        criteria.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["billing", "technical", "sales"]
+    );
+
+    let raw = r#"{"state":{},"questions":{"z":{"type":"noul","instructions":"later"},"a":{"type":"noul","instructions":"earlier"}}}"#;
+    let request = decode_request(raw.as_bytes()).unwrap();
+    assert_eq!(
+        request
+            .questions
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        vec!["z", "a"]
+    );
+}
+
+#[test]
+fn json_failures_are_not_unknown_type() {
+    let syntax = decode_request(b"{").unwrap_err();
+    assert!(matches!(syntax, WireError::Json(_)));
+    assert!(syntax.to_string().starts_with("invalid json: "));
+
+    let structural =
+        decode_request(br#"{"state":"x","questions":{"q":{"type":"choice","instructions":"x"}}}"#)
+            .unwrap_err();
+    assert!(matches!(structural, WireError::Json(_)));
+
+    let response = decode_response(b"not-json").unwrap_err();
+    assert!(matches!(response, WireError::Json(_)));
+}
+
+#[test]
 fn boolean_type_is_unknown() {
     let raw = r#"{"state":"x","model":"jev-latest","questions":{"flag":{"type":"boolean","instructions":"yes?"}}}"#;
     match decode_request(raw.as_bytes()) {
@@ -108,6 +146,17 @@ fn check_response_ranges() {
         check_response(&request.questions, &response),
         Err(snapif::error::DecodeError::UnknownLabel { label, .. }) if label == "nope"
     ));
+
+    let mismatched = decode_response(
+        br#"{"model":"m","answers":{"department":{"type":"noul","noul":0.5}},"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    )
+    .unwrap();
+    let mismatch = check_response(&request.questions, &mismatched).unwrap_err();
+    assert!(matches!(
+        &mismatch,
+        snapif::error::DecodeError::TypeMismatch { key } if *key == QuestionId::new("department")
+    ));
+    assert_eq!(mismatch.to_string(), "answer type mismatch on department");
 
     let noul = decode_request(NOUL_BARE.as_bytes()).unwrap();
     for (raw, ok) in [(0.0, true), (1.0, true), (-0.1, false), (1.1, false)] {
