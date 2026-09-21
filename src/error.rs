@@ -60,3 +60,28 @@ pub enum BackendError {
     #[error("{0}")]
     Transport(String),
 }
+
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum Error {
+    #[error("auth: {0}")]
+    Auth(String),
+    #[error("wire: {0}")]
+    Wire(#[from] WireError),
+    #[error("decode: {0}")]
+    Decode(#[from] DecodeError),
+    #[error("policy: {0}")]
+    Policy(#[from] PolicyError),
+    #[error("timeout after {0:?}")]
+    Timeout(std::time::Duration),
+    #[error("rate limited")]
+    RateLimit,
+    #[error("backend overloaded")]
+    Overloaded,
+    #[error("backend: {0}")]
+    Backend(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("empty action_id")]
+    EmptyActionId,
+}

@@ -21,4 +21,5 @@ thiserror = "2"
 toml = "0.8.23"
 
 [dev-dependencies]
+pollster = "0.4"
 trybuild = "1"
