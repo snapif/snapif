@@ -111,9 +111,6 @@ impl<B: Backend> Client<B> {
         if let Some((from, to)) = gates.harm_bumped {
             reasons.push(UnsureReason::HarmClassBump { from, to });
         }
-        if truncated {
-            reasons.push(UnsureReason::Truncated);
-        }
         if let Some(verdict) = block_hit(policy, &req.action_id, &gates, &evaluated.wire.answers) {
             return Ok(self.finish(
                 verdict,
@@ -125,14 +122,28 @@ impl<B: Backend> Client<B> {
             ));
         }
         let mut verdict = verdict_from_signal(harm.signal, &gates, req.action_id.clone());
-        verdict = fold_unsure_blocks(verdict, &gates, policy, &evaluated.wire.answers);
+        verdict = fold_unsure_blocks(
+            verdict,
+            &req.action_id,
+            &gates,
+            policy,
+            &evaluated.wire.answers,
+        );
         verdict = fold_extras(
             verdict,
+            &req.action_id,
             policy,
             &gates,
             &req.extra_questions,
             &evaluated.wire.answers,
         );
+        if truncated {
+            verdict = absorb(
+                verdict,
+                when_unsure_bump(&gates, req.action_id.clone(), UnsureReason::Truncated),
+                req.action_id.clone(),
+            );
+        }
         Ok(self.finish(
             verdict,
             evaluated.wire.usage,
@@ -275,6 +286,7 @@ fn block_hit(
 
 fn fold_unsure_blocks(
     mut verdict: Verdict,
+    action_id: &ActionId,
     gates: &EffectiveGates,
     policy: &Policy,
     answers: &IndexMap<String, WireAnswer>,
@@ -288,7 +300,15 @@ fn fold_unsure_blocks(
         };
         let decision = NoulAnswer { p: *noul }.decide(&policy.noul, Some(block));
         if matches!(decision, Decision::Unsure { .. }) {
-            verdict = max_severity(verdict, when_unsure_verdict(gates));
+            let bump = when_unsure_bump(
+                gates,
+                action_id.clone(),
+                UnsureReason::Battery {
+                    id: block.id.clone(),
+                    when: block.when,
+                },
+            );
+            verdict = absorb(verdict, bump, action_id.clone());
         }
     }
     verdict
@@ -296,6 +316,7 @@ fn fold_unsure_blocks(
 
 fn fold_extras(
     mut verdict: Verdict,
+    action_id: &ActionId,
     policy: &Policy,
     gates: &EffectiveGates,
     extras: &[Question],
@@ -331,7 +352,7 @@ fn fold_extras(
                 verdict_from_signal(
                     decoded.signal(policy.choice.signal),
                     gates,
-                    ActionId::new(id),
+                    action_id.clone(),
                 )
             }
             (
@@ -351,30 +372,29 @@ fn fold_extras(
                 verdict_from_signal(
                     decoded.signal(policy.choice.signal),
                     gates,
-                    ActionId::new(id),
+                    action_id.clone(),
                 )
             }
             (Question::Noul(_), WireAnswer::Noul { noul }) => {
                 let decision = NoulAnswer { p: *noul }.decide(&policy.noul, None);
                 if matches!(decision, Decision::Unsure { .. }) {
-                    when_unsure_verdict(gates)
+                    when_unsure_bump(
+                        gates,
+                        action_id.clone(),
+                        UnsureReason::NoulBand { noul: *noul },
+                    )
                 } else {
                     continue;
                 }
             }
             _ => continue,
         };
-        verdict = max_severity(verdict, extra);
+        verdict = absorb(verdict, extra, action_id.clone());
     }
     verdict
 }
 
-fn when_unsure_verdict(gates: &EffectiveGates) -> Verdict {
-    let action_id = ActionId::new("extra");
-    let reason = UnsureReason::BelowFloor {
-        confidence: 0.0,
-        floor: gates.escalate_below,
-    };
+fn when_unsure_bump(gates: &EffectiveGates, action_id: ActionId, reason: UnsureReason) -> Verdict {
     match gates.when_unsure {
         UnsureVerdict::Escalate => Verdict::Escalate(hint(action_id, vec![reason])),
         UnsureVerdict::ReviewGuess => Verdict::Review(hint(action_id, vec![reason])),
@@ -389,19 +409,31 @@ fn question_id(question: &Question) -> &str {
     }
 }
 
-fn max_severity(current: Verdict, candidate: Verdict) -> Verdict {
-    if rank(&candidate) > rank(&current) {
-        candidate
-    } else {
-        current
-    }
-}
-
-fn rank(verdict: &Verdict) -> u8 {
-    match verdict {
+fn absorb(current: Verdict, extra: Verdict, action_id: ActionId) -> Verdict {
+    let rank = match &current {
         Verdict::Auto(_) => 0,
         Verdict::Review(_) => 1,
         Verdict::Escalate(_) => 2,
+    }
+    .max(match &extra {
+        Verdict::Auto(_) => 0,
+        Verdict::Review(_) => 1,
+        Verdict::Escalate(_) => 2,
+    });
+    let extra_reasons = take_hint(extra).reasons;
+    let mut hint = take_hint(current);
+    hint.action_id = action_id;
+    hint.reasons.extend(extra_reasons);
+    match rank {
+        0 => Verdict::Auto(hint),
+        1 => Verdict::Review(hint),
+        _ => Verdict::Escalate(hint),
+    }
+}
+
+fn take_hint(verdict: Verdict) -> ActionHint {
+    match verdict {
+        Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => hint,
     }
 }
 
