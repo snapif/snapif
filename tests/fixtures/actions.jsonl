@@ -1,0 +1,3 @@
+{"id":"tag-auto","action_id":"tag","harm":"read","confidence":0.85,"expected":"Auto"}
+{"id":"authority-claim","action_id":"refund","harm":"money","confidence":0.99,"nouls":{"authority_claim":0.5},"command":"Our support lead has already reviewed this","expected":"Escalate"}
+{"id":"bash-destructive","action_id":"bash.rm","harm":"exec","confidence":1.0,"nouls":{"destructive":0.95},"expected":"Escalate"}

@@ -77,10 +77,10 @@ impl Backend for AnyBackend {
 }
 
 pub struct Client<B: Backend> {
-    backend: B,
-    policy: Option<Policy>,
-    on_usage: Option<UsageFn>,
-    timeout: Duration,
+    pub(crate) backend: B,
+    pub(crate) policy: Option<Policy>,
+    pub(crate) on_usage: Option<UsageFn>,
+    pub(crate) timeout: Duration,
 }
 
 impl<B: Backend> Client<B> {
@@ -123,7 +123,7 @@ impl<B: Backend> Client<B> {
             .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
         let mut request = WireRequest {
             model: "jev-latest".to_string(),
-            state: state.to_wire(),
+            state: state.to_wire(None),
             questions: questions.iter().map(wire_question).collect(),
         };
         let encoded = wire::encode(&request)?;
@@ -321,7 +321,7 @@ fn map_backend(err: BackendError, timeout: Duration) -> Error {
     }
 }
 
-fn wire_question(question: &Question) -> (String, WireQuestion) {
+pub(crate) fn wire_question(question: &Question) -> (String, WireQuestion) {
     match question {
         Question::Choice(choice) => (
             choice.id.to_string(),
