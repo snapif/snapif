@@ -139,6 +139,7 @@ fn choice_and_score_labels() {
 fn ui() {
     let tests = trybuild::TestCases::new();
     tests.compile_fail("tests/ui/decision_no_unsure.rs");
+    tests.compile_fail("tests/ui/policy_literal.rs");
     // A `_` arm is exhaustive on stable rustc, so the footgun compiles.
     tests.pass("tests/ui/decision_wildcard.rs");
 }

@@ -1,0 +1,7 @@
+error: cannot construct `snapif::Policy` with struct literal syntax due to private fields
+ --> tests/ui/policy_literal.rs:8:19
+  |
+8 |     let _policy = Policy {
+  |                   ^^^^^^
+  |
+  = note: ...and other private field `sealed` that was not provided

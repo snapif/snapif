@@ -33,6 +33,11 @@ fn default_battery() -> BatteryId {
     BatteryId::new("tool-gate")
 }
 
+/// Thresholds for `gate` and `ask`.
+///
+/// `shipped`, `from_toml_str`, and `load` are the constructors. They run
+/// `finish`, which is the only place that sets `sealed`. A struct literal
+/// outside this module cannot name that field.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 pub struct Policy {
     #[serde(default = "default_schema")]
@@ -52,6 +57,9 @@ pub struct Policy {
     pub actions: IndexMap<ActionId, ActionPolicy>,
     #[serde(default = "default_battery")]
     pub battery: BatteryId,
+    /// Set only by `finish` after the invariant checks.
+    #[serde(skip)]
+    sealed: bool,
 }
 
 fn default_schema() -> u32 {
@@ -194,12 +202,7 @@ impl Policy {
     }
 
     fn finish(mut self) -> Result<Self, PolicyError> {
-        if self.schema_version != 1 {
-            return Err(PolicyError::Schema(self.schema_version));
-        }
-        if self.choice.escalate_below == 0.0 {
-            return Err(PolicyError::MissingUnsure);
-        }
+        self.pre_invariant_checks()?;
         let Some(mut default_action) = self.default_action.take() else {
             return Err(PolicyError::Invariant("default_action".to_string()));
         };
@@ -209,7 +212,26 @@ impl Policy {
             row.action_id = key.clone();
         }
         self.check_invariants()?;
+        self.sealed = true;
         Ok(self)
+    }
+
+    pub(crate) fn ensure_checked(&self) -> Result<(), PolicyError> {
+        if !self.sealed {
+            return Err(PolicyError::Invariant("unchecked policy".to_string()));
+        }
+        self.pre_invariant_checks()?;
+        self.check_invariants()
+    }
+
+    fn pre_invariant_checks(&self) -> Result<(), PolicyError> {
+        if self.schema_version != 1 {
+            return Err(PolicyError::Schema(self.schema_version));
+        }
+        if self.choice.escalate_below == 0.0 {
+            return Err(PolicyError::MissingUnsure);
+        }
+        Ok(())
     }
 
     fn check_invariants(&self) -> Result<(), PolicyError> {
@@ -235,7 +257,9 @@ impl Policy {
                 "cascade_min is below its floor".to_string(),
             ));
         }
-        let default_action = self.default_action.as_ref().expect("checked");
+        let Some(default_action) = self.default_action.as_ref() else {
+            return Err(PolicyError::Invariant("default_action".to_string()));
+        };
         check_action(e, self.choice.review_below, default_action)?;
         for action in self.actions.values() {
             check_action(e, self.choice.review_below, action)?;
@@ -296,6 +320,7 @@ pub fn effective_gates(
     action_id: &ActionId,
     harm_class: Option<HarmClass>,
 ) -> Result<EffectiveGates, PolicyError> {
+    policy.ensure_checked()?;
     let Some(default_action) = policy.default_action.as_ref() else {
         return Err(PolicyError::UnknownAction(action_id.clone()));
     };
@@ -386,4 +411,25 @@ pub fn verdict_with_blocks(
         }
     }
     Ok(verdict_from_signal(s, &gates, action_id.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Policy, effective_gates};
+    use crate::ids::ActionId;
+
+    #[test]
+    fn raw_toml_is_unchecked_until_finish() {
+        let raw = include_str!("../policies/tool-gate.toml");
+        let policy: Policy = toml::from_str(raw).expect("toml");
+        assert!(!policy.sealed);
+        match effective_gates(&policy, &ActionId::new("tag"), None) {
+            Err(err) => assert!(err.to_string().contains("unchecked"), "{err}"),
+            Ok(_) => panic!("raw toml must not pass effective_gates"),
+        }
+
+        let checked = Policy::from_toml_str(raw).expect("finish");
+        assert!(checked.sealed);
+        assert!(effective_gates(&checked, &ActionId::new("tag"), None).is_ok());
+    }
 }
