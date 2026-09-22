@@ -7,7 +7,7 @@ use snapif::backend::Backend;
 use snapif::error::{BackendError, DecodeError};
 use snapif::question::{ChoiceLabels, ChoiceQ, NoulQ, ScoreLabels, ScoreQ};
 use snapif::verdict::UnsureReason;
-use snapif::wire::{WireQuestion, WireRequest};
+use snapif::wire::{ENCODE_CAP, WireQuestion, WireRequest};
 use snapif::{Client, Decision, Error, FakeBackend, Policy, Question, QuestionId, State};
 
 snapif::choice! {
@@ -177,5 +177,31 @@ fn score_maps_to_level() {
         out.score::<Frustration>(&QuestionId::new("frustration"))
             .expect("score"),
         Decision::Known(Frustration::Annoyed)
+    ));
+}
+
+#[test]
+fn ask_reports_truncated_untrusted_from_the_wire_cap() {
+    let client =
+        Client::new(FakeBackend::new().on_choice("department", "billing", 0.91)).policy(policy());
+    let small = pollster::block_on(client.ask(state(), vec![department()])).expect("small");
+    assert!(!small.truncated_untrusted);
+    assert!(matches!(
+        small
+            .choice::<Department>(&QuestionId::new("department"))
+            .expect("choice"),
+        Decision::Known(Department::Billing)
+    ));
+
+    let huge = State {
+        trusted: json!({"user_request": "invoice"}),
+        untrusted: json!("u".repeat(ENCODE_CAP)),
+    };
+    let out = pollster::block_on(client.ask(huge, vec![department()])).expect("truncated");
+    assert!(out.truncated_untrusted);
+    assert!(matches!(
+        out.choice::<Department>(&QuestionId::new("department"))
+            .expect("choice"),
+        Decision::Known(Department::Billing)
     ));
 }

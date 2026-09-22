@@ -141,6 +141,7 @@ impl<B: Backend> Client<B> {
     ///
     /// Known versus Unsure uses `choice.escalate_below` and `choice.signal`.
     /// Per-action auto thresholds are not consulted, and `prepared` is not injected.
+    /// A trimmed untrusted state is reported on [`AskOut`] and does not change the decision.
     pub async fn ask(&self, state: State, questions: Vec<Question>) -> Result<AskOut, Error> {
         let policy = self
             .policy
@@ -165,10 +166,14 @@ impl<B: Backend> Client<B> {
             on_usage(evaluated.wire.usage);
         }
         wire::check_response(&request.questions, &evaluated.wire)?;
+        let Evaluated {
+            wire,
+            mut meta,
+            backend_id,
+        } = evaluated;
         let mut decisions = IndexMap::new();
-        let mut meta = IndexMap::new();
         for (id, question) in &request.questions {
-            let Some(answer) = evaluated.wire.answers.get(id) else {
+            let Some(answer) = wire.answers.get(id) else {
                 continue;
             };
             record_prob_sum(&mut meta, id, answer);
@@ -178,9 +183,10 @@ impl<B: Backend> Client<B> {
         }
         Ok(AskOut {
             decisions,
-            usage: evaluated.wire.usage,
-            backend_id: evaluated.backend_id,
+            usage: wire.usage,
+            backend_id,
             meta,
+            truncated_untrusted: encoded.truncated_untrusted,
         })
     }
 }
@@ -317,6 +323,8 @@ pub struct AskOut {
     pub usage: Usage,
     pub backend_id: String,
     pub meta: IndexMap<String, AnswerMeta>,
+    /// Encode replaced `state.untrusted` so the body fit the wire cap.
+    pub truncated_untrusted: bool,
 }
 
 impl AskOut {
@@ -425,13 +433,7 @@ fn record_prob_sum(meta: &mut IndexMap<String, AnswerMeta>, id: &str, answer: &W
     };
     let (_, original_sum) = renormalize_probabilities(probabilities);
     if (original_sum - 1.0).abs() > 1e-6 {
-        meta.insert(
-            id.to_string(),
-            AnswerMeta {
-                original_prob_sum: Some(original_sum),
-                ..AnswerMeta::default()
-            },
-        );
+        meta.entry(id.to_string()).or_default().original_prob_sum = Some(original_sum);
     }
 }
 

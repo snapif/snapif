@@ -380,3 +380,18 @@ fn success_over_response_cap_is_transport() {
         other => panic!("expected transport, got {other:?}"),
     }
 }
+
+#[test]
+fn non_success_over_response_cap_is_transport() {
+    // 422 would be Rejected if the capped body were discarded. One POST.
+    let body = "x".repeat(256 * 1024 + 1);
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("422 Unprocessable Entity", "", &body)],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    match err {
+        BackendError::Transport(message) => assert!(message.contains("response cap"), "{message}"),
+        other => panic!("expected transport, got {other:?}"),
+    }
+}

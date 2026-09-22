@@ -7,10 +7,11 @@ use snapif::backends::cascade::{CascadeRule, Cascaded};
 use snapif::error::BackendError;
 use snapif::ids::{ActionId, QuestionId};
 use snapif::policy::Policy;
+use snapif::question::ChoiceQ;
 use snapif::state::{PreparedCall, State};
 use snapif::verdict::UnsureReason;
 use snapif::wire::{Usage, WireAnswer, WireQuestion, WireRequest};
-use snapif::{Client, GateRequest, Verdict};
+use snapif::{Client, GateRequest, Question, Verdict};
 
 struct Script {
     id: &'static str,
@@ -195,6 +196,51 @@ fn below_min_retries_only_that_id() {
         evaluated.meta["retry"].cascade_hop,
         Some(CascadeHop::Fallback)
     );
+}
+
+#[test]
+fn ask_keeps_fallback_hop_when_prob_sum_is_overlaid() {
+    // 0.25 + 0.25 is off 1, so ask must overlay original_prob_sum on the hop row.
+    let mut probabilities = IndexMap::new();
+    probabilities.insert("billing".to_string(), 0.25);
+    probabilities.insert("sales".to_string(), 0.25);
+    let low = WireAnswer::Choice {
+        choice: "billing".to_string(),
+        probabilities: probabilities.clone(),
+        confidence: 0.4,
+    };
+    let high = WireAnswer::Choice {
+        choice: "billing".to_string(),
+        probabilities,
+        confidence: 0.99,
+    };
+    let pair = pair(
+        vec![("retry".into(), low)],
+        None,
+        vec![("retry".into(), high)],
+        None,
+        rule_empty(),
+    );
+    let mut criteria = IndexMap::new();
+    criteria.insert("billing".to_string(), serde_json::json!("Payments"));
+    let client = Client::new(pair.cascade).policy(Policy::shipped("tool-gate").expect("policy"));
+    let out = pollster::block_on(client.ask(
+        State {
+            trusted: serde_json::json!({}),
+            untrusted: serde_json::json!(null),
+        },
+        vec![Question::Choice(ChoiceQ {
+            id: QuestionId::new("retry"),
+            instructions: serde_json::json!("Which department?"),
+            criteria,
+        })],
+    ))
+    .expect("ask");
+    let row = out.meta.get("retry").expect("meta");
+    assert_eq!(row.cascade_hop, Some(CascadeHop::Fallback));
+    let sum = row.original_prob_sum.expect("original_prob_sum");
+    assert!((sum - 0.5).abs() < 1e-9);
+    assert!(!row.first_hop_error);
 }
 
 #[test]
