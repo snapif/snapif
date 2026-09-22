@@ -57,6 +57,37 @@ fn fixtures_round_trip() {
 }
 
 #[test]
+fn null_choice_criteria_and_object_instructions_round_trip() {
+    let raw = r#"{"model":"jev-latest","state":{"user_message":"draft"},"questions":{"policy_violation":{"type":"choice","instructions":{"question":"Which policy does `user_message` violate?"},"criteria":{"policy0":null}}}}"#;
+    let request = round_trip(raw);
+    let Some(WireQuestion::Choice {
+        instructions,
+        criteria,
+    }) = request.questions.get("policy_violation")
+    else {
+        panic!("policy_violation is choice");
+    };
+    assert_eq!(
+        instructions["question"],
+        json!("Which policy does `user_message` violate?")
+    );
+    assert_eq!(criteria["policy0"], Value::Null);
+
+    let encoded = encode(&request).expect("encode");
+    let body: Value = serde_json::from_slice(&encoded.body).expect("json");
+    let criteria_json = body["questions"]["policy_violation"]["criteria"]
+        .as_object()
+        .expect("criteria object");
+    assert_eq!(criteria_json.get("policy0"), Some(&Value::Null));
+
+    let response = decode_response(
+        br#"{"model":"m","answers":{"policy_violation":{"type":"choice","choice":"policy0","probabilities":{},"confidence":0.5}},"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    )
+    .expect("response");
+    check_response(&request.questions, &response).expect("null choice label");
+}
+
+#[test]
 fn quickstart_response_checks() {
     let mut questions = IndexMap::new();
     for raw in [DEPARTMENT, FRUSTRATION, NOUL_BARE] {
