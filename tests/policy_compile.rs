@@ -64,6 +64,14 @@ fn default_action_is_required() {
 }
 
 #[test]
+fn bad_toml_is_not_a_threshold_invariant() {
+    let err = Policy::from_toml_str("schema_version = ").expect_err("toml");
+    let message = err.to_string();
+    assert!(message.contains("TOML"), "{message}");
+    assert!(!message.contains("threshold invariant"), "{message}");
+}
+
+#[test]
 fn seven_numeric_examples() {
     assert_eq!(kind("tag", 0.85, &[]), "auto");
     assert_eq!(

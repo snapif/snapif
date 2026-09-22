@@ -180,7 +180,7 @@ impl Policy {
             "tool-gate" => include_str!("../policies/tool-gate.toml"),
             "triage" => include_str!("../policies/triage.toml"),
             other => {
-                return Err(PolicyError::Invariant(format!("unknown policy {other}")));
+                return Err(PolicyError::Config(format!("unknown policy {other}")));
             }
         };
         Self::from_toml_str(raw)
@@ -200,7 +200,7 @@ impl Policy {
 
     pub fn from_toml_str(raw: &str) -> Result<Self, PolicyError> {
         let policy: Self =
-            toml::from_str(raw).map_err(|err| PolicyError::Invariant(err.to_string()))?;
+            toml::from_str(raw).map_err(|err| PolicyError::Config(err.to_string()))?;
         policy.finish()
     }
 

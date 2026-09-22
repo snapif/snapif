@@ -146,7 +146,7 @@ impl<B: Backend> Client<B> {
     pub fn model(mut self, id: impl AsRef<str>) -> Result<Self, Error> {
         let id = id.as_ref().trim();
         if id.is_empty() {
-            return Err(Error::Policy(PolicyError::Invariant(
+            return Err(Error::Policy(PolicyError::Config(
                 "SNAPIF_MODEL".to_string(),
             )));
         }
@@ -279,6 +279,10 @@ impl Client<AnyBackend> {
 
     #[cfg_attr(not(feature = "http"), allow(unused_variables))]
     fn from_parts(name: Option<&str>, shadow: bool, env: &BackendEnv) -> Result<Self, Error> {
+        let name = match name.map(str::trim) {
+            None | Some("") => None,
+            Some(text) => Some(text),
+        };
         let policy = env_policy(env)?;
         let client = match name {
             None => {
@@ -320,13 +324,13 @@ fn apply_runtime(
     if let Some(raw) = nonempty(env.timeout_ms.as_deref()) {
         let ms: u64 = raw
             .parse()
-            .map_err(|_| Error::Policy(PolicyError::Invariant("SNAPIF_TIMEOUT_MS".to_string())))?;
+            .map_err(|_| Error::Policy(PolicyError::Config("SNAPIF_TIMEOUT_MS".to_string())))?;
         client = client.timeout(Duration::from_millis(ms));
     }
     if let Some(raw) = env.model.as_deref() {
         let model = raw.trim();
         if model.is_empty() {
-            return Err(Error::Policy(PolicyError::Invariant(
+            return Err(Error::Policy(PolicyError::Config(
                 "SNAPIF_MODEL".to_string(),
             )));
         }
@@ -354,7 +358,7 @@ fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<An
             )?,
             "compatible" => {
                 let Some(base) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
-                    return Err(Error::Policy(PolicyError::Invariant(
+                    return Err(Error::Policy(PolicyError::Config(
                         "SNAPIF_BASE_URL".to_string(),
                     )));
                 };
@@ -378,7 +382,7 @@ fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<An
             )?),
             "compatible" => {
                 let Some(base) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
-                    return Err(Error::Policy(PolicyError::Invariant(
+                    return Err(Error::Policy(PolicyError::Config(
                         "SNAPIF_BASE_URL".to_string(),
                     )));
                 };
@@ -403,7 +407,7 @@ fn compatible_backend(
     allow_private_http: bool,
 ) -> Result<crate::backends::http::HttpBackend, Error> {
     let url = url::Url::parse(raw)
-        .map_err(|_| Error::Policy(PolicyError::Invariant(invariant.to_string())))?;
+        .map_err(|_| Error::Policy(PolicyError::Config(invariant.to_string())))?;
     if allow_private_http {
         crate::backends::http::HttpBackend::compatible_private(url, key)
     } else {
@@ -629,6 +633,9 @@ mod tests {
                     && message.contains("typesafe")
                     && message.contains("compatible")
         ));
+        let spaced =
+            Client::<AnyBackend>::from_parts(Some("  fake  "), false, &env).expect("trimmed fake");
+        assert_eq!(spaced.backend().id(), "fake");
         let shown = unset.to_string();
         assert!(!shown.contains("threshold invariant"), "{shown}");
         let Err(unknown_name) = Client::<AnyBackend>::from_parts(Some("laya"), false, &env) else {
@@ -748,13 +755,10 @@ mod tests {
                     ..super::BackendEnv::default()
                 },
             );
-            assert!(
-                matches!(
-                    err,
-                    Err(Error::Policy(PolicyError::Invariant(message))) if message == "SNAPIF_MODEL"
-                ),
-                "{blank:?}"
-            );
+            let Err(err) = err else {
+                panic!("blank model must fail");
+            };
+            assert_eq!(err.to_string(), "policy: SNAPIF_MODEL", "{blank:?} {err}");
         }
 
         let trimmed = Client::<AnyBackend>::from_parts(

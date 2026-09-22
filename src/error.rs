@@ -43,6 +43,9 @@ pub enum PolicyError {
     /// `SNAPIF_BACKEND` is missing or not a known name. Not a gate threshold.
     #[error("{0}")]
     BackendName(String),
+    /// A setting or policy file is wrong. Not a gate threshold.
+    #[error("{0}")]
+    Config(String),
     #[error("unknown action {0} and no default_action")]
     UnknownAction(ActionId),
 }
