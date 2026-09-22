@@ -40,6 +40,9 @@ pub enum PolicyError {
     MissingUnsure,
     #[error("threshold invariant violated: {0}")]
     Invariant(String),
+    /// `SNAPIF_BACKEND` is missing or not a known name. Not a gate threshold.
+    #[error("{0}")]
+    BackendName(String),
     #[error("unknown action {0} and no default_action")]
     UnknownAction(ActionId),
 }

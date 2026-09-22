@@ -106,6 +106,12 @@ fn gate_without_backend_exits_1_and_fake_does_not_auto() {
         "{}",
         String::from_utf8_lossy(&unset.stderr)
     );
+    let unset_err = String::from_utf8_lossy(&unset.stderr);
+    assert!(
+        unset_err.contains("SNAPIF_BACKEND must be fake, typesafe, or compatible"),
+        "{unset_err}"
+    );
+    assert!(!unset_err.contains("threshold invariant"), "{unset_err}");
     assert!(!String::from_utf8_lossy(&unset.stdout).contains("auto"));
 
     let fake = bin()
