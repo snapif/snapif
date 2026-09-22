@@ -71,6 +71,70 @@ fn missing_paths_name_the_file() {
 }
 
 #[test]
+fn ask_array_is_not_ok() {
+    let path = std::env::temp_dir().join(format!("snapif-array-{}.json", std::process::id()));
+    fs::write(&path, "[]").expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("state must be an object"), "{err}");
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn origin_userinfo_is_not_a_threshold() {
+    let call = std::env::temp_dir().join(format!("snapif-origin-{}.json", std::process::id()));
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"untrusted":null}"#,
+    )
+    .expect("call");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "compatible")
+        .env("SNAPIF_BASE_URL", "http://user:pass@127.0.0.1:9")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(call);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("origin userinfo"), "{err}");
+    assert!(!err.contains("threshold invariant"), "{err}");
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn refused_loopback_says_backend() {
+    let call = std::env::temp_dir().join(format!("snapif-refused-{}.json", std::process::id()));
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"untrusted":null}"#,
+    )
+    .expect("call");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "compatible")
+        .env("SNAPIF_BASE_URL", "http://127.0.0.1:9")
+        .env("SNAPIF_API_KEY", "abc")
+        .env("SNAPIF_TIMEOUT_MS", "400")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(call);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(11), "{err}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "escalate");
+    assert!(err.contains("backend"), "{err}");
+}
+
+#[test]
 fn replay_blank_file_exits_1() {
     let path = std::env::temp_dir().join(format!("snapif-blank-{}.jsonl", std::process::id()));
     fs::write(&path, "\n\n").expect("write");
