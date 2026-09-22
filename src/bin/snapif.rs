@@ -194,7 +194,7 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
     let url = match url::Url::parse(raw) {
         Ok(url) => url,
         Err(_) => {
-            eprintln!("SNAPIF_BASE_URL");
+            eprintln!("--base-url: the value is not a URL");
             return 1;
         }
     };

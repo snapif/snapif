@@ -238,7 +238,7 @@ impl Client<AnyBackend> {
         let client = match name {
             None => {
                 return Err(Error::Policy(PolicyError::Invariant(
-                    "SNAPIF_BACKEND".to_string(),
+                    "SNAPIF_BACKEND must be fake, typesafe, or compatible".to_string(),
                 )));
             }
             Some("fake") => {
@@ -523,7 +523,11 @@ mod tests {
         };
         assert!(matches!(
             unset,
-            Error::Policy(PolicyError::Invariant(message)) if message == "SNAPIF_BACKEND"
+            Error::Policy(PolicyError::Invariant(message))
+                if message.contains("SNAPIF_BACKEND")
+                    && message.contains("fake")
+                    && message.contains("typesafe")
+                    && message.contains("compatible")
         ));
 
         let client = Client::<AnyBackend>::from_parts(Some("fake"), false, &env).expect("fake");

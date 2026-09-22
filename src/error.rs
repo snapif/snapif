@@ -47,9 +47,9 @@ pub enum PolicyError {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum BackendError {
-    #[error("auth")]
+    #[error("auth: authentication failed")]
     Auth,
-    #[error("timeout")]
+    #[error("timeout: the deadline was exceeded")]
     Timeout,
     #[error("rate limited")]
     RateLimit,

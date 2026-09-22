@@ -113,6 +113,20 @@ fn vectors_pass_locally_and_base_url_does_not_connect() {
 
 #[cfg(feature = "http")]
 #[test]
+fn base_url_that_is_not_a_url_exits_1() {
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(manifest("tests/conformance"))
+        .args(["--base-url", "not a url"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("--base-url"), "{stderr}");
+}
+
+#[cfg(feature = "http")]
+#[test]
 fn base_url_posts_a_vector_and_checks_the_response() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
