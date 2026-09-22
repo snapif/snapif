@@ -79,6 +79,7 @@ jobs:
       - run: cargo deny check
       - run: bash scripts/forbid-deps.sh
       - run: python3 scripts/test_workflow_triggers.py
+      - run: python3 scripts/test_forbid_deps.py
 
   workflows:
     name: Workflows
