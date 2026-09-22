@@ -221,6 +221,8 @@ struct BackendEnv {
     snapif_key: Option<String>,
     #[cfg(feature = "http")]
     base_url: Option<String>,
+    #[cfg(feature = "http")]
+    allow_private_http: bool,
     #[cfg_attr(not(feature = "http"), allow(dead_code))]
     cascade: Option<String>,
     model: Option<String>,
@@ -239,7 +241,12 @@ impl Client<AnyBackend> {
     /// a `.toml` path; unset uses `tool-gate`.
     /// `typesafe` reads `TYPESAFE_API_KEY` and fails with [`Error::Auth`] when
     /// that key is missing. `compatible` reads `SNAPIF_BASE_URL` (origin only)
-    /// and `SNAPIF_API_KEY` (optional on loopback). When
+    /// and `SNAPIF_API_KEY` (optional on loopback). `SNAPIF_ALLOW_PRIVATE_HTTP`
+    /// of `1` or `true` also allows `http` when every resolved address is
+    /// loopback, link-local, RFC1918, or IPv6 unique-local. Unset keeps `http`
+    /// on loopback only. The check is at construction; a later DNS answer can
+    /// differ. The same flag applies to `SNAPIF_CASCADE_BASE_URL`. A
+    /// non-loopback origin still requires `SNAPIF_API_KEY`. When
     /// `SNAPIF_CASCADE_BASE_URL` is set and the backend is not `fake`, the
     /// first hop is that origin with `SNAPIF_API_KEY` and the fallback is
     /// `typesafe` or `compatible`. Without the `http` feature, `typesafe`,
@@ -257,6 +264,11 @@ impl Client<AnyBackend> {
             snapif_key: std::env::var("SNAPIF_API_KEY").ok(),
             #[cfg(feature = "http")]
             base_url: std::env::var("SNAPIF_BASE_URL").ok(),
+            #[cfg(feature = "http")]
+            allow_private_http: matches!(
+                std::env::var("SNAPIF_ALLOW_PRIVATE_HTTP").ok().as_deref(),
+                Some("1" | "true" | "TRUE" | "True")
+            ),
             cascade: std::env::var("SNAPIF_CASCADE_BASE_URL").ok(),
             model: std::env::var("SNAPIF_MODEL").ok(),
             timeout_ms: std::env::var("SNAPIF_TIMEOUT_MS").ok(),
@@ -326,7 +338,12 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
 #[cfg(feature = "http")]
 fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<AnyBackend>, Error> {
     let backend = if let Some(raw) = nonempty(env.cascade.as_deref()) {
-        let first = compatible_backend(raw, env.snapif_key.clone(), "SNAPIF_CASCADE_BASE_URL")?;
+        let first = compatible_backend(
+            raw,
+            env.snapif_key.clone(),
+            "SNAPIF_CASCADE_BASE_URL",
+            env.allow_private_http,
+        )?;
         let fallback = match name {
             "typesafe" => crate::backends::http::HttpBackend::typesafe(
                 env.typesafe_key.clone().unwrap_or_default(),
@@ -337,7 +354,12 @@ fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<An
                         "SNAPIF_BASE_URL".to_string(),
                     )));
                 };
-                compatible_backend(base, env.snapif_key.clone(), "SNAPIF_BASE_URL")?
+                compatible_backend(
+                    base,
+                    env.snapif_key.clone(),
+                    "SNAPIF_BASE_URL",
+                    env.allow_private_http,
+                )?
             }
             _ => return Err(Error::Policy(PolicyError::Invariant(name.to_string()))),
         };
@@ -360,6 +382,7 @@ fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<An
                     base,
                     env.snapif_key.clone(),
                     "SNAPIF_BASE_URL",
+                    env.allow_private_http,
                 )?)
             }
             _ => return Err(Error::Policy(PolicyError::Invariant(name.to_string()))),
@@ -373,10 +396,15 @@ fn compatible_backend(
     raw: &str,
     key: Option<String>,
     invariant: &str,
+    allow_private_http: bool,
 ) -> Result<crate::backends::http::HttpBackend, Error> {
     let url = url::Url::parse(raw)
         .map_err(|_| Error::Policy(PolicyError::Invariant(invariant.to_string())))?;
-    crate::backends::http::HttpBackend::compatible(url, key)
+    if allow_private_http {
+        crate::backends::http::HttpBackend::compatible_private(url, key)
+    } else {
+        crate::backends::http::HttpBackend::compatible(url, key)
+    }
 }
 
 #[derive(Debug)]
@@ -718,5 +746,35 @@ mod tests {
         )
         .expect("trimmed");
         assert_eq!(trimmed.model, "local-model");
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn private_http_flag_is_off_unless_set() {
+        let off = Client::<AnyBackend>::from_parts(
+            Some("compatible"),
+            false,
+            &super::BackendEnv {
+                base_url: Some("http://10.0.0.1".to_string()),
+                snapif_key: Some("snapif-key".to_string()),
+                ..super::BackendEnv::default()
+            },
+        );
+        assert!(matches!(off, Err(Error::Policy(_))));
+
+        let on = Client::<AnyBackend>::from_parts(
+            Some("compatible"),
+            false,
+            &super::BackendEnv {
+                base_url: Some("http://10.0.0.1".to_string()),
+                snapif_key: Some("snapif-key".to_string()),
+                allow_private_http: true,
+                ..super::BackendEnv::default()
+            },
+        );
+        let Ok(on) = on else {
+            panic!("private http");
+        };
+        assert_eq!(on.backend().id(), "compatible");
     }
 }

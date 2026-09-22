@@ -1,4 +1,4 @@
-use std::net::ToSocketAddrs;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
@@ -32,9 +32,29 @@ impl HttpBackend {
     /// Caller-supplied origin. The path is always `/v1/systemone`.
     ///
     /// `api_key` is `SNAPIF_API_KEY`. It is optional on loopback and required
-    /// otherwise. This constructor never reads `TYPESAFE_API_KEY`.
+    /// otherwise. This constructor never reads `TYPESAFE_API_KEY`. `http` is
+    /// limited to loopback.
     pub fn compatible(base_url: Url, api_key: Option<String>) -> Result<Self, Error> {
-        validate_origin(&base_url)?;
+        Self::open_origin(base_url, api_key, false)
+    }
+
+    /// Same origin rules as [`Self::compatible`], plus private-network `http`.
+    ///
+    /// Every resolved address must be loopback, IPv4 link-local, RFC1918, or
+    /// IPv6 unique-local or link-local. One public address rejects the set.
+    /// IPv4-mapped IPv6 is rejected. The check runs at construction, so a
+    /// later DNS answer can differ. A non-loopback origin still requires
+    /// `api_key`.
+    pub fn compatible_private(base_url: Url, api_key: Option<String>) -> Result<Self, Error> {
+        Self::open_origin(base_url, api_key, true)
+    }
+
+    fn open_origin(
+        base_url: Url,
+        api_key: Option<String>,
+        allow_private_http: bool,
+    ) -> Result<Self, Error> {
+        validate_origin(&base_url, allow_private_http)?;
         let loopback = host_is_loopback(&base_url);
         if !loopback && api_key.as_ref().is_none_or(String::is_empty) {
             return Err(Error::Auth("SNAPIF_API_KEY".to_string()));
@@ -185,7 +205,7 @@ async fn read_limited(mut response: reqwest::Response) -> Result<Vec<u8>, Backen
     Ok(buf)
 }
 
-fn validate_origin(url: &Url) -> Result<(), Error> {
+fn validate_origin(url: &Url, allow_private_http: bool) -> Result<(), Error> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(policy("origin userinfo"));
     }
@@ -197,28 +217,48 @@ fn validate_origin(url: &Url) -> Result<(), Error> {
     }
     match url.scheme() {
         "https" => Ok(()),
-        "http" if host_is_loopback(url) => Ok(()),
-        "http" => Err(policy("http origin must resolve to loopback")),
+        "http" => match resolved_ips(url) {
+            Some(ips) if ips.iter().all(IpAddr::is_loopback) => Ok(()),
+            Some(ips) if allow_private_http && addresses_allowed(&ips) => Ok(()),
+            _ if allow_private_http => Err(policy("http origin must resolve to a private address")),
+            _ => Err(policy("http origin must resolve to loopback")),
+        },
         _ => Err(policy("origin scheme")),
     }
 }
 
-fn host_is_loopback(url: &Url) -> bool {
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let port = url.port_or_known_default().unwrap_or(80);
-    let Ok(addrs) = (host, port).to_socket_addrs() else {
-        return false;
-    };
-    let mut saw = false;
-    for addr in addrs {
-        saw = true;
-        if !addr.ip().is_loopback() {
-            return false;
+fn resolved_ips(url: &Url) -> Option<Vec<IpAddr>> {
+    match url.host()? {
+        url::Host::Ipv4(ip) => Some(vec![IpAddr::V4(ip)]),
+        url::Host::Ipv6(ip) => Some(vec![IpAddr::V6(ip)]),
+        url::Host::Domain(host) => {
+            let port = url.port_or_known_default().unwrap_or(80);
+            let ips: Vec<_> = (host, port)
+                .to_socket_addrs()
+                .ok()?
+                .map(|addr| addr.ip())
+                .collect();
+            if ips.is_empty() { None } else { Some(ips) }
         }
     }
-    saw
+}
+
+fn addresses_allowed(ips: &[IpAddr]) -> bool {
+    !ips.is_empty() && ips.iter().copied().all(ip_is_allowed_private)
+}
+
+fn ip_is_allowed_private(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.to_ipv4_mapped().is_none()
+                && (v6.is_loopback() || v6.is_unique_local() || v6.is_unicast_link_local())
+        }
+    }
+}
+
+fn host_is_loopback(url: &Url) -> bool {
+    resolved_ips(url).is_some_and(|ips| ips.iter().all(IpAddr::is_loopback))
 }
 
 fn policy(message: &str) -> Error {
@@ -249,6 +289,80 @@ mod tests {
         assert_eq!(loopback.id(), "compatible");
         assert_eq!(loopback.endpoint(), "http://127.0.0.1:9/v1/systemone");
         assert!(HttpBackend::compatible(url("https://example.com"), None).is_err());
+    }
+
+    #[test]
+    fn private_http_stays_off_without_the_opt_in() {
+        let key = Some("snapif-key".to_string());
+        for origin in ["http://192.168.1.50", "http://10.0.0.1", "http://[fd00::1]"] {
+            assert!(
+                HttpBackend::compatible(url(origin), key.clone()).is_err(),
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_http_opt_in_allows_lan_literals() {
+        let key = Some("snapif-key".to_string());
+        for origin in [
+            "http://192.168.1.50",
+            "http://10.0.0.1",
+            "http://172.16.0.1",
+            "http://169.254.1.1",
+            "http://[fd00::1]",
+            "http://[fe80::1]",
+        ] {
+            let backend = HttpBackend::compatible_private(url(origin), key.clone())
+                .unwrap_or_else(|err| panic!("{origin} should be private http: {err}"));
+            assert_eq!(backend.id(), "compatible");
+            assert!(
+                backend.endpoint().ends_with("/v1/systemone"),
+                "{}",
+                backend.endpoint()
+            );
+        }
+    }
+
+    #[test]
+    fn private_http_opt_in_still_rejects_public_and_non_origins() {
+        let key = Some("snapif-key".to_string());
+        for origin in [
+            "http://8.8.8.8",
+            "http://100.64.0.1",
+            "http://0.0.0.0",
+            "http://[::ffff:192.168.1.1]",
+            "http://192.168.1.50/v1",
+            "http://user:pw@192.168.1.50",
+            "http://192.168.1.50?q=1",
+            "http://192.168.1.50#frag",
+        ] {
+            assert!(
+                HttpBackend::compatible_private(url(origin), key.clone()).is_err(),
+                "{origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn private_http_without_a_key_is_auth() {
+        let err = HttpBackend::compatible_private(url("http://192.168.1.50"), None);
+        assert!(matches!(err, Err(Error::Auth(_))));
+    }
+
+    #[test]
+    fn mixed_public_address_is_refused() {
+        let private = [
+            "192.168.1.50".parse().expect("lan"),
+            "10.0.0.1".parse().expect("lan"),
+        ];
+        assert!(addresses_allowed(&private));
+        let mixed = [
+            "192.168.1.50".parse().expect("lan"),
+            "8.8.8.8".parse().expect("public"),
+        ];
+        assert!(!addresses_allowed(&mixed));
+        assert!(!addresses_allowed(&[]));
     }
 
     fn url(text: &str) -> Url {
