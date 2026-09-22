@@ -438,6 +438,6 @@ mod tests {
 
         let checked = Policy::from_toml_str(raw).expect("finish");
         assert!(checked.sealed);
-        assert!(effective_gates(&checked, &ActionId::new("tag"), None).is_ok());
+        effective_gates(&checked, &ActionId::new("tag"), None).expect("sealed policy");
     }
 }
