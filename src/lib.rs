@@ -12,6 +12,7 @@ mod macros;
 pub mod policy;
 pub mod question;
 pub mod state;
+pub mod triage;
 pub mod usage;
 pub mod verdict;
 pub mod wire;
