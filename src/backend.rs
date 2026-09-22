@@ -282,7 +282,7 @@ impl Client<AnyBackend> {
         let policy = env_policy(env)?;
         let client = match name {
             None => {
-                return Err(Error::Policy(PolicyError::Invariant(
+                return Err(Error::Policy(PolicyError::BackendName(
                     "SNAPIF_BACKEND must be fake, typesafe, or compatible".to_string(),
                 )));
             }
@@ -291,10 +291,14 @@ impl Client<AnyBackend> {
             Some(name @ ("typesafe" | "compatible")) => http_client(name, env, policy)?,
             #[cfg(not(feature = "http"))]
             Some(name @ ("typesafe" | "compatible")) => {
-                return Err(Error::Policy(PolicyError::Invariant(name.to_string())));
+                return Err(Error::Policy(PolicyError::BackendName(format!(
+                    "SNAPIF_BACKEND {name} needs the http feature"
+                ))));
             }
             Some(other) => {
-                return Err(Error::Policy(PolicyError::Invariant(other.to_string())));
+                return Err(Error::Policy(PolicyError::BackendName(format!(
+                    "unknown SNAPIF_BACKEND {other}; expected fake, typesafe, or compatible"
+                ))));
             }
         };
         let client = apply_runtime(client, env)?;
@@ -619,12 +623,27 @@ mod tests {
         };
         assert!(matches!(
             unset,
-            Error::Policy(PolicyError::Invariant(message))
+            Error::Policy(PolicyError::BackendName(ref message))
                 if message.contains("SNAPIF_BACKEND")
                     && message.contains("fake")
                     && message.contains("typesafe")
                     && message.contains("compatible")
         ));
+        let shown = unset.to_string();
+        assert!(!shown.contains("threshold invariant"), "{shown}");
+        let Err(unknown_name) = Client::<AnyBackend>::from_parts(Some("laya"), false, &env) else {
+            panic!("unknown backend");
+        };
+        let unknown_text = unknown_name.to_string();
+        assert!(
+            unknown_text.contains("unknown SNAPIF_BACKEND laya"),
+            "{unknown_text}"
+        );
+        assert!(unknown_text.contains("fake"), "{unknown_text}");
+        assert!(
+            !unknown_text.contains("threshold invariant"),
+            "{unknown_text}"
+        );
 
         let client = Client::<AnyBackend>::from_parts(Some("fake"), false, &env).expect("fake");
         assert_eq!(client.backend().id(), "fake");
@@ -639,8 +658,10 @@ mod tests {
             };
             assert!(matches!(
                 unknown,
-                Error::Policy(PolicyError::Invariant(message)) if message == "typesafe"
+                Error::Policy(PolicyError::BackendName(ref message))
+                    if message.contains("typesafe") && message.contains("http feature")
             ));
+            assert!(!unknown.to_string().contains("threshold invariant"));
             let cascade_env = super::BackendEnv {
                 cascade: Some("http://127.0.0.1:9".to_string()),
                 ..super::BackendEnv::default()
