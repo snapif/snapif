@@ -27,6 +27,16 @@ pub enum Question {
     Noul(NoulQ),
 }
 
+impl Question {
+    pub fn id(&self) -> &QuestionId {
+        match self {
+            Question::Choice(choice) => &choice.id,
+            Question::Score(score) => &score.id,
+            Question::Noul(noul) => &noul.id,
+        }
+    }
+}
+
 pub trait ChoiceLabels: Sized {
     fn labels() -> &'static [(&'static str, &'static str)];
     fn from_label(s: &str) -> Option<Self>;

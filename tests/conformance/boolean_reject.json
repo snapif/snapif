@@ -1,0 +1,11 @@
+{
+  "expect": "reject",
+  "state": "x",
+  "model": "jev-latest",
+  "questions": {
+    "flag": {
+      "type": "boolean",
+      "instructions": "yes?"
+    }
+  }
+}

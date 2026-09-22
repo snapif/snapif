@@ -3,11 +3,12 @@ use std::fs;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use snapif::backends::fake::FakeBackend;
-use snapif::error::Error;
+use snapif::error::{DecodeError, Error};
 use snapif::ids::{ActionId, QuestionId};
-use snapif::policy::Policy;
+use snapif::policy::{Fail, Policy};
 use snapif::question::{ChoiceQ, Question};
 use snapif::state::{PreparedCall, State};
+use snapif::verdict::UnsureReason;
 use snapif::{Client, GateRequest, Verdict};
 
 fn policy() -> Policy {
@@ -102,10 +103,12 @@ fn seven_shipped_examples() {
 #[test]
 fn fixture_rows_match_expected_verdicts() {
     let text = fs::read_to_string("tests/fixtures/actions.jsonl").expect("fixture");
-    for line in text.lines() {
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
         let row: Value = serde_json::from_str(line).expect("row");
+        let request_row = &row["gate_request"];
+        let script_row = &row["script"];
         let mut nouls = Vec::new();
-        if let Some(map) = row.get("nouls").and_then(Value::as_object) {
+        if let Some(map) = script_row.get("nouls").and_then(Value::as_object) {
             for (id, value) in map {
                 nouls.push((id.as_str(), value.as_f64().expect("noul")));
             }
@@ -118,22 +121,25 @@ fn fixture_rows_match_expected_verdicts() {
             .iter()
             .map(|(id, value)| (id.as_str(), *value))
             .collect();
-        let command = row.get("command").and_then(Value::as_str).unwrap_or("");
+        let action = request_row["action_id"].as_str().expect("action");
+        let args = request_row["prepared"]["args"].clone();
         let (client, verdict) = gate(
             script(
-                row["harm"].as_str().expect("harm"),
-                row["confidence"].as_f64().expect("confidence"),
+                script_row["harm"].as_str().expect("harm"),
+                script_row["confidence"].as_f64().expect("confidence"),
                 &pairs,
             ),
             request(
-                row["action_id"].as_str().expect("action"),
-                json!({"user_request": "invoice"}),
-                json!(null),
-                json!({"command": command}),
+                action,
+                request_row["state"]["trusted"].clone(),
+                request_row["state"]["untrusted"].clone(),
+                args.clone(),
             ),
         );
         assert_eq!(kind(&verdict), row["expected"].as_str().expect("expected"));
-        if !command.is_empty() {
+        if let Some(command) = args.get("command").and_then(Value::as_str)
+            && !command.is_empty()
+        {
             let recorded = client.backend().last_state().expect("state");
             assert_eq!(recorded["prepared"]["args"]["command"], command);
         }
@@ -167,6 +173,130 @@ fn missing_harm_class_escalates_after_evaluate() {
             .expect("gate");
     assert!(matches!(verdict, Verdict::Escalate(_)));
     assert!(client.backend().last_state().is_some());
+}
+
+#[test]
+fn missing_block_id_fails_closed() {
+    let client = Client::new(script("read", 0.91, &[])).policy(block_policy("closed"));
+    let verdict =
+        pollster::block_on(client.gate(request("tag", json!({}), json!(null), json!({}))))
+            .expect("gate");
+    match verdict {
+        Verdict::Escalate(hint) => assert!(hint.reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                UnsureReason::Decode(DecodeError::MissingAnswer { .. })
+            )
+        })),
+        other => panic!("missing block auto'd {other:?}"),
+    }
+}
+
+#[test]
+fn missing_block_on_open_reviews_only_when_auto_is_set() {
+    let policy = block_policy("open");
+    let tag = Client::new(script("read", 0.91, &[])).policy(policy.clone());
+    let tag = pollster::block_on(tag.gate(request("tag", json!({}), json!(null), json!({}))))
+        .expect("gate");
+    assert!(matches!(tag, Verdict::Review(_)), "{tag:?}");
+
+    let other = Client::new(script("read", 0.91, &[])).policy(policy);
+    let other = pollster::block_on(other.gate(request("other", json!({}), json!(null), json!({}))))
+        .expect("gate");
+    assert!(matches!(other, Verdict::Escalate(_)), "{other:?}");
+}
+
+#[test]
+fn non_noul_block_answer_fails_closed() {
+    let raw = r#"
+schema_version = 1
+fail = "closed"
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+[default_action]
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+block_on = [
+  { id = "harm_class", when = "yes" },
+]
+"#;
+    let client = Client::new(script("read", 0.91, &[])).policy(Policy::from_toml_str(raw).unwrap());
+    let verdict =
+        pollster::block_on(client.gate(request("tag", json!({}), json!(null), json!({}))))
+            .expect("gate");
+    match verdict {
+        Verdict::Escalate(hint) => assert!(hint.reasons.iter().any(|reason| {
+            matches!(
+                reason,
+                UnsureReason::Decode(DecodeError::TypeMismatch { .. })
+            )
+        })),
+        other => panic!("choice block ignored {other:?}"),
+    }
+    assert!(client.backend().last_state().is_some());
+}
+
+#[test]
+fn extra_question_cannot_replace_a_battery_id() {
+    let mut req = request("tag", json!({}), json!(null), json!({}));
+    let mut criteria = IndexMap::new();
+    criteria.insert("read".to_string(), json!("read"));
+    criteria.insert("write".to_string(), json!("write"));
+    req.extra_questions.push(Question::Choice(ChoiceQ {
+        id: QuestionId::new("harm_class"),
+        instructions: json!("replacement"),
+        criteria,
+    }));
+    let (client, verdict) = gate(script("read", 0.91, &[]), req);
+    assert!(matches!(verdict, Verdict::Escalate(_)), "{verdict:?}");
+    assert!(client.backend().last_state().is_none());
+}
+
+#[test]
+fn fail_override_beats_policy_fail() {
+    let backend = FakeBackend::new().on_timeout("harm_class");
+    let review = Client::new(backend).policy(policy()).fail(Fail::Open);
+    let review = pollster::block_on(review.gate(request("tag", json!({}), json!(null), json!({}))))
+        .expect("gate");
+    assert!(matches!(review, Verdict::Review(_)), "{review:?}");
+
+    let escalate = Client::new(FakeBackend::new().on_timeout("harm_class"))
+        .policy(policy())
+        .fail(Fail::Open);
+    let escalate =
+        pollster::block_on(escalate.gate(request("git.push", json!({}), json!(null), json!({}))))
+            .expect("gate");
+    assert!(matches!(escalate, Verdict::Escalate(_)), "{escalate:?}");
+}
+
+fn block_policy(fail: &str) -> Policy {
+    let raw = format!(
+        r#"
+schema_version = 1
+fail = "{fail}"
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+[default_action]
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+block_on = [
+  {{ id = "not_in_battery", when = "yes" }},
+]
+[actions.tag]
+auto = 0.60
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+block_on = [
+  {{ id = "not_in_battery", when = "yes" }},
+]
+"#
+    );
+    Policy::from_toml_str(&raw).expect("policy")
 }
 
 #[test]

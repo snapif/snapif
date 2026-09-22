@@ -7,7 +7,7 @@ use crate::answer::{ChoiceAnswer, NoulAnswer, ScoreAnswer};
 use crate::backends::fake::FakeBackend;
 use crate::error::{BackendError, DecodeError, Error, PolicyError};
 use crate::ids::QuestionId;
-use crate::policy::Policy;
+use crate::policy::{Fail, Policy};
 use crate::question::{ChoiceLabels, Question, ScoreLabels};
 use crate::state::State;
 use crate::usage::UsageFn;
@@ -26,18 +26,7 @@ pub struct Evaluated {
     pub backend_id: String,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AnswerMeta {
-    pub original_prob_sum: Option<f64>,
-    pub cascade_hop: Option<CascadeHop>,
-    pub first_hop_error: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CascadeHop {
-    First,
-    Fallback,
-}
+pub use crate::verdict::{AnswerMeta, CascadeHop};
 
 pub trait Backend: Send + Sync {
     fn id(&self) -> &str;
@@ -94,7 +83,9 @@ pub struct Client<B: Backend> {
     pub(crate) policy: Option<Policy>,
     pub(crate) on_usage: Option<UsageFn>,
     pub(crate) timeout: Duration,
+    pub(crate) model: String,
     shadow_override: Option<bool>,
+    fail_override: Option<Fail>,
 }
 
 impl<B: Backend> Client<B> {
@@ -104,8 +95,26 @@ impl<B: Backend> Client<B> {
             policy: None,
             on_usage: None,
             timeout: Duration::from_millis(2000),
+            model: "jev-latest".to_string(),
             shadow_override: None,
+            fail_override: None,
         }
+    }
+
+    /// Overrides `policy.fail` for `gate()`. Does not change `ask()`.
+    pub fn fail(mut self, fail: Fail) -> Self {
+        self.fail_override = Some(fail);
+        self
+    }
+
+    pub(crate) fn fail_mode(&self) -> Fail {
+        if let Some(fail) = self.fail_override {
+            return fail;
+        }
+        self.policy
+            .as_ref()
+            .map(|policy| policy.fail)
+            .unwrap_or(Fail::Closed)
     }
 
     /// Overrides `policy.shadow` for `gate()`. Does not rewrite the verdict.
@@ -148,7 +157,7 @@ impl<B: Backend> Client<B> {
             .as_ref()
             .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
         let mut request = WireRequest {
-            model: "jev-latest".to_string(),
+            model: self.model.clone(),
             state: state.to_wire(None),
             questions: questions.iter().map(wire_question).collect(),
         };
@@ -201,6 +210,9 @@ struct BackendEnv {
     base_url: Option<String>,
     #[cfg_attr(not(feature = "http"), allow(dead_code))]
     cascade: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<String>,
+    policy: Option<String>,
 }
 
 impl Client<AnyBackend> {
@@ -208,6 +220,9 @@ impl Client<AnyBackend> {
     ///
     /// Unset or non-Unicode is [`Error::Policy`], not a silent fake.
     /// `SNAPIF_SHADOW` of `1` or `true` sets the shadow override.
+    /// `SNAPIF_MODEL` overrides the default `jev-latest`. `SNAPIF_TIMEOUT_MS`
+    /// overrides the 2000 ms gate budget. `SNAPIF_POLICY` is a shipped id or
+    /// a `.toml` path; unset uses `tool-gate`.
     /// `typesafe` reads `TYPESAFE_API_KEY` and fails with [`Error::Auth`] when
     /// that key is missing. `compatible` reads `SNAPIF_BASE_URL` (origin only)
     /// and `SNAPIF_API_KEY` (optional on loopback). When
@@ -229,24 +244,25 @@ impl Client<AnyBackend> {
             #[cfg(feature = "http")]
             base_url: std::env::var("SNAPIF_BASE_URL").ok(),
             cascade: std::env::var("SNAPIF_CASCADE_BASE_URL").ok(),
+            model: std::env::var("SNAPIF_MODEL").ok(),
+            timeout_ms: std::env::var("SNAPIF_TIMEOUT_MS").ok(),
+            policy: std::env::var("SNAPIF_POLICY").ok(),
         };
         Self::from_parts(name.as_deref(), shadow, &env)
     }
 
     #[cfg_attr(not(feature = "http"), allow(unused_variables))]
     fn from_parts(name: Option<&str>, shadow: bool, env: &BackendEnv) -> Result<Self, Error> {
+        let policy = env_policy(env)?;
         let client = match name {
             None => {
                 return Err(Error::Policy(PolicyError::Invariant(
                     "SNAPIF_BACKEND must be fake, typesafe, or compatible".to_string(),
                 )));
             }
-            Some("fake") => {
-                let policy = Policy::shipped("tool-gate")?;
-                Self::new(AnyBackend::Fake(FakeBackend::new())).policy(policy)
-            }
+            Some("fake") => Self::new(AnyBackend::Fake(FakeBackend::new())).policy(policy),
             #[cfg(feature = "http")]
-            Some(name @ ("typesafe" | "compatible")) => http_client(name, env)?,
+            Some(name @ ("typesafe" | "compatible")) => http_client(name, env, policy)?,
             #[cfg(not(feature = "http"))]
             Some(name @ ("typesafe" | "compatible")) => {
                 return Err(Error::Policy(PolicyError::Invariant(name.to_string())));
@@ -255,14 +271,41 @@ impl Client<AnyBackend> {
                 return Err(Error::Policy(PolicyError::Invariant(other.to_string())));
             }
         };
+        let client = apply_runtime(client, env)?;
         Ok(if shadow { client.shadow(true) } else { client })
     }
 }
 
+fn env_policy(env: &BackendEnv) -> Result<Policy, Error> {
+    match nonempty(env.policy.as_deref()) {
+        Some(spec) => Policy::load(spec),
+        None => Ok(Policy::shipped("tool-gate")?),
+    }
+}
+
+fn apply_runtime(
+    mut client: Client<AnyBackend>,
+    env: &BackendEnv,
+) -> Result<Client<AnyBackend>, Error> {
+    if let Some(raw) = nonempty(env.timeout_ms.as_deref()) {
+        let ms: u64 = raw
+            .parse()
+            .map_err(|_| Error::Policy(PolicyError::Invariant("SNAPIF_TIMEOUT_MS".to_string())))?;
+        client = client.timeout(Duration::from_millis(ms));
+    }
+    if let Some(model) = nonempty(env.model.as_deref()) {
+        client.model = model.to_string();
+    }
+    Ok(client)
+}
+
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|text| !text.is_empty())
+}
+
 #[cfg(feature = "http")]
-fn http_client(name: &str, env: &BackendEnv) -> Result<Client<AnyBackend>, Error> {
-    let policy = Policy::shipped("tool-gate")?;
-    let backend = if let Some(raw) = env.cascade.as_deref().filter(|value| !value.is_empty()) {
+fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<AnyBackend>, Error> {
+    let backend = if let Some(raw) = nonempty(env.cascade.as_deref()) {
         let first = compatible_backend(raw, env.snapif_key.clone(), "SNAPIF_CASCADE_BASE_URL")?;
         let fallback = match name {
             "typesafe" => crate::backends::http::HttpBackend::typesafe(
@@ -394,6 +437,7 @@ fn map_backend(err: BackendError, timeout: Duration) -> Error {
         BackendError::RateLimit => Error::RateLimit,
         BackendError::Overloaded => Error::Overloaded,
         BackendError::Auth => Error::Auth("auth".to_string()),
+        BackendError::Rejected { status, body } => Error::Rejected { status, body },
         other => Error::Backend(other.to_string()),
     }
 }
@@ -424,7 +468,11 @@ pub(crate) fn wire_question(question: &Question) -> (String, WireQuestion) {
     }
 }
 
-fn record_prob_sum(meta: &mut IndexMap<String, AnswerMeta>, id: &str, answer: &WireAnswer) {
+pub(crate) fn record_prob_sum(
+    meta: &mut IndexMap<String, AnswerMeta>,
+    id: &str,
+    answer: &WireAnswer,
+) {
     let probabilities = match answer {
         WireAnswer::Choice { probabilities, .. } | WireAnswer::Score { probabilities, .. } => {
             probabilities
@@ -547,6 +595,7 @@ mod tests {
             ));
             let cascade_env = super::BackendEnv {
                 cascade: Some("http://127.0.0.1:9".to_string()),
+                ..super::BackendEnv::default()
             };
             let err = Client::<AnyBackend>::from_parts(Some("typesafe"), false, &cascade_env);
             assert!(matches!(err, Err(Error::Policy(_))));
@@ -580,5 +629,37 @@ mod tests {
             .expect("cascade");
             assert_eq!(cascaded.backend().id(), "cascade");
         }
+
+        let tuned = Client::<AnyBackend>::from_parts(
+            Some("fake"),
+            false,
+            &super::BackendEnv {
+                model: Some("custom-model".to_string()),
+                timeout_ms: Some("1500".to_string()),
+                ..super::BackendEnv::default()
+            },
+        )
+        .expect("runtime");
+        assert_eq!(tuned.model, "custom-model");
+        assert_eq!(tuned.timeout, std::time::Duration::from_millis(1500));
+
+        let bad_timeout = Client::<AnyBackend>::from_parts(
+            Some("fake"),
+            false,
+            &super::BackendEnv {
+                timeout_ms: Some("nope".to_string()),
+                ..super::BackendEnv::default()
+            },
+        );
+        assert!(matches!(bad_timeout, Err(Error::Policy(_))));
+        let bad_policy = Client::<AnyBackend>::from_parts(
+            Some("fake"),
+            false,
+            &super::BackendEnv {
+                policy: Some("missing-policy".to_string()),
+                ..super::BackendEnv::default()
+            },
+        );
+        assert!(matches!(bad_policy, Err(Error::Policy(_))));
     }
 }

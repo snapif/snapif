@@ -427,6 +427,12 @@ fn retried_id_still_below_min_sets_cascade_still_unsure() {
             .iter()
             .any(|reason| matches!(reason, UnsureReason::CascadeStillUnsure))
     );
+    assert_eq!(
+        hint.meta
+            .get("harm_class")
+            .and_then(|meta| meta.cascade_hop),
+        Some(CascadeHop::Fallback)
+    );
 }
 
 #[test]

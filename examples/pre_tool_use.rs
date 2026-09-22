@@ -7,15 +7,11 @@ use snapif::{Client, GateRequest, Verdict};
 
 fn main() {
     let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
-    for id in [
-        "irreversible",
-        "destructive",
-        "exfil",
-        "off_task",
-        "intent_match",
-        "authority_claim",
-    ] {
-        backend = backend.on_noul(id, 0.0);
+    for id in snapif::backends::cascade::battery_ids() {
+        if id.0 == "harm_class" {
+            continue;
+        }
+        backend = backend.on_noul(&id.0, 0.0);
     }
     let client = Client::new(backend).policy(Policy::shipped("tool-gate").expect("policy"));
     let verdict = pollster::block_on(client.gate(GateRequest {

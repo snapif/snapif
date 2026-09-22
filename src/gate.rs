@@ -45,10 +45,20 @@ impl<B: Backend> Client<B> {
         }
         for question in &req.extra_questions {
             let (id, wire) = wire_question(question);
+            if wire_questions.contains_key(&id) {
+                return Ok(self.closed(
+                    &req.action_id,
+                    &gates,
+                    UnsureReason::Wire,
+                    Usage::default(),
+                    self.backend.id(),
+                    IndexMap::new(),
+                ));
+            }
             wire_questions.insert(id, wire);
         }
         let mut request = WireRequest {
-            model: "jev-latest".to_string(),
+            model: self.model.clone(),
             state: req.state.to_wire(Some(&req.prepared)),
             questions: wire_questions,
         };
@@ -61,12 +71,25 @@ impl<B: Backend> Client<B> {
                     UnsureReason::Wire,
                     Usage::default(),
                     self.backend.id(),
+                    IndexMap::new(),
                 ));
             }
         };
         let mut truncated = false;
         if encoded.truncated_untrusted {
-            request = wire::decode_request(&encoded.body)?;
+            request = match wire::decode_request(&encoded.body) {
+                Ok(request) => request,
+                Err(_) => {
+                    return Ok(self.closed(
+                        &req.action_id,
+                        &gates,
+                        UnsureReason::Wire,
+                        Usage::default(),
+                        self.backend.id(),
+                        IndexMap::new(),
+                    ));
+                }
+            };
             truncated = true;
         }
         let deadline = Instant::now() + self.timeout;
@@ -79,11 +102,16 @@ impl<B: Backend> Client<B> {
                     UnsureReason::Backend,
                     Usage::default(),
                     self.backend.id(),
+                    IndexMap::new(),
                 ));
             }
         };
         if let Some(on_usage) = &self.on_usage {
             on_usage(evaluated.wire.usage);
+        }
+        let mut meta = evaluated.meta;
+        for (id, answer) in &evaluated.wire.answers {
+            crate::backend::record_prob_sum(&mut meta, id, answer);
         }
         if let Err(err) = wire::check_response(&request.questions, &evaluated.wire) {
             return Ok(self.closed(
@@ -92,6 +120,7 @@ impl<B: Backend> Client<B> {
                 UnsureReason::Decode(err),
                 evaluated.wire.usage,
                 &evaluated.backend_id,
+                meta,
             ));
         }
         let harm = match harm_choice(&evaluated.wire.answers, policy.choice.signal) {
@@ -103,6 +132,7 @@ impl<B: Backend> Client<B> {
                     UnsureReason::Decode(err),
                     evaluated.wire.usage,
                     &evaluated.backend_id,
+                    meta,
                 ));
             }
         };
@@ -112,30 +142,55 @@ impl<B: Backend> Client<B> {
             reasons.push(UnsureReason::HarmClassBump { from, to });
         }
         if crate::backends::cascade::fallback_still_below(
-            &evaluated.meta,
+            &meta,
             &evaluated.wire.answers,
             policy.cascade_min,
         ) {
             reasons.push(UnsureReason::CascadeStillUnsure);
         }
-        if let Some(verdict) = block_hit(policy, &req.action_id, &gates, &evaluated.wire.answers) {
-            return Ok(self.finish(
-                verdict,
-                evaluated.wire.usage,
-                evaluated.backend_id,
-                self.shadow_on(policy.shadow),
-                Some(harm.label),
-                reasons,
-            ));
+        match block_hit(policy, &req.action_id, &gates, &evaluated.wire.answers) {
+            Err(err) => {
+                return Ok(self.closed(
+                    &req.action_id,
+                    &gates,
+                    UnsureReason::Decode(err),
+                    evaluated.wire.usage,
+                    &evaluated.backend_id,
+                    meta,
+                ));
+            }
+            Ok(Some(verdict)) => {
+                return Ok(self.finish(
+                    push_reasons(verdict, reasons),
+                    evaluated.wire.usage,
+                    evaluated.backend_id,
+                    self.shadow_on(policy.shadow),
+                    Some(harm.label),
+                    meta,
+                ));
+            }
+            Ok(None) => {}
         }
         let mut verdict = verdict_from_signal(harm.signal, &gates, req.action_id.clone());
-        verdict = fold_unsure_blocks(
+        verdict = match fold_unsure_blocks(
             verdict,
             &req.action_id,
             &gates,
             policy,
             &evaluated.wire.answers,
-        );
+        ) {
+            Ok(verdict) => verdict,
+            Err(err) => {
+                return Ok(self.closed(
+                    &req.action_id,
+                    &gates,
+                    UnsureReason::Decode(err),
+                    evaluated.wire.usage,
+                    &evaluated.backend_id,
+                    meta,
+                ));
+            }
+        };
         verdict = fold_extras(
             verdict,
             &req.action_id,
@@ -152,12 +207,12 @@ impl<B: Backend> Client<B> {
             );
         }
         Ok(self.finish(
-            verdict,
+            push_reasons(verdict, reasons),
             evaluated.wire.usage,
             evaluated.backend_id,
             self.shadow_on(policy.shadow),
             Some(harm.label),
-            reasons,
+            meta,
         ))
     }
 
@@ -168,26 +223,15 @@ impl<B: Backend> Client<B> {
         reason: UnsureReason,
         usage: Usage,
         backend_id: &str,
+        meta: IndexMap<String, crate::backend::AnswerMeta>,
     ) -> Verdict {
         let shadow = self.shadow_on(self.policy.as_ref().is_some_and(|policy| policy.shadow));
-        let verdict = if self
-            .policy
-            .as_ref()
-            .is_some_and(|policy| policy.fail == Fail::Open)
-            && gates.auto.is_some()
-        {
+        let verdict = if self.fail_mode() == Fail::Open && gates.auto.is_some() {
             Verdict::Review(hint(action_id.clone(), vec![reason]))
         } else {
             Verdict::Escalate(hint(action_id.clone(), vec![reason]))
         };
-        self.finish(
-            verdict,
-            usage,
-            backend_id.to_string(),
-            shadow,
-            None,
-            Vec::new(),
-        )
+        self.finish(verdict, usage, backend_id.to_string(), shadow, None, meta)
     }
 
     fn finish(
@@ -197,7 +241,7 @@ impl<B: Backend> Client<B> {
         backend_id: String,
         shadow: bool,
         guess: Option<String>,
-        extra: Vec<UnsureReason>,
+        meta: IndexMap<String, crate::backend::AnswerMeta>,
     ) -> Verdict {
         map_hint(verdict, |mut hint| {
             hint.usage = usage;
@@ -206,10 +250,20 @@ impl<B: Backend> Client<B> {
             if hint.guess.is_none() {
                 hint.guess = guess;
             }
-            hint.reasons.extend(extra);
+            hint.meta = meta;
             hint
         })
     }
+}
+
+fn push_reasons(verdict: Verdict, extra: Vec<UnsureReason>) -> Verdict {
+    if extra.is_empty() {
+        return verdict;
+    }
+    map_hint(verdict, |mut hint| {
+        hint.reasons.extend(extra);
+        hint
+    })
 }
 
 struct HarmObs {
@@ -261,17 +315,26 @@ fn parse_harm(label: &str) -> Option<HarmClass> {
     }
 }
 
+fn block_answer(
+    answers: &IndexMap<String, WireAnswer>,
+    id: &QuestionId,
+) -> Result<f64, DecodeError> {
+    match answers.get(&id.0) {
+        Some(WireAnswer::Noul { noul }) => Ok(*noul),
+        Some(_) => Err(DecodeError::TypeMismatch { key: id.clone() }),
+        None => Err(DecodeError::MissingAnswer { key: id.clone() }),
+    }
+}
+
 fn block_hit(
     policy: &Policy,
     action_id: &ActionId,
     gates: &EffectiveGates,
     answers: &IndexMap<String, WireAnswer>,
-) -> Option<Verdict> {
+) -> Result<Option<Verdict>, DecodeError> {
     for block in &gates.block_on {
-        let Some(WireAnswer::Noul { noul }) = answers.get(&block.id.0) else {
-            continue;
-        };
-        let decision = NoulAnswer { p: *noul }.decide(&policy.noul, Some(block));
+        let noul = block_answer(answers, &block.id)?;
+        let decision = NoulAnswer { p: noul }.decide(&policy.noul, Some(block));
         let fires = matches!(
             (block.when, &decision),
             (crate::policy::BlockWhen::Yes, Decision::Known(true))
@@ -279,16 +342,16 @@ fn block_hit(
                 | (crate::policy::BlockWhen::Unsure, Decision::Unsure { .. })
         );
         if fires {
-            return Some(Verdict::Escalate(hint(
+            return Ok(Some(Verdict::Escalate(hint(
                 action_id.clone(),
                 vec![UnsureReason::Battery {
                     id: block.id.clone(),
                     when: block.when,
                 }],
-            )));
+            ))));
         }
     }
-    None
+    Ok(None)
 }
 
 fn fold_unsure_blocks(
@@ -297,15 +360,13 @@ fn fold_unsure_blocks(
     gates: &EffectiveGates,
     policy: &Policy,
     answers: &IndexMap<String, WireAnswer>,
-) -> Verdict {
+) -> Result<Verdict, DecodeError> {
     for block in &gates.block_on {
         if matches!(block.when, crate::policy::BlockWhen::Unsure) {
             continue;
         }
-        let Some(WireAnswer::Noul { noul }) = answers.get(&block.id.0) else {
-            continue;
-        };
-        let decision = NoulAnswer { p: *noul }.decide(&policy.noul, Some(block));
+        let noul = block_answer(answers, &block.id)?;
+        let decision = NoulAnswer { p: noul }.decide(&policy.noul, Some(block));
         if matches!(decision, Decision::Unsure { .. }) {
             let bump = when_unsure_bump(
                 gates,
@@ -318,7 +379,7 @@ fn fold_unsure_blocks(
             verdict = absorb(verdict, bump, action_id.clone());
         }
     }
-    verdict
+    Ok(verdict)
 }
 
 fn fold_extras(
@@ -335,7 +396,7 @@ fn fold_extras(
         .map(|block| block.id.0.as_str())
         .collect();
     for question in extras {
-        let id = question_id(question);
+        let id = question.id().0.as_str();
         if blocked.contains(&id) {
             continue;
         }
@@ -408,14 +469,6 @@ fn when_unsure_bump(gates: &EffectiveGates, action_id: ActionId, reason: UnsureR
     }
 }
 
-fn question_id(question: &Question) -> &str {
-    match question {
-        Question::Choice(choice) => choice.id.0.as_str(),
-        Question::Score(score) => score.id.0.as_str(),
-        Question::Noul(noul) => noul.id.0.as_str(),
-    }
-}
-
 fn absorb(current: Verdict, extra: Verdict, action_id: ActionId) -> Verdict {
     let rank = match &current {
         Verdict::Auto(_) => 0,
@@ -449,5 +502,47 @@ fn map_hint(verdict: Verdict, map: impl FnOnce(ActionHint) -> ActionHint) -> Ver
         Verdict::Auto(hint) => Verdict::Auto(map(hint)),
         Verdict::Review(hint) => Verdict::Review(map(hint)),
         Verdict::Escalate(hint) => Verdict::Escalate(map(hint)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GateRequest;
+    use crate::Client;
+    use crate::backends::fake::FakeBackend;
+    use crate::ids::ActionId;
+    use crate::policy::Policy;
+    use crate::state::{PreparedCall, State};
+    use serde_json::json;
+
+    #[test]
+    fn gate_posts_the_client_model() {
+        let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            backend = backend.on_noul(&id.0, 0.0);
+        }
+        let mut client = Client::new(backend).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.model = "custom-model".to_string();
+        let verdict = pollster::block_on(client.gate(GateRequest {
+            action_id: ActionId::new("tag"),
+            prepared: PreparedCall {
+                name: "tag".to_string(),
+                args: json!({}),
+            },
+            state: State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            extra_questions: vec![],
+        }))
+        .expect("gate");
+        assert!(matches!(verdict, crate::verdict::Verdict::Auto(_)));
+        assert_eq!(
+            client.backend().last_model().as_deref(),
+            Some("custom-model")
+        );
     }
 }

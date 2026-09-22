@@ -40,18 +40,10 @@ impl<A: Backend, B: Backend> Cascaded<A, B> {
 }
 
 pub fn battery_ids() -> Vec<QuestionId> {
-    [
-        "irreversible",
-        "destructive",
-        "exfil",
-        "off_task",
-        "intent_match",
-        "authority_claim",
-        "harm_class",
-    ]
-    .into_iter()
-    .map(QuestionId::new)
-    .collect()
+    crate::battery::shipped_questions()
+        .into_iter()
+        .map(|question| question.id().clone())
+        .collect()
 }
 
 pub(crate) fn fallback_still_below(
