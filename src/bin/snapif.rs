@@ -175,10 +175,7 @@ fn test_local(vectors: &PathBuf) -> u8 {
             Err(2)
         }
     }) {
-        Ok(()) => {
-            println!("ok");
-            0
-        }
+        Ok(count) => finish_checked(count, "conformance vectors"),
         Err(code) => code,
     }
 }
@@ -243,10 +240,7 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
         Ok(())
     });
     match result {
-        Ok(()) => {
-            println!("ok");
-            0
-        }
+        Ok(count) => finish_checked(count, "conformance vectors"),
         Err(code) => code,
     }
 }
@@ -267,7 +261,8 @@ fn backend_code(err: &snapif::error::BackendError) -> u8 {
 fn each_vector(
     vectors: &PathBuf,
     mut visit: impl FnMut(&std::path::Path, &[u8]) -> Result<(), u8>,
-) -> Result<(), u8> {
+) -> Result<usize, u8> {
+    let mut checked = 0usize;
     let entries = match fs::read_dir(vectors) {
         Ok(entries) => entries,
         Err(err) => {
@@ -299,8 +294,18 @@ fn each_vector(
             return Err(2);
         }
         visit(&path, &bytes)?;
+        checked += 1;
     }
-    Ok(())
+    Ok(checked)
+}
+
+fn finish_checked(count: usize, what: &str) -> u8 {
+    if count == 0 {
+        eprintln!("no {what} checked");
+        return 1;
+    }
+    println!("ok");
+    0
 }
 
 fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
@@ -318,10 +323,12 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
             return 1;
         }
     };
+    let mut checked = 0usize;
     for (line_no, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
+        checked += 1;
         let row: ReplayRow = match serde_json::from_str(line) {
             Ok(row) => row,
             Err(err) => {
@@ -358,8 +365,7 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
             return 1;
         }
     }
-    println!("ok");
-    0
+    finish_checked(checked, "replay rows")
 }
 
 fn scripted(harm: &str, confidence: f64, nouls: &serde_json::Map<String, Value>) -> FakeBackend {

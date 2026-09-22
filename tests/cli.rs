@@ -12,6 +12,40 @@ fn manifest(path: &str) -> String {
 }
 
 #[test]
+fn test_empty_directory_exits_1() {
+    let dir = std::env::temp_dir().join(format!("snapif-empty-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no conformance vectors"));
+}
+
+#[test]
+fn replay_blank_file_exits_1() {
+    let path = std::env::temp_dir().join(format!("snapif-blank-{}.jsonl", std::process::id()));
+    fs::write(&path, "\n\n").expect("write");
+    let output = bin().arg("replay").arg(&path).output().expect("run");
+    let _ = fs::remove_file(&path);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no replay rows"));
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")
