@@ -64,6 +64,8 @@ jobs:
         run: |
           cargo clippy --locked --all-targets -- -D warnings
           cargo clippy --locked --all-targets --features http -- -D warnings
+          cargo clippy --locked --all-targets --features cli -- -D warnings
+          cargo clippy --locked --all-targets --features http,cli -- -D warnings
       - name: Rustdoc
         if: >-
           github.event_name != 'pull_request' ||
@@ -121,6 +123,8 @@ jobs:
         run: |
           cargo test --locked
           cargo test --locked --features http
+          cargo test --locked --features cli
+          cargo test --locked --features http,cli
       - name: Release-please check
         if: >-
           github.event_name == 'pull_request' &&
