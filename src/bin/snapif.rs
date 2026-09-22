@@ -48,7 +48,7 @@ enum Command {
         #[arg(long, default_value = "tool-gate")]
         policy: String,
     },
-    /// Check local conformance JSON. `--base-url` needs the http feature, which this build does not include.
+    /// Check conformance JSON. With the http feature, `--base-url` posts each valid vector.
     Test {
         #[arg(long)]
         vectors: PathBuf,
@@ -161,15 +161,118 @@ fn ask_cmd(path: &PathBuf, policy: &str) -> u8 {
 }
 
 fn test_cmd(vectors: &PathBuf, base_url: Option<&str>) -> u8 {
-    if base_url.is_some() {
-        eprintln!("--base-url needs the http feature, which this build does not include");
-        return 1;
+    match base_url {
+        None => test_local(vectors),
+        Some(raw) => test_remote(vectors, raw),
     }
+}
+
+fn test_local(vectors: &PathBuf) -> u8 {
+    match each_vector(vectors, |path, bytes| match wire::decode_request(bytes) {
+        Ok(_) | Err(WireError::UnknownType(_)) => Ok(()),
+        Err(err) => {
+            eprintln!("{path:?}: {err}");
+            Err(2)
+        }
+    }) {
+        Ok(()) => {
+            println!("ok");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[cfg(not(feature = "http"))]
+fn test_remote(_vectors: &PathBuf, _raw: &str) -> u8 {
+    eprintln!("--base-url needs the http feature, which this build does not include");
+    1
+}
+
+#[cfg(feature = "http")]
+fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
+    let url = match url::Url::parse(raw) {
+        Ok(url) => url,
+        Err(_) => {
+            eprintln!("SNAPIF_BASE_URL");
+            return 1;
+        }
+    };
+    let backend = match snapif::backends::http::HttpBackend::compatible(url, None) {
+        Ok(backend) => backend,
+        Err(err) => {
+            eprintln!("{err}");
+            return ask_code(&err);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let result = each_vector(vectors, |path, bytes| {
+        let request = match wire::decode_request(bytes) {
+            Ok(request) => request,
+            Err(WireError::UnknownType(_)) => return Ok(()),
+            Err(err) => {
+                eprintln!("{path:?}: {err}");
+                return Err(2);
+            }
+        };
+        let evaluated = match runtime.block_on(snapif::backend::Backend::evaluate(
+            &backend,
+            request.clone(),
+            deadline,
+        )) {
+            Ok(evaluated) => evaluated,
+            Err(err) => {
+                eprintln!("{path:?}: {err}");
+                return Err(backend_code(&err));
+            }
+        };
+        if let Err(err) = wire::check_response(&request.questions, &evaluated.wire) {
+            eprintln!("{path:?}: {err}");
+            return Err(2);
+        }
+        Ok(())
+    });
+    match result {
+        Ok(()) => {
+            println!("ok");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+#[cfg(feature = "http")]
+fn backend_code(err: &snapif::error::BackendError) -> u8 {
+    match err {
+        snapif::error::BackendError::Auth => 5,
+        snapif::error::BackendError::RateLimit => 4,
+        snapif::error::BackendError::Rejected { .. } => 2,
+        snapif::error::BackendError::Timeout
+        | snapif::error::BackendError::Overloaded
+        | snapif::error::BackendError::Transport(_) => 3,
+        _ => 3,
+    }
+}
+
+fn each_vector(
+    vectors: &PathBuf,
+    mut visit: impl FnMut(&std::path::Path, &[u8]) -> Result<(), u8>,
+) -> Result<(), u8> {
     let entries = match fs::read_dir(vectors) {
         Ok(entries) => entries,
         Err(err) => {
             eprintln!("{err}");
-            return 1;
+            return Err(1);
         }
     };
     for entry in entries {
@@ -177,7 +280,7 @@ fn test_cmd(vectors: &PathBuf, base_url: Option<&str>) -> u8 {
             Ok(entry) => entry,
             Err(err) => {
                 eprintln!("{err}");
-                return 1;
+                return Err(1);
             }
         };
         let path = entry.path();
@@ -188,23 +291,16 @@ fn test_cmd(vectors: &PathBuf, base_url: Option<&str>) -> u8 {
             Ok(bytes) => bytes,
             Err(err) => {
                 eprintln!("{path:?}: {err}");
-                return 1;
+                return Err(1);
             }
         };
         if serde_json::from_slice::<Value>(&bytes).is_err() {
             eprintln!("{path:?}: invalid json");
-            return 2;
+            return Err(2);
         }
-        match wire::decode_request(&bytes) {
-            Ok(_) | Err(WireError::UnknownType(_)) => {}
-            Err(err) => {
-                eprintln!("{path:?}: {err}");
-                return 2;
-            }
-        }
+        visit(&path, &bytes)?;
     }
-    println!("ok");
-    0
+    Ok(())
 }
 
 fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
