@@ -318,6 +318,35 @@ fn four_immediate_429s_hit_the_retry_cap() {
 }
 
 #[test]
+fn status_529_beyond_deadline_is_overloaded_without_sleep() {
+    // Retry-After is 30s and the budget is about 200ms, so the client must not sleep.
+    let (err, hits, elapsed) = expect_backend_err(
+        vec![http_response(
+            "529 Site is overloaded",
+            "Retry-After: 30\r\n",
+            "",
+        )],
+        Duration::from_millis(200),
+    );
+    assert!(matches!(err, BackendError::Overloaded), "{err:?}");
+    assert_eq!(hits.len(), 1);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "slept on Retry-After: {elapsed:?}"
+    );
+}
+
+#[test]
+fn four_immediate_529s_are_overloaded() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("529 Site is overloaded", "Retry-After: 0\r\n", ""); 4],
+        Duration::from_secs(2),
+    );
+    assert!(matches!(err, BackendError::Overloaded), "{err:?}");
+    assert_eq!(hits.len(), 4);
+}
+
+#[test]
 fn status_401_is_auth() {
     let (err, hits, _) = expect_backend_err(
         vec![http_response("401 Unauthorized", "", "")],
