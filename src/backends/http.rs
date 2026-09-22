@@ -123,7 +123,7 @@ impl Backend for HttpBackend {
                 retries += 1;
                 continue;
             }
-            let body = read_limited(response).await.unwrap_or_default();
+            let body = read_limited(response).await?;
             return Err(status_error(status, &body));
         }
     }

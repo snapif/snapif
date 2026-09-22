@@ -221,7 +221,9 @@ impl Policy {
             .max(2.0 * self.noul.yes_auto - 1.0)
             .max(1.0 - 2.0 * self.noul.no_auto);
         if self.cascade_min + 1e-12 < cascade_floor {
-            return Err(PolicyError::Invariant("cascade_min".to_string()));
+            return Err(PolicyError::Invariant(
+                "cascade_min is below its floor".to_string(),
+            ));
         }
         let default_action = self.default_action.as_ref().expect("checked");
         check_action(e, self.choice.review_below, default_action)?;
@@ -236,7 +238,7 @@ fn in_unit(name: &str, value: f64) -> Result<(), PolicyError> {
     if (0.0..=1.0).contains(&value) {
         Ok(())
     } else {
-        Err(PolicyError::Invariant(name.to_string()))
+        Err(PolicyError::Invariant(format!("{name} must be in 0..=1")))
     }
 }
 

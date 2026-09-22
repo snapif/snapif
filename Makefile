@@ -20,6 +20,10 @@ deny: ## cargo deny plus forbidden crates
 stealth: ## empty About, no topics, no README pitch
 	bash scripts/assert-stealth.sh snapif/snapif
 
+workflows: ## actionlint and zizmor, same bar as CI
+	actionlint
+	zizmor --min-severity=high .github/workflows
+
 check: ## fmt, clippy, test, deny, workflow trigger lock
 	cargo fmt --check
 	RUSTFLAGS="-D warnings" cargo clippy --locked --all-targets -- -D warnings
@@ -35,3 +39,4 @@ check: ## fmt, clippy, test, deny, workflow trigger lock
 	bash scripts/forbid-deps.sh
 	python3 scripts/test_workflow_triggers.py
 	python3 scripts/test_forbid_deps.py
+	$(MAKE) workflows

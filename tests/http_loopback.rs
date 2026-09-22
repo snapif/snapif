@@ -268,3 +268,130 @@ fn past_deadline_does_not_connect() {
     thread::sleep(Duration::from_millis(50));
     assert!(listener.accept().is_err(), "deadline still connected");
 }
+
+fn expect_backend_err(
+    replies: Vec<Vec<u8>>,
+    budget: Duration,
+) -> (BackendError, Vec<Hit>, Duration) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (_count, handle) = serve(listener, replies);
+    let backend = HttpBackend::compatible(
+        Url::parse(&format!("http://127.0.0.1:{port}")).expect("url"),
+        None,
+    )
+    .expect("client");
+    let started = Instant::now();
+    let err = block(backend.evaluate(choice_request(), started + budget)).expect_err("error");
+    let elapsed = started.elapsed();
+    let hits = handle.join().expect("server");
+    (err, hits, elapsed)
+}
+
+#[test]
+fn retry_after_beyond_deadline_is_rate_limit_without_sleep() {
+    // Retry-After is 30s and the budget is about 200ms, so the client must not sleep.
+    let (err, hits, elapsed) = expect_backend_err(
+        vec![http_response(
+            "429 Too Many Requests",
+            "Retry-After: 30\r\n",
+            "",
+        )],
+        Duration::from_millis(200),
+    );
+    assert!(matches!(err, BackendError::RateLimit), "{err:?}");
+    assert_eq!(hits.len(), 1);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "slept on Retry-After: {elapsed:?}"
+    );
+}
+
+#[test]
+fn four_immediate_429s_hit_the_retry_cap() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("429 Too Many Requests", "Retry-After: 0\r\n", ""); 4],
+        Duration::from_secs(2),
+    );
+    assert!(matches!(err, BackendError::RateLimit), "{err:?}");
+    assert_eq!(hits.len(), 4);
+}
+
+#[test]
+fn status_401_is_auth() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("401 Unauthorized", "", "")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    assert!(matches!(err, BackendError::Auth), "{err:?}");
+}
+
+#[test]
+fn status_404_is_rejected() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("404 Not Found", "", "missing")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    assert!(
+        matches!(err, BackendError::Rejected { status: 404, ref body } if body == "missing"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn status_500_is_transport() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("500 Internal Server Error", "", "")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    match err {
+        BackendError::Transport(message) => assert!(message.contains("HTTP 500"), "{message}"),
+        other => panic!("expected transport, got {other:?}"),
+    }
+}
+
+#[test]
+fn success_with_broken_json_is_transport() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("200 OK", "", "{")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    assert!(
+        matches!(err, BackendError::Transport(ref message) if !message.contains("response cap")),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn success_over_response_cap_is_transport() {
+    // One byte past the 256 KiB response cap.
+    let body = "x".repeat(256 * 1024 + 1);
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("200 OK", "", &body)],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    match err {
+        BackendError::Transport(message) => assert!(message.contains("response cap"), "{message}"),
+        other => panic!("expected transport, got {other:?}"),
+    }
+}
+
+#[test]
+fn non_success_over_response_cap_is_transport() {
+    // 422 would be Rejected if the capped body were discarded. One POST.
+    let body = "x".repeat(256 * 1024 + 1);
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("422 Unprocessable Entity", "", &body)],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    match err {
+        BackendError::Transport(message) => assert!(message.contains("response cap"), "{message}"),
+        other => panic!("expected transport, got {other:?}"),
+    }
+}

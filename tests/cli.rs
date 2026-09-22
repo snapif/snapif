@@ -12,6 +12,40 @@ fn manifest(path: &str) -> String {
 }
 
 #[test]
+fn test_empty_directory_exits_1() {
+    let dir = std::env::temp_dir().join(format!("snapif-empty-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no conformance vectors"));
+}
+
+#[test]
+fn replay_blank_file_exits_1() {
+    let path = std::env::temp_dir().join(format!("snapif-blank-{}.jsonl", std::process::id()));
+    fs::write(&path, "\n\n").expect("write");
+    let output = bin().arg("replay").arg(&path).output().expect("run");
+    let _ = fs::remove_file(&path);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no replay rows"));
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")
@@ -113,6 +147,20 @@ fn vectors_pass_locally_and_base_url_does_not_connect() {
 
 #[cfg(feature = "http")]
 #[test]
+fn base_url_that_is_not_a_url_exits_1() {
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(manifest("tests/conformance"))
+        .args(["--base-url", "not a url"])
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("--base-url"), "{stderr}");
+}
+
+#[cfg(feature = "http")]
+#[test]
 fn base_url_posts_a_vector_and_checks_the_response() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -181,6 +229,168 @@ fn base_url_posts_a_vector_and_checks_the_response() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+}
+
+#[cfg(feature = "http")]
+fn http_reply(status: &str, headers: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+#[cfg(feature = "http")]
+fn read_http_request(stream: &mut std::net::TcpStream) {
+    use std::io::Read;
+    use std::time::Duration;
+
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 1024];
+    loop {
+        match stream.read(&mut tmp) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(end) = buf.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&buf[..end]);
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            if name.eq_ignore_ascii_case("content-length") {
+                                value.trim().parse::<usize>().ok()
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(0);
+                    if buf.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+#[cfg(feature = "http")]
+fn serve_status(replies: Vec<Vec<u8>>) -> (u16, std::sync::mpsc::Receiver<usize>) {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let mut posts = 0usize;
+        for reply in replies {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            read_http_request(&mut stream);
+            let _ = stream.write_all(&reply);
+            posts += 1;
+        }
+        let _ = tx.send(posts);
+    });
+    (port, rx)
+}
+
+#[cfg(feature = "http")]
+fn remote_exit(replies: Vec<Vec<u8>>) -> (std::process::Output, usize) {
+    use std::time::Duration;
+
+    let (port, posts) = serve_status(replies);
+    let dir = std::env::temp_dir().join(format!("snapif-exit-{}-{port}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("department_choice.json"),
+    )
+    .expect("copy");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .args(["--base-url", &format!("http://127.0.0.1:{port}")])
+        .output()
+        .expect("run");
+    let count = posts
+        .recv_timeout(Duration::from_secs(2))
+        .expect("server finished");
+    let _ = fs::remove_dir_all(&dir);
+    (output, count)
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn base_url_401_exits_5() {
+    let (output, posts) = remote_exit(vec![http_reply("401 Unauthorized", "", "")]);
+    assert_eq!(posts, 1);
+    assert_eq!(
+        output.status.code(),
+        Some(5),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn base_url_four_429s_exit_4() {
+    let (output, posts) = remote_exit(vec![
+        http_reply(
+            "429 Too Many Requests",
+            "Retry-After: 0\r\n",
+            ""
+        );
+        4
+    ]);
+    assert_eq!(posts, 4);
+    assert_eq!(
+        output.status.code(),
+        Some(4),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn base_url_422_exits_2() {
+    let (output, posts) = remote_exit(vec![http_reply("422 Unprocessable Entity", "", "too big")]);
+    assert_eq!(posts, 1);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn base_url_decoded_mismatch_exits_2() {
+    let wrong_choice = r#"{"model":"loop","answers":{"department":{"type":"choice","choice":"other","probabilities":{"other":1.0},"confidence":0.91}},"usage":{"input_tokens":1,"output_tokens":2}}"#;
+    let missing_answer =
+        r#"{"model":"loop","answers":{},"usage":{"input_tokens":0,"output_tokens":0}}"#;
+    for (label, body) in [
+        ("wrong choice", wrong_choice),
+        ("missing answer", missing_answer),
+    ] {
+        let (output, posts) = remote_exit(vec![http_reply("200 OK", "", body)]);
+        assert_eq!(posts, 1, "{label}");
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]

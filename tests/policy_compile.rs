@@ -1,6 +1,6 @@
 use snapif::error::PolicyError;
 use snapif::ids::ActionId;
-use snapif::policy::{HarmClass, NoulObs, Policy, verdict_with_blocks};
+use snapif::policy::{HarmClass, NoulObs, Policy, UnsureVerdict, verdict_with_blocks};
 use snapif::question::{ChoiceLabels, ScoreLabels};
 use snapif::verdict::{Decision, Verdict};
 use snapif::{choice, score};
@@ -39,7 +39,10 @@ fn shipped_tool_gate_never_autos_git_push() {
         .get(&ActionId::new("git.push"))
         .expect("git.push row");
     assert!(push.auto.is_none());
-    assert!(policy.default_action.is_some());
+    let default = policy.default_action.as_ref().expect("default action");
+    assert_eq!(default.review, 0.8);
+    assert_eq!(default.class, HarmClass::Read);
+    assert_eq!(default.when_unsure, UnsureVerdict::ReviewGuess);
 }
 
 #[test]
@@ -109,7 +112,7 @@ fn harm_class_bump_clears_auto() {
         snapif::policy::effective_gates(&policy, &ActionId::new("tag"), Some(HarmClass::Write))
             .unwrap();
     assert!(gates.auto.is_none());
-    assert!(gates.harm_bumped.is_some());
+    assert_eq!(gates.harm_bumped, Some((HarmClass::Read, HarmClass::Write)));
 }
 
 #[test]
