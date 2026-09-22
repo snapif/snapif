@@ -142,6 +142,18 @@ impl<B: Backend> Client<B> {
         self
     }
 
+    /// Sets the wire model id. Empty or whitespace is [`Error::Policy`].
+    pub fn model(mut self, id: impl AsRef<str>) -> Result<Self, Error> {
+        let id = id.as_ref().trim();
+        if id.is_empty() {
+            return Err(Error::Policy(PolicyError::Invariant(
+                "SNAPIF_MODEL".to_string(),
+            )));
+        }
+        self.model = id.to_string();
+        Ok(self)
+    }
+
     pub fn backend(&self) -> &B {
         &self.backend
     }
@@ -221,7 +233,8 @@ impl Client<AnyBackend> {
     ///
     /// Unset or non-Unicode is [`Error::Policy`], not a silent fake.
     /// `SNAPIF_SHADOW` of `1` or `true` sets the shadow override.
-    /// `SNAPIF_MODEL` overrides the default `jev-latest`. `SNAPIF_TIMEOUT_MS`
+    /// `SNAPIF_MODEL` overrides the default `jev-latest`. Empty or whitespace
+    /// is [`Error::Policy`]. `SNAPIF_TIMEOUT_MS`
     /// overrides the 2000 ms gate budget. `SNAPIF_POLICY` is a shipped id or
     /// a `.toml` path; unset uses `tool-gate`.
     /// `typesafe` reads `TYPESAFE_API_KEY` and fails with [`Error::Auth`] when
@@ -294,7 +307,13 @@ fn apply_runtime(
             .map_err(|_| Error::Policy(PolicyError::Invariant("SNAPIF_TIMEOUT_MS".to_string())))?;
         client = client.timeout(Duration::from_millis(ms));
     }
-    if let Some(model) = nonempty(env.model.as_deref()) {
+    if let Some(raw) = env.model.as_deref() {
+        let model = raw.trim();
+        if model.is_empty() {
+            return Err(Error::Policy(PolicyError::Invariant(
+                "SNAPIF_MODEL".to_string(),
+            )));
+        }
         client.model = model.to_string();
     }
     Ok(client)
@@ -662,5 +681,42 @@ mod tests {
             },
         );
         assert!(matches!(bad_policy, Err(Error::Policy(_))));
+    }
+
+    #[test]
+    fn model_env_rejects_blank_and_keeps_the_default() {
+        let default =
+            Client::<AnyBackend>::from_parts(Some("fake"), false, &super::BackendEnv::default())
+                .expect("fake");
+        assert_eq!(default.model, "jev-latest");
+
+        for blank in ["", "   ", "\t"] {
+            let err = Client::<AnyBackend>::from_parts(
+                Some("fake"),
+                false,
+                &super::BackendEnv {
+                    model: Some(blank.to_string()),
+                    ..super::BackendEnv::default()
+                },
+            );
+            assert!(
+                matches!(
+                    err,
+                    Err(Error::Policy(PolicyError::Invariant(message))) if message == "SNAPIF_MODEL"
+                ),
+                "{blank:?}"
+            );
+        }
+
+        let trimmed = Client::<AnyBackend>::from_parts(
+            Some("fake"),
+            false,
+            &super::BackendEnv {
+                model: Some("  local-model  ".to_string()),
+                ..super::BackendEnv::default()
+            },
+        )
+        .expect("trimmed");
+        assert_eq!(trimmed.model, "local-model");
     }
 }
