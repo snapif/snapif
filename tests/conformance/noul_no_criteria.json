@@ -1,0 +1,1 @@
+{"state":"Hi, I've been trying to connect my Stripe account for 3 days and the integration keeps failing. I'm losing sales. Please help ASAP.","model":"jev-latest","questions":{"is_urgent":{"type":"noul","instructions":"The message conveys urgency or time-sensitivity"}}}

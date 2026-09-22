@@ -1,6 +1,10 @@
 //! Snapif.
 #![forbid(unsafe_code)]
 
+pub mod error;
+pub mod ids;
+pub mod wire;
+
 #[cfg(test)]
 mod tests {
     #[test]
