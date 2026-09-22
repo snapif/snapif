@@ -156,6 +156,7 @@ impl<B: Backend> Client<B> {
             .policy
             .as_ref()
             .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
+        policy.ensure_checked()?;
         let mut request = WireRequest {
             model: self.model.clone(),
             state: state.to_wire(None),

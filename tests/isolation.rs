@@ -3,7 +3,7 @@ use std::fs;
 use indexmap::IndexMap;
 use serde_json::{Value, json};
 use snapif::backends::fake::FakeBackend;
-use snapif::error::{DecodeError, Error};
+use snapif::error::{DecodeError, Error, PolicyError};
 use snapif::ids::{ActionId, QuestionId};
 use snapif::policy::{Fail, Policy};
 use snapif::question::{ChoiceQ, Question};
@@ -173,6 +173,65 @@ fn missing_harm_class_escalates_after_evaluate() {
             .expect("gate");
     assert!(matches!(verdict, Verdict::Escalate(_)));
     assert!(client.backend().last_state().is_some());
+}
+
+#[test]
+fn mutated_thresholds_are_rejected_before_gate() {
+    let mut policy = Policy::shipped("tool-gate").expect("shipped");
+    policy.choice.review_below = 0.1;
+    let client = Client::new(script("read", 0.91, &[])).policy(policy);
+    let err = pollster::block_on(client.gate(request("tag", json!({}), json!(null), json!({}))))
+        .expect_err("unchecked thresholds");
+    assert!(matches!(err, Error::Policy(_)), "{err:?}");
+}
+
+#[test]
+fn mutated_schema_version_is_rejected() {
+    let mut policy = Policy::shipped("tool-gate").expect("shipped");
+    policy.schema_version = 99;
+    let client = Client::new(script("read", 0.91, &[])).policy(policy);
+    let err = pollster::block_on(client.gate(request("tag", json!({}), json!(null), json!({}))))
+        .expect_err("schema");
+    assert!(
+        matches!(err, Error::Policy(PolicyError::Schema(99))),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn mutated_zero_floor_is_missing_unsure_on_gate_and_ask() {
+    let mut policy = Policy::shipped("tool-gate").expect("shipped");
+    policy.choice.escalate_below = 0.0;
+    policy.choice.review_below = 0.0;
+    if let Some(row) = policy.default_action.as_mut() {
+        row.review = 0.0;
+        row.auto = Some(0.0);
+    }
+    for row in policy.actions.values_mut() {
+        row.review = 0.0;
+        row.auto = Some(0.0);
+    }
+    let gate_client = Client::new(script("read", 0.91, &[])).policy(policy.clone());
+    let gate_err =
+        pollster::block_on(gate_client.gate(request("tag", json!({}), json!(null), json!({}))))
+            .expect_err("gate floor");
+    assert!(
+        matches!(gate_err, Error::Policy(PolicyError::MissingUnsure)),
+        "{gate_err:?}"
+    );
+    let ask_client = Client::new(FakeBackend::new()).policy(policy);
+    let ask_err = pollster::block_on(ask_client.ask(
+        snapif::State {
+            trusted: json!({}),
+            untrusted: json!(null),
+        },
+        Vec::new(),
+    ))
+    .expect_err("ask floor");
+    assert!(
+        matches!(ask_err, Error::Policy(PolicyError::MissingUnsure)),
+        "{ask_err:?}"
+    );
 }
 
 #[test]
