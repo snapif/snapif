@@ -2,7 +2,7 @@ use snapif::error::PolicyError;
 use snapif::ids::ActionId;
 use snapif::policy::{HarmClass, NoulObs, Policy, UnsureVerdict, verdict_with_blocks};
 use snapif::question::{ChoiceLabels, ScoreLabels};
-use snapif::verdict::{Decision, Verdict};
+use snapif::verdict::{Decision, UnsureReason, Verdict};
 use snapif::{choice, score};
 
 choice! {
@@ -103,6 +103,98 @@ fn seven_numeric_examples() {
     assert_eq!(kind("refund", 0.97, &[]), "review");
     assert_eq!(kind("tag", 0.97, &[]), "auto");
     assert_eq!(kind("tag", 0.70, &[]), "review");
+}
+
+#[test]
+fn review_above_the_floor_names_the_floor() {
+    let policy = Policy::shipped("tool-gate").unwrap();
+    let verdict = verdict_with_blocks(
+        &policy,
+        &ActionId::new("git.push"),
+        1.0,
+        Some(HarmClass::Network),
+        &[],
+    )
+    .unwrap();
+    match verdict {
+        Verdict::Review(hint) => {
+            assert!(
+                hint.reasons.iter().any(|reason| matches!(
+                    reason,
+                    UnsureReason::ReviewFloor {
+                        confidence,
+                        floor,
+                        auto: None,
+                    } if (*confidence - 1.0).abs() < 1e-9 && (*floor - 0.85).abs() < 1e-9
+                )),
+                "{:?}",
+                hint.reasons
+            );
+        }
+        other => panic!("git.push at 1.0 is review, got {other:?}"),
+    }
+}
+
+#[test]
+fn unknown_read_autos_only_for_a_quiet_read_class() {
+    let policy = Policy::shipped("tool-gate").unwrap();
+    let default = policy.default_action.as_ref().expect("default");
+    assert_eq!(default.auto, Some(0.8));
+    assert_eq!(default.class, HarmClass::Read);
+
+    let auto = verdict_with_blocks(
+        &policy,
+        &ActionId::new("read_file"),
+        0.95,
+        Some(HarmClass::None),
+        &[],
+    )
+    .unwrap();
+    assert!(matches!(auto, Verdict::Auto(_)), "{auto:?}");
+
+    let weak = verdict_with_blocks(
+        &policy,
+        &ActionId::new("read_file"),
+        0.70,
+        Some(HarmClass::None),
+        &[],
+    )
+    .unwrap();
+    assert!(matches!(weak, Verdict::Review(_)), "{weak:?}");
+
+    let bumped = verdict_with_blocks(
+        &policy,
+        &ActionId::new("read_file"),
+        0.95,
+        Some(HarmClass::Exec),
+        &[],
+    )
+    .unwrap();
+    match bumped {
+        Verdict::Review(hint) => {
+            assert!(
+                hint.reasons
+                    .iter()
+                    .any(|reason| matches!(reason, UnsureReason::ReviewFloor { auto: None, .. })),
+                "{:?}",
+                hint.reasons
+            );
+        }
+        other => panic!("harm bump stays review, got {other:?}"),
+    }
+
+    let claimed = verdict_with_blocks(
+        &policy,
+        &ActionId::new("read_file"),
+        0.95,
+        Some(HarmClass::None),
+        &[NoulObs {
+            id: "authority_claim",
+            p: 0.95,
+        }],
+    )
+    .unwrap();
+    assert!(matches!(claimed, Verdict::Escalate(_)), "{claimed:?}");
 }
 
 #[test]
