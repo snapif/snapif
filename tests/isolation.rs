@@ -206,7 +206,10 @@ fn missing_harm_class_escalates_after_evaluate() {
         pollster::block_on(client.gate(request("tag", json!({}), json!(null), json!({}))))
             .expect("gate");
     assert!(matches!(verdict, Verdict::Escalate(_)));
-    assert!(client.backend().last_state().is_some());
+    let state = client.backend().last_state().expect("recorded state");
+    assert!(state.get("trusted").is_some(), "missing trusted");
+    assert!(state.get("untrusted").is_some(), "missing untrusted");
+    assert!(state.get("prepared").is_some(), "missing prepared");
 }
 
 #[test]
@@ -328,7 +331,10 @@ block_on = [
         })),
         other => panic!("choice block ignored {other:?}"),
     }
-    assert!(client.backend().last_state().is_some());
+    let state = client.backend().last_state().expect("recorded state");
+    assert!(state.get("trusted").is_some(), "missing trusted");
+    assert!(state.get("untrusted").is_some(), "missing untrusted");
+    assert!(state.get("prepared").is_some(), "missing prepared");
 }
 
 #[test]

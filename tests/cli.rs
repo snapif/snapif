@@ -249,7 +249,7 @@ fn base_url_posts_a_vector_and_checks_the_response() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
 }
 
 #[cfg(feature = "http")]
