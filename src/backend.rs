@@ -52,6 +52,15 @@ pub enum AnyBackend {
     Fake(FakeBackend),
     #[cfg(feature = "http")]
     Http(crate::backends::http::HttpBackend),
+    #[cfg(feature = "http")]
+    CascadeHttp(
+        Box<
+            crate::backends::cascade::Cascaded<
+                crate::backends::http::HttpBackend,
+                crate::backends::http::HttpBackend,
+            >,
+        >,
+    ),
 }
 
 impl Backend for AnyBackend {
@@ -60,6 +69,8 @@ impl Backend for AnyBackend {
             AnyBackend::Fake(backend) => backend.id(),
             #[cfg(feature = "http")]
             AnyBackend::Http(backend) => backend.id(),
+            #[cfg(feature = "http")]
+            AnyBackend::CascadeHttp(backend) => backend.id(),
         }
     }
 
@@ -72,6 +83,8 @@ impl Backend for AnyBackend {
             AnyBackend::Fake(backend) => backend.evaluate(req, deadline).await,
             #[cfg(feature = "http")]
             AnyBackend::Http(backend) => backend.evaluate(req, deadline).await,
+            #[cfg(feature = "http")]
+            AnyBackend::CascadeHttp(backend) => backend.evaluate(req, deadline).await,
         }
     }
 }
@@ -81,6 +94,7 @@ pub struct Client<B: Backend> {
     pub(crate) policy: Option<Policy>,
     pub(crate) on_usage: Option<UsageFn>,
     pub(crate) timeout: Duration,
+    shadow_override: Option<bool>,
 }
 
 impl<B: Backend> Client<B> {
@@ -90,7 +104,18 @@ impl<B: Backend> Client<B> {
             policy: None,
             on_usage: None,
             timeout: Duration::from_millis(2000),
+            shadow_override: None,
         }
+    }
+
+    /// Overrides `policy.shadow` for `gate()`. Does not rewrite the verdict.
+    pub fn shadow(mut self, on: bool) -> Self {
+        self.shadow_override = Some(on);
+        self
+    }
+
+    pub(crate) fn shadow_on(&self, policy_shadow: bool) -> bool {
+        self.shadow_override.unwrap_or(policy_shadow)
     }
 
     pub fn policy(mut self, policy: Policy) -> Self {
@@ -168,6 +193,7 @@ struct BackendEnv {
     snapif_key: Option<String>,
     #[cfg(feature = "http")]
     base_url: Option<String>,
+    #[cfg_attr(not(feature = "http"), allow(dead_code))]
     cascade: Option<String>,
 }
 
@@ -175,13 +201,20 @@ impl Client<AnyBackend> {
     /// `SNAPIF_BACKEND` is required (`fake`, `typesafe`, or `compatible`).
     ///
     /// Unset or non-Unicode is [`Error::Policy`], not a silent fake.
+    /// `SNAPIF_SHADOW` of `1` or `true` sets the shadow override.
     /// `typesafe` reads `TYPESAFE_API_KEY` and fails with [`Error::Auth`] when
     /// that key is missing. `compatible` reads `SNAPIF_BASE_URL` (origin only)
-    /// and `SNAPIF_API_KEY` (optional on loopback). `SNAPIF_CASCADE_BASE_URL`
-    /// is rejected until cascade exists. Without the `http` feature, `typesafe`
-    /// and `compatible` stay [`Error::Policy`].
+    /// and `SNAPIF_API_KEY` (optional on loopback). When
+    /// `SNAPIF_CASCADE_BASE_URL` is set and the backend is not `fake`, the
+    /// first hop is that origin with `SNAPIF_API_KEY` and the fallback is
+    /// `typesafe` or `compatible`. Without the `http` feature, `typesafe`,
+    /// `compatible`, and a cascade URL stay [`Error::Policy`].
     pub fn from_env() -> Result<Self, Error> {
         let name = std::env::var("SNAPIF_BACKEND").ok();
+        let shadow = matches!(
+            std::env::var("SNAPIF_SHADOW").ok().as_deref(),
+            Some("1" | "true" | "TRUE" | "True")
+        );
         let env = BackendEnv {
             #[cfg(feature = "http")]
             typesafe_key: std::env::var("TYPESAFE_API_KEY").ok(),
@@ -191,54 +224,90 @@ impl Client<AnyBackend> {
             base_url: std::env::var("SNAPIF_BASE_URL").ok(),
             cascade: std::env::var("SNAPIF_CASCADE_BASE_URL").ok(),
         };
-        Self::from_parts(name.as_deref(), &env)
+        Self::from_parts(name.as_deref(), shadow, &env)
     }
 
-    fn from_parts(name: Option<&str>, env: &BackendEnv) -> Result<Self, Error> {
-        if name.is_some_and(|name| name != "fake")
-            && env.cascade.as_ref().is_some_and(|value| !value.is_empty())
-        {
-            return Err(Error::Policy(PolicyError::Invariant(
-                "SNAPIF_CASCADE_BASE_URL".to_string(),
-            )));
-        }
-        match name {
-            None => Err(Error::Policy(PolicyError::Invariant(
-                "SNAPIF_BACKEND".to_string(),
-            ))),
+    #[cfg_attr(not(feature = "http"), allow(unused_variables))]
+    fn from_parts(name: Option<&str>, shadow: bool, env: &BackendEnv) -> Result<Self, Error> {
+        let client = match name {
+            None => {
+                return Err(Error::Policy(PolicyError::Invariant(
+                    "SNAPIF_BACKEND".to_string(),
+                )));
+            }
             Some("fake") => {
                 let policy = Policy::shipped("tool-gate")?;
-                Ok(Self::new(AnyBackend::Fake(FakeBackend::new())).policy(policy))
+                Self::new(AnyBackend::Fake(FakeBackend::new())).policy(policy)
             }
             #[cfg(feature = "http")]
-            Some("typesafe") => {
-                let key = env.typesafe_key.clone().unwrap_or_default();
-                let backend = crate::backends::http::HttpBackend::typesafe(key)?;
-                let policy = Policy::shipped("tool-gate")?;
-                Ok(Self::new(AnyBackend::Http(backend)).policy(policy))
+            Some(name @ ("typesafe" | "compatible")) => http_client(name, env)?,
+            #[cfg(not(feature = "http"))]
+            Some(name @ ("typesafe" | "compatible")) => {
+                return Err(Error::Policy(PolicyError::Invariant(name.to_string())));
             }
-            #[cfg(feature = "http")]
-            Some("compatible") => {
-                let Some(raw) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
+            Some(other) => {
+                return Err(Error::Policy(PolicyError::Invariant(other.to_string())));
+            }
+        };
+        Ok(if shadow { client.shadow(true) } else { client })
+    }
+}
+
+#[cfg(feature = "http")]
+fn http_client(name: &str, env: &BackendEnv) -> Result<Client<AnyBackend>, Error> {
+    let policy = Policy::shipped("tool-gate")?;
+    let backend = if let Some(raw) = env.cascade.as_deref().filter(|value| !value.is_empty()) {
+        let first = compatible_backend(raw, env.snapif_key.clone(), "SNAPIF_CASCADE_BASE_URL")?;
+        let fallback = match name {
+            "typesafe" => crate::backends::http::HttpBackend::typesafe(
+                env.typesafe_key.clone().unwrap_or_default(),
+            )?,
+            "compatible" => {
+                let Some(base) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
                     return Err(Error::Policy(PolicyError::Invariant(
                         "SNAPIF_BASE_URL".to_string(),
                     )));
                 };
-                let url = url::Url::parse(raw).map_err(|_| {
-                    Error::Policy(PolicyError::Invariant("SNAPIF_BASE_URL".to_string()))
-                })?;
-                let backend =
-                    crate::backends::http::HttpBackend::compatible(url, env.snapif_key.clone())?;
-                let policy = Policy::shipped("tool-gate")?;
-                Ok(Self::new(AnyBackend::Http(backend)).policy(policy))
+                compatible_backend(base, env.snapif_key.clone(), "SNAPIF_BASE_URL")?
             }
-            #[cfg(not(feature = "http"))]
-            Some("typesafe" | "compatible") => Err(Error::Policy(PolicyError::Invariant(
-                name.unwrap_or("backend").to_string(),
-            ))),
-            Some(other) => Err(Error::Policy(PolicyError::Invariant(other.to_string()))),
+            _ => return Err(Error::Policy(PolicyError::Invariant(name.to_string()))),
+        };
+        let rule = crate::backends::cascade::CascadeRule::new(policy.cascade_min);
+        AnyBackend::CascadeHttp(Box::new(crate::backends::cascade::Cascaded::new(
+            first, fallback, rule,
+        )))
+    } else {
+        match name {
+            "typesafe" => AnyBackend::Http(crate::backends::http::HttpBackend::typesafe(
+                env.typesafe_key.clone().unwrap_or_default(),
+            )?),
+            "compatible" => {
+                let Some(base) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
+                    return Err(Error::Policy(PolicyError::Invariant(
+                        "SNAPIF_BASE_URL".to_string(),
+                    )));
+                };
+                AnyBackend::Http(compatible_backend(
+                    base,
+                    env.snapif_key.clone(),
+                    "SNAPIF_BASE_URL",
+                )?)
+            }
+            _ => return Err(Error::Policy(PolicyError::Invariant(name.to_string()))),
         }
-    }
+    };
+    Ok(Client::new(backend).policy(policy))
+}
+
+#[cfg(feature = "http")]
+fn compatible_backend(
+    raw: &str,
+    key: Option<String>,
+    invariant: &str,
+) -> Result<crate::backends::http::HttpBackend, Error> {
+    let url = url::Url::parse(raw)
+        .map_err(|_| Error::Policy(PolicyError::Invariant(invariant.to_string())))?;
+    crate::backends::http::HttpBackend::compatible(url, key)
 }
 
 #[derive(Debug)]
@@ -446,8 +515,8 @@ mod tests {
 
     #[test]
     fn from_name_selects_without_env() {
-        let Err(unset) = Client::<AnyBackend>::from_parts(None, &super::BackendEnv::default())
-        else {
+        let env = super::BackendEnv::default();
+        let Err(unset) = Client::<AnyBackend>::from_parts(None, false, &env) else {
             panic!("unset must be policy");
         };
         assert!(matches!(
@@ -455,14 +524,14 @@ mod tests {
             Error::Policy(PolicyError::Invariant(message)) if message == "SNAPIF_BACKEND"
         ));
 
-        let client = Client::<AnyBackend>::from_parts(Some("fake"), &super::BackendEnv::default())
-            .expect("fake");
+        let client = Client::<AnyBackend>::from_parts(Some("fake"), false, &env).expect("fake");
         assert_eq!(client.backend().id(), "fake");
+        let shadowed = Client::<AnyBackend>::from_parts(Some("fake"), true, &env).expect("shadow");
+        assert_eq!(shadowed.shadow_override, Some(true));
 
         #[cfg(not(feature = "http"))]
         {
-            let Err(unknown) =
-                Client::<AnyBackend>::from_parts(Some("typesafe"), &super::BackendEnv::default())
+            let Err(unknown) = Client::<AnyBackend>::from_parts(Some("typesafe"), false, &env)
             else {
                 panic!("typesafe must be policy");
             };
@@ -470,17 +539,22 @@ mod tests {
                 unknown,
                 Error::Policy(PolicyError::Invariant(message)) if message == "typesafe"
             ));
+            let cascade_env = super::BackendEnv {
+                cascade: Some("http://127.0.0.1:9".to_string()),
+            };
+            let err = Client::<AnyBackend>::from_parts(Some("typesafe"), false, &cascade_env);
+            assert!(matches!(err, Err(Error::Policy(_))));
         }
         #[cfg(feature = "http")]
         {
-            let Err(missing_key) =
-                Client::<AnyBackend>::from_parts(Some("typesafe"), &super::BackendEnv::default())
+            let Err(missing_key) = Client::<AnyBackend>::from_parts(Some("typesafe"), false, &env)
             else {
                 panic!("typesafe without a key must be auth");
             };
             assert!(matches!(missing_key, Error::Auth(_)));
             let selected = Client::<AnyBackend>::from_parts(
                 Some("typesafe"),
+                false,
                 &super::BackendEnv {
                     typesafe_key: Some("secret".to_string()),
                     ..super::BackendEnv::default()
@@ -488,17 +562,17 @@ mod tests {
             )
             .expect("typesafe");
             assert_eq!(selected.backend().id(), "typesafe");
-            let Err(cascade) = Client::<AnyBackend>::from_parts(
+            let cascaded = Client::<AnyBackend>::from_parts(
                 Some("typesafe"),
+                false,
                 &super::BackendEnv {
                     typesafe_key: Some("secret".to_string()),
                     cascade: Some("http://127.0.0.1:9".to_string()),
                     ..super::BackendEnv::default()
                 },
-            ) else {
-                panic!("cascade is not built in this PR");
-            };
-            assert!(matches!(cascade, Error::Policy(_)));
+            )
+            .expect("cascade");
+            assert_eq!(cascaded.backend().id(), "cascade");
         }
     }
 }
