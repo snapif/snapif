@@ -87,6 +87,7 @@ fn unknown_shipped_policy_is_still_an_error() {
     let err = Policy::shipped("nope").expect_err("unknown policy");
     let message = err.to_string();
     assert!(message.contains("nope"), "{message}");
+    assert!(!message.contains("threshold invariant"), "{message}");
 }
 
 #[test]
