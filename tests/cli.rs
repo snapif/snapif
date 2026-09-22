@@ -31,6 +31,46 @@ fn test_empty_directory_exits_1() {
 }
 
 #[test]
+fn missing_paths_name_the_file() {
+    let missing = std::env::temp_dir().join(format!("snapif-missing-{}", std::process::id()));
+    let missing_s = missing.display().to_string();
+    let cases: &[(&[&str], &str)] = &[
+        (&["gate", "--call"], &missing_s),
+        (&["ask", "--state"], &missing_s),
+        (&["replay"], &missing_s),
+        (&["test", "--vectors"], &missing_s),
+    ];
+    for (args, path) in cases {
+        let output = bin()
+            .args(*args)
+            .arg(path)
+            .env("SNAPIF_BACKEND", "fake")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{args:?} {err}");
+        assert!(err.contains(path), "{args:?} {err}");
+    }
+    let call = std::env::temp_dir().join(format!("snapif-call-ok-{}", std::process::id()));
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"untrusted":null}"#,
+    )
+    .expect("call");
+    let policy = format!("{missing_s}.toml");
+    let output = bin()
+        .args(["gate", "--policy", &policy, "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains(&policy), "{err}");
+    let _ = fs::remove_file(call);
+}
+
+#[test]
 fn replay_blank_file_exits_1() {
     let path = std::env::temp_dir().join(format!("snapif-blank-{}.jsonl", std::process::id()));
     fs::write(&path, "\n\n").expect("write");

@@ -251,7 +251,7 @@ fn each_vector(
     let entries = match fs::read_dir(vectors) {
         Ok(entries) => entries,
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("{}: {err}", vectors.display());
             return Err(1);
         }
     };
@@ -304,7 +304,7 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("{}: {err}", path.display());
             return 1;
         }
     };
@@ -507,7 +507,12 @@ fn expects_reject(bytes: &[u8]) -> bool {
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<T, Error> {
-    let text = fs::read_to_string(path)?;
+    let text = fs::read_to_string(path).map_err(|err| {
+        Error::Io(std::io::Error::new(
+            err.kind(),
+            format!("{}: {err}", path.display()),
+        ))
+    })?;
     serde_json::from_str(&text).map_err(|err| Error::Wire(WireError::Json(err.to_string())))
 }
 

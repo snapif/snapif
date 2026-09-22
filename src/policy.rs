@@ -189,7 +189,9 @@ impl Policy {
     /// Shipped id, or a path whose name ends in `.toml`.
     pub fn load(spec: &str) -> Result<Self, Error> {
         if spec.ends_with(".toml") {
-            let text = std::fs::read_to_string(spec)?;
+            let text = std::fs::read_to_string(spec).map_err(|err| {
+                Error::Io(std::io::Error::new(err.kind(), format!("{spec}: {err}")))
+            })?;
             Ok(Self::from_toml_str(&text)?)
         } else {
             Ok(Self::shipped(spec)?)
