@@ -777,4 +777,37 @@ mod tests {
         };
         assert_eq!(on.backend().id(), "compatible");
     }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn private_http_flag_covers_the_cascade_origin() {
+        let denied = Client::<AnyBackend>::from_parts(
+            Some("compatible"),
+            false,
+            &super::BackendEnv {
+                base_url: Some("http://10.0.0.1".into()),
+                cascade: Some("http://192.168.1.50".into()),
+                snapif_key: Some("snapif-key".into()),
+                allow_private_http: false,
+                ..super::BackendEnv::default()
+            },
+        );
+        assert!(matches!(denied, Err(Error::Policy(_))));
+
+        let allowed = Client::<AnyBackend>::from_parts(
+            Some("compatible"),
+            false,
+            &super::BackendEnv {
+                base_url: Some("http://10.0.0.1".into()),
+                cascade: Some("http://192.168.1.50".into()),
+                snapif_key: Some("snapif-key".into()),
+                allow_private_http: true,
+                ..super::BackendEnv::default()
+            },
+        );
+        let Ok(allowed) = allowed else {
+            panic!("private http cascade");
+        };
+        assert_eq!(allowed.backend().id(), "cascade");
+    }
 }

@@ -292,6 +292,13 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_loopback_http_does_not_need_the_private_flag() {
+        let backend = HttpBackend::compatible(url("http://[::1]:9"), None).expect("loopback");
+        assert_eq!(backend.id(), "compatible");
+        assert_eq!(backend.endpoint(), "http://[::1]:9/v1/systemone");
+    }
+
+    #[test]
     fn private_http_stays_off_without_the_opt_in() {
         let key = Some("snapif-key".to_string());
         for origin in ["http://192.168.1.50", "http://10.0.0.1", "http://[fd00::1]"] {
