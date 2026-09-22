@@ -406,3 +406,90 @@ class = "read"
     let err = Policy::from_toml_str(raw).expect_err("floor");
     assert!(matches!(err, snapif::error::PolicyError::Invariant(_)));
 }
+
+#[test]
+fn choice_confidence_at_min_is_kept() {
+    let pair = pair(
+        vec![("department".into(), choice(0.8))],
+        None,
+        vec![("department".into(), choice(0.1))],
+        None,
+        rule_empty(),
+    );
+    let evaluated = run(&pair, &["department"]).expect("ok");
+    assert!(pair.fallback_seen.lock().expect("seen").is_empty());
+    match &evaluated.wire.answers["department"] {
+        WireAnswer::Choice { confidence, .. } => assert!((*confidence - 0.8).abs() < 1e-9),
+        other => panic!("unexpected {other:?}"),
+    }
+    assert_eq!(
+        evaluated.meta["department"].cascade_hop,
+        Some(CascadeHop::First)
+    );
+}
+
+#[test]
+fn noul_margin_at_min_is_kept() {
+    let pair = pair(
+        vec![("margin".into(), noul(0.9))],
+        None,
+        vec![("margin".into(), noul(0.1))],
+        None,
+        rule_empty(),
+    );
+    let evaluated = run(&pair, &["margin"]).expect("ok");
+    assert!(pair.fallback_seen.lock().expect("seen").is_empty());
+    match &evaluated.wire.answers["margin"] {
+        WireAnswer::Noul { noul } => assert!((*noul - 0.9).abs() < 1e-9),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn confidence_just_below_min_retries_only_that_id() {
+    let pair = pair(
+        vec![
+            ("steady".into(), choice(0.8)),
+            ("edge".into(), choice(0.79)),
+        ],
+        None,
+        vec![("edge".into(), choice(0.99))],
+        None,
+        rule_empty(),
+    );
+    let evaluated = run(&pair, &["steady", "edge"]).expect("ok");
+    let seen = pair.fallback_seen.lock().expect("seen");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0], vec!["edge".to_string()]);
+    match &evaluated.wire.answers["steady"] {
+        WireAnswer::Choice { confidence, .. } => assert!((*confidence - 0.8).abs() < 1e-9),
+        other => panic!("unexpected {other:?}"),
+    }
+    match &evaluated.wire.answers["edge"] {
+        WireAnswer::Choice { confidence, .. } => assert!((*confidence - 0.99).abs() < 1e-9),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn omitted_first_answer_is_the_only_fallback_post() {
+    let pair = pair(
+        vec![("shown".into(), choice(0.95))],
+        None,
+        vec![("omitted".into(), choice(0.91))],
+        None,
+        rule_empty(),
+    );
+    let evaluated = run(&pair, &["shown", "omitted"]).expect("ok");
+    let seen = pair.fallback_seen.lock().expect("seen");
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0], vec!["omitted".to_string()]);
+    match &evaluated.wire.answers["shown"] {
+        WireAnswer::Choice { confidence, .. } => assert!((*confidence - 0.95).abs() < 1e-9),
+        other => panic!("unexpected {other:?}"),
+    }
+    match &evaluated.wire.answers["omitted"] {
+        WireAnswer::Choice { confidence, .. } => assert!((*confidence - 0.91).abs() < 1e-9),
+        other => panic!("unexpected {other:?}"),
+    }
+}
