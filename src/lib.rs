@@ -20,12 +20,12 @@ pub use backend::{AnswerMeta, AnyBackend, AskOut, CascadeHop, Client};
 pub use backends::fake::FakeBackend;
 pub use error::Error;
 pub use gate::GateRequest;
-pub use ids::QuestionId;
-pub use policy::Policy;
+pub use ids::{ActionId, QuestionId};
+pub use policy::{Fail, Policy};
 pub use question::Question;
 pub use state::{PreparedCall, State};
 pub use usage::UsageFn;
-pub use verdict::{Decision, Verdict};
+pub use verdict::{ActionHint, Decision, Verdict};
 
 #[cfg(test)]
 mod tests {

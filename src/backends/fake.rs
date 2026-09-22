@@ -18,6 +18,7 @@ enum Script {
 pub struct FakeBackend {
     scripts: IndexMap<String, Script>,
     last_state: Mutex<Option<Value>>,
+    last_model: Mutex<Option<String>>,
 }
 
 impl FakeBackend {
@@ -27,6 +28,7 @@ impl FakeBackend {
         Self {
             scripts: IndexMap::new(),
             last_state: Mutex::new(None),
+            last_model: Mutex::new(None),
         }
     }
 
@@ -59,6 +61,10 @@ impl FakeBackend {
     pub fn last_state(&self) -> Option<Value> {
         self.last_state.lock().ok().and_then(|guard| guard.clone())
     }
+
+    pub fn last_model(&self) -> Option<String> {
+        self.last_model.lock().ok().and_then(|guard| guard.clone())
+    }
 }
 
 impl Backend for FakeBackend {
@@ -77,6 +83,9 @@ impl Backend for FakeBackend {
                 .lock()
                 .map_err(|err| BackendError::Transport(err.to_string()))?;
             *guard = Some(req.state.clone());
+        }
+        if let Ok(mut guard) = self.last_model.lock() {
+            *guard = Some(req.model.clone());
         }
         if Instant::now() >= deadline {
             return Err(BackendError::Timeout);

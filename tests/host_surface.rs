@@ -1,0 +1,23 @@
+use snapif::backend::Backend;
+use snapif::error::{Error, PolicyError};
+use snapif::policy::Fail;
+use snapif::verdict::UnsureReason;
+use snapif::{ActionHint, ActionId, Client, FakeBackend, Policy};
+
+#[test]
+fn normative_names_are_exported_and_from_error_marks_backend() {
+    let from_policy = ActionHint::from_error(&PolicyError::MissingUnsure, ActionId::new("bash"));
+    assert!(from_policy.guess.is_none());
+    assert!(from_policy.meta.is_empty());
+    assert!(matches!(
+        from_policy.reasons.as_slice(),
+        [UnsureReason::Backend]
+    ));
+    let from_gate = ActionHint::from_error(&Error::EmptyActionId, ActionId::new("bash"));
+    assert_eq!(from_gate.action_id.0, "bash");
+
+    let client = Client::new(FakeBackend::new())
+        .policy(Policy::shipped("tool-gate").expect("policy"))
+        .fail(Fail::Closed);
+    assert_eq!(client.backend().id(), "fake");
+}

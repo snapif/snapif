@@ -78,6 +78,8 @@ pub enum Error {
     RateLimit,
     #[error("backend overloaded")]
     Overloaded,
+    #[error("rejected HTTP {status}: {body}")]
+    Rejected { status: u16, body: String },
     #[error("backend: {0}")]
     Backend(String),
     #[error("io: {0}")]

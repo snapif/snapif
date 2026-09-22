@@ -1,5 +1,5 @@
 use crate::answer::NoulAnswer;
-use crate::error::PolicyError;
+use crate::error::{Error, PolicyError};
 use crate::ids::{ActionId, BatteryId, QuestionId};
 use crate::verdict::{Decision, UnsureReason, Verdict, hint};
 use indexmap::IndexMap;
@@ -177,6 +177,16 @@ impl Policy {
         Self::from_toml_str(raw)
     }
 
+    /// Shipped id, or a path whose name ends in `.toml`.
+    pub fn load(spec: &str) -> Result<Self, Error> {
+        if spec.ends_with(".toml") {
+            let text = std::fs::read_to_string(spec)?;
+            Ok(Self::from_toml_str(&text)?)
+        } else {
+            Ok(Self::shipped(spec)?)
+        }
+    }
+
     pub fn from_toml_str(raw: &str) -> Result<Self, PolicyError> {
         let policy: Self =
             toml::from_str(raw).map_err(|err| PolicyError::Invariant(err.to_string()))?;
@@ -344,7 +354,8 @@ pub fn verdict_from_signal(s: f64, gates: &EffectiveGates, action_id: ActionId) 
     }
 }
 
-/// `block_on` rows with no observation stay inert. PR 6 binds the battery.
+/// Synthetic signal helper. A block id with no row in `nouls` stays inert.
+/// `gate` does not use this path: a missing block answer there is a decode failure.
 pub fn verdict_with_blocks(
     policy: &Policy,
     action_id: &ActionId,

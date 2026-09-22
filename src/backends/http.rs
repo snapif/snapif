@@ -161,6 +161,8 @@ fn retry_delay(
             .map(Duration::from_secs)
             .unwrap_or_else(|_| Duration::from_millis(100) * 2u32.pow(retry_index)),
     };
+    // A delay longer than the time still left is not waited out. Sleeping
+    // the remainder would burn the gate budget on a retry that cannot finish.
     if requested > remaining {
         None
     } else {

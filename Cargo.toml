@@ -13,7 +13,7 @@ categories = []
 [features]
 default = []
 http = ["dep:reqwest", "dep:tokio", "dep:url"]
-cli = ["dep:clap", "dep:pollster"]
+cli = ["http", "dep:clap"]
 
 [[bin]]
 name = "snapif"
@@ -30,7 +30,6 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 tokio = { version = "1", optional = true, features = ["rt", "macros", "time"] }
 url = { version = "2", optional = true }
 clap = { version = "4", optional = true, features = ["derive"] }
-pollster = { version = "1.0", optional = true }
 
 [dev-dependencies]
 pollster = "1.0"
