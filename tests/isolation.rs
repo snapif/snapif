@@ -101,6 +101,40 @@ fn seven_shipped_examples() {
 }
 
 #[test]
+fn unknown_read_file_follows_harm_and_authority() {
+    let quiet = || request("read_file", json!({}), json!(null), json!({}));
+    let (_client, auto) = gate(script("none", 0.95, &[]), quiet());
+    assert_eq!(kind(&auto), "Auto");
+
+    let (_client, weak) = gate(script("none", 0.70, &[]), quiet());
+    assert_eq!(kind(&weak), "Review");
+
+    let (_client, bumped) = gate(script("exec", 0.95, &[]), quiet());
+    match &bumped {
+        Verdict::Review(hint) => {
+            assert!(
+                hint.reasons
+                    .iter()
+                    .any(|reason| matches!(reason, UnsureReason::HarmClassBump { .. })),
+                "{:?}",
+                hint.reasons
+            );
+            assert!(
+                hint.reasons
+                    .iter()
+                    .any(|reason| matches!(reason, UnsureReason::ReviewFloor { auto: None, .. })),
+                "{:?}",
+                hint.reasons
+            );
+        }
+        other => panic!("exec harm stays review, got {other:?}"),
+    }
+
+    let (_client, claimed) = gate(script("none", 0.95, &[("authority_claim", 0.95)]), quiet());
+    assert_eq!(kind(&claimed), "Escalate");
+}
+
+#[test]
 fn fixture_rows_match_expected_verdicts() {
     let text = fs::read_to_string("tests/fixtures/actions.jsonl").expect("fixture");
     for line in text.lines().filter(|line| !line.trim().is_empty()) {

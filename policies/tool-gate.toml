@@ -14,6 +14,7 @@ yes_auto = 0.90
 no_auto = 0.10
 
 [default_action]
+auto = 0.8
 review = 0.8
 when_unsure = "review_guess"
 class = "read"

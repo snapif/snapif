@@ -23,16 +23,39 @@ pub struct AnswerMeta {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum UnsureReason {
-    BelowFloor { confidence: f64, floor: f64 },
-    BelowAuto { confidence: f64, auto: f64 },
-    NoulBand { noul: f64 },
-    Battery { id: QuestionId, when: BlockWhen },
-    AuthorityClaim { noul: f64 },
+    BelowFloor {
+        confidence: f64,
+        floor: f64,
+    },
+    BelowAuto {
+        confidence: f64,
+        auto: f64,
+    },
+    /// Cleared the review floor and did not clear an auto band.
+    /// `auto` is `None` when the action has no auto threshold.
+    ReviewFloor {
+        confidence: f64,
+        floor: f64,
+        auto: Option<f64>,
+    },
+    NoulBand {
+        noul: f64,
+    },
+    Battery {
+        id: QuestionId,
+        when: BlockWhen,
+    },
+    AuthorityClaim {
+        noul: f64,
+    },
     Decode(DecodeError),
     Wire,
     Backend,
     CascadeStillUnsure,
-    HarmClassBump { from: HarmClass, to: HarmClass },
+    HarmClassBump {
+        from: HarmClass,
+        to: HarmClass,
+    },
     Truncated,
 }
 

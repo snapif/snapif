@@ -368,7 +368,14 @@ pub fn verdict_from_signal(s: f64, gates: &EffectiveGates, action_id: ActionId) 
         return Verdict::Auto(hint(action_id, Vec::new()));
     }
     if s >= gates.review {
-        Verdict::Review(hint(action_id, Vec::new()))
+        Verdict::Review(hint(
+            action_id,
+            vec![UnsureReason::ReviewFloor {
+                confidence: s,
+                floor: gates.review,
+                auto: gates.auto,
+            }],
+        ))
     } else {
         Verdict::Escalate(hint(
             action_id,
