@@ -27,6 +27,12 @@ impl ActionId {
     }
 }
 
+impl fmt::Display for ActionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct BatteryId(pub String);

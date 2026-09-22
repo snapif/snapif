@@ -1,9 +1,16 @@
 //! Snapif.
 #![forbid(unsafe_code)]
 
+pub mod answer;
 pub mod error;
 pub mod ids;
+mod macros;
+pub mod policy;
+pub mod question;
+pub mod verdict;
 pub mod wire;
+
+pub use verdict::{Decision, Verdict};
 
 #[cfg(test)]
 mod tests {
