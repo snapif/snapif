@@ -178,6 +178,7 @@ impl Policy {
     pub fn shipped(name: &str) -> Result<Self, PolicyError> {
         let raw = match name {
             "tool-gate" => include_str!("../policies/tool-gate.toml"),
+            "triage" => include_str!("../policies/triage.toml"),
             other => {
                 return Err(PolicyError::Invariant(format!("unknown policy {other}")));
             }

@@ -1,0 +1,28 @@
+{
+  "questions": [
+    {
+      "id": "department",
+      "type": "choice",
+      "instructions": "Which department owns this request?",
+      "criteria": [
+        {
+          "label": "billing",
+          "description": "Payments, invoices, refunds"
+        },
+        {
+          "label": "technical",
+          "description": "Bugs, outages, integrations"
+        },
+        {
+          "label": "sales",
+          "description": "Pricing, upgrades"
+        }
+      ]
+    },
+    {
+      "id": "wants_refund",
+      "type": "noul",
+      "instructions": "Does the user want money returned?"
+    }
+  ]
+}

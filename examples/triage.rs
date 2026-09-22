@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
-use snapif::question::{ChoiceLabels, ChoiceQ};
-use snapif::{Client, Decision, FakeBackend, Policy, Question, QuestionId, State};
+use snapif::{Client, Decision, FakeBackend, Policy, QuestionId, State};
 
 snapif::choice! {
     enum Department {
@@ -11,14 +10,16 @@ snapif::choice! {
 }
 
 fn main() {
-    let backend = FakeBackend::new().on_choice("department", "billing", 0.91);
-    let client = Client::new(backend).policy(shipped());
+    let backend = FakeBackend::new()
+        .on_choice("department", "billing", 0.91)
+        .on_noul("wants_refund", 0.05);
+    let client = Client::new(backend).policy(Policy::shipped("triage").expect("shipped triage"));
     let out = pollster::block_on(client.ask(
         State {
             trusted: json!({"user_request": "invoice"}),
             untrusted: Value::Null,
         },
-        vec![department_question()],
+        snapif::triage::questions(),
     ))
     .expect("ask");
     let decision = out
@@ -41,20 +42,4 @@ fn main() {
             std::process::exit(1);
         }
     }
-}
-
-fn department_question() -> Question {
-    let mut criteria = indexmap::IndexMap::new();
-    for (id, text) in Department::labels() {
-        criteria.insert((*id).to_string(), Value::String((*text).to_string()));
-    }
-    Question::Choice(ChoiceQ {
-        id: QuestionId::new("department"),
-        instructions: json!("Which department owns this request?"),
-        criteria,
-    })
-}
-
-fn shipped() -> Policy {
-    Policy::shipped("tool-gate").expect("shipped tool-gate")
 }
