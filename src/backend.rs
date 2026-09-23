@@ -341,7 +341,9 @@ impl Client<AnyBackend> {
                     None
                 } else {
                     Some(raw.parse::<usize>().map_err(|_| {
-                        Error::Policy(PolicyError::Config("SNAPIF_CACHE".to_string()))
+                        Error::Policy(PolicyError::Config(format!(
+                            "SNAPIF_CACHE must be an integer, got {raw}"
+                        )))
                     })?)
                 }
             }

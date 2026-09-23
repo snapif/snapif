@@ -817,7 +817,19 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("auto none"), "{stdout}");
-    assert!(stdout.contains("exfil"), "{stdout}");
+    assert!(stdout.contains("exfil:yes"), "{stdout}");
+    assert!(!stdout.contains("source default_action"), "{stdout}");
+    let unknown = bin()
+        .args(["explain", "--action", "no-such-action"])
+        .env_remove("SNAPIF_BACKEND")
+        .output()
+        .expect("run");
+    let unknown_out = String::from_utf8_lossy(&unknown.stdout);
+    assert_eq!(unknown.status.code(), Some(0), "{unknown_out}");
+    assert!(
+        unknown_out.contains("source default_action"),
+        "{unknown_out}"
+    );
     let missing =
         std::env::temp_dir().join(format!("snapif-missing-policy-{}.toml", std::process::id()));
     let bad = bin()
@@ -828,6 +840,45 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
     let err = String::from_utf8_lossy(&bad.stderr);
     assert_eq!(bad.status.code(), Some(1), "{err}");
     assert!(err.contains(&missing.display().to_string()), "{err}");
+}
+
+#[test]
+fn log_failure_names_the_path_and_cache_rejects_words() {
+    let call = std::env::temp_dir().join(format!("snapif-logfail-{}.json", std::process::id()));
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"untrusted":null}"#,
+    )
+    .expect("write");
+    let missing = std::env::temp_dir().join(format!(
+        "snapif-missing-log-dir-{}/log.jsonl",
+        std::process::id()
+    ));
+    let logged = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &missing)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&logged.stderr);
+    assert_eq!(logged.status.code(), Some(11), "{err}");
+    assert!(err.contains(&missing.display().to_string()), "{err}");
+    let cache = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_CACHE", "lots")
+        .output()
+        .expect("run");
+    let cache_err = String::from_utf8_lossy(&cache.stderr);
+    assert_eq!(cache.status.code(), Some(1), "{cache_err}");
+    assert!(cache_err.contains("must be an integer"), "{cache_err}");
+    let help = bin().args(["gate", "--help"]).output().expect("help");
+    let help_out = String::from_utf8_lossy(&help.stdout);
+    assert!(help_out.contains("SNAPIF_LOG"), "{help_out}");
+    assert!(help_out.contains("SNAPIF_CACHE"), "{help_out}");
+    let _ = fs::remove_file(&call);
 }
 
 fn hook_output(body: &[u8], shadow: bool) -> std::process::Output {
@@ -963,5 +1014,22 @@ fn calibrate_empty_file_names_the_path() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(err.contains("no calibration rows"), "{err}");
+    let labeled =
+        std::env::temp_dir().join(format!("snapif-cal-label-{}.json", std::process::id()));
+    fs::write(
+        &labeled,
+        "{\n  \"trusted\": {\"text\": \"card\"},\n  \"untrusted\": null,\n  \"labels\": {\"sensitive\": false}\n}\n",
+    )
+    .expect("write");
+    let pretty = bin()
+        .arg("calibrate")
+        .arg(&labeled)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let pretty_err = String::from_utf8_lossy(&pretty.stderr);
+    assert_eq!(pretty.status.code(), Some(1), "{pretty_err}");
+    assert!(pretty_err.contains("not asked: sensitive"), "{pretty_err}");
     let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&labeled);
 }
