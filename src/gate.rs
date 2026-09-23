@@ -301,7 +301,9 @@ impl<B: Backend> Client<B> {
             if let Err(err) = append_gate_log(path, req, &verdict) {
                 return Verdict::Escalate(hint(
                     req.action_id.clone(),
-                    vec![crate::verdict::backend_cause(&std::io::Error::other(err))],
+                    vec![crate::verdict::backend_cause(&std::io::Error::other(
+                        format!("{}: {err}", path.display()),
+                    ))],
                 ));
             }
         }

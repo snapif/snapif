@@ -25,6 +25,8 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Action path. Exit 0 Auto, 10 Review, 11 Escalate, 1 programmer error.
+    ///
+    /// `SNAPIF_LOG` appends one replay row per gate. `SNAPIF_CACHE` is an integer capacity; unset leaves the cache off.
     Gate {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
@@ -607,6 +609,7 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
             return 1;
         }
     };
+    let configured = policy.actions.contains_key(&id);
     let row = policy.actions.get(&id).or(policy.default_action.as_ref());
     let Some(row) = row else {
         eprintln!("unknown action {action}");
@@ -621,13 +624,20 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
         .map(|value| value.to_string())
         .unwrap_or_else(|| "none".to_string());
     println!("action {action}");
+    if !configured {
+        println!("source default_action");
+    }
     println!("class {:?}", row.class);
     println!("when_unsure {:?}", row.when_unsure);
     println!(
         "block_on {}",
         row.block_on
             .iter()
-            .map(|block| block.id.0.as_str())
+            .map(|block| format!(
+                "{}:{}",
+                block.id.0,
+                format!("{:?}", block.when).to_ascii_lowercase()
+            ))
             .collect::<Vec<_>>()
             .join(",")
     );
@@ -745,6 +755,7 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
     };
     let pack = client.battery_id();
     let mut card = snapif::scorecard::Scorecard::default();
+    let mut unused_labels = Vec::new();
     for (line_no, line) in rows.iter().enumerate() {
         let row: Value = match serde_json::from_str(line) {
             Ok(row) => row,
@@ -785,9 +796,22 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 card.add_choice(matched);
             }
         }
+        for id in labels.keys() {
+            if !out.scores.contains_key(id) && !unused_labels.iter().any(|seen| seen == id) {
+                unused_labels.push(id.clone());
+            }
+        }
     }
     if card.is_empty() {
-        eprintln!("{}: no labeled scores", path.display());
+        if unused_labels.is_empty() {
+            eprintln!("{}: no labeled scores", path.display());
+        } else {
+            eprintln!(
+                "{}: no labeled scores; not asked: {}",
+                path.display(),
+                unused_labels.join(",")
+            );
+        }
         return 1;
     }
     if let Some(brier) = card.brier() {
