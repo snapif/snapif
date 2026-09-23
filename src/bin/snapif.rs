@@ -656,6 +656,31 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
         );
     }
     println!("battery {}", policy.battery.0);
+    match &policy.shipped_id {
+        Some(id) => {
+            println!("pack {id}");
+            println!(
+                "pack_version {}",
+                snapif::policy::Policy::shipped_pack_version(id)
+            );
+        }
+        None => {
+            println!("pack");
+            println!("pack_version 0");
+        }
+    }
+    let model = match std::env::var("SNAPIF_MODEL") {
+        Ok(raw) => {
+            let model = raw.trim();
+            if model.is_empty() {
+                eprintln!("SNAPIF_MODEL must not be blank");
+                return 1;
+            }
+            model.to_string()
+        }
+        Err(_) => "jev-latest".to_string(),
+    };
+    println!("model {model}");
     0
 }
 

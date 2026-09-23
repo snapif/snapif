@@ -283,6 +283,13 @@ impl<B: Backend> Client<B> {
             let decision = untyped(policy, question, answer).map_err(Error::Decode)?;
             decisions.insert(key, decision);
         }
+        let (pack, pack_version) = match policy.shipped_id.clone() {
+            Some(id) => {
+                let version = Policy::shipped_pack_version(&id);
+                (id, version)
+            }
+            None => (String::new(), 0),
+        };
         Ok(AskOut {
             decisions,
             scores,
@@ -290,6 +297,9 @@ impl<B: Backend> Client<B> {
             backend_id,
             meta,
             truncated_untrusted: encoded.truncated_untrusted,
+            pack,
+            pack_version,
+            model: self.model.clone(),
         })
     }
 }
@@ -566,6 +576,11 @@ pub struct AskOut {
     pub meta: IndexMap<String, AnswerMeta>,
     /// Encode replaced `state.untrusted` so the body fit the wire cap.
     pub truncated_untrusted: bool,
+    /// Shipped policy id. Empty when the policy was loaded from a file.
+    pub pack: String,
+    pub pack_version: u32,
+    /// Model string copied onto the wire request.
+    pub model: String,
 }
 
 impl AskOut {

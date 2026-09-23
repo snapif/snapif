@@ -851,11 +851,26 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
     let output = bin()
         .args(["explain", "--action", "git.push"])
         .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_MODEL")
         .output()
         .expect("run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("auto none"), "{stdout}");
+    assert!(stdout.contains("pack tool-gate"), "{stdout}");
+    assert!(stdout.contains("pack_version 1"), "{stdout}");
+    assert!(stdout.contains("model jev-latest"), "{stdout}");
+    let blank_model = bin()
+        .args(["explain", "--action", "git.push"])
+        .env("SNAPIF_MODEL", " ")
+        .output()
+        .expect("run");
+    let blank_model_err = String::from_utf8_lossy(&blank_model.stderr);
+    assert_eq!(blank_model.status.code(), Some(1), "{blank_model_err}");
+    assert!(
+        blank_model_err.contains("SNAPIF_MODEL must not be blank"),
+        "{blank_model_err}"
+    );
     assert!(stdout.contains("exfil:yes"), "{stdout}");
     assert!(!stdout.contains("source default_action"), "{stdout}");
     let unknown = bin()

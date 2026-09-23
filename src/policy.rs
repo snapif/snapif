@@ -57,6 +57,9 @@ pub struct Policy {
     pub actions: IndexMap<ActionId, ActionPolicy>,
     #[serde(default = "default_battery")]
     pub battery: BatteryId,
+    /// Set only by [`Policy::shipped`]. A path load leaves this empty.
+    #[serde(skip)]
+    pub shipped_id: Option<String>,
     /// Set only by `finish` after the invariant checks.
     #[serde(skip)]
     sealed: bool,
@@ -185,7 +188,17 @@ impl Policy {
                 return Err(PolicyError::Config(format!("unknown policy {other}")));
             }
         };
-        Self::from_toml_str(raw)
+        let mut policy = Self::from_toml_str(raw)?;
+        policy.shipped_id = Some(name.to_string());
+        Ok(policy)
+    }
+
+    /// Bump the arm when that pack's questions or thresholds change.
+    pub fn shipped_pack_version(name: &str) -> u32 {
+        match name {
+            "tool-gate" | "triage" | "review" | "screen" => 1,
+            _ => 0,
+        }
     }
 
     /// Shipped id, or a path whose name ends in `.toml`.
