@@ -499,7 +499,7 @@ fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<An
             "compatible" => {
                 let Some(base) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
                     return Err(Error::Policy(PolicyError::Config(
-                        "SNAPIF_BASE_URL".to_string(),
+                        "SNAPIF_BASE_URL is required".to_string(),
                     )));
                 };
                 compatible_backend(
@@ -523,7 +523,7 @@ fn http_client(name: &str, env: &BackendEnv, policy: Policy) -> Result<Client<An
             "compatible" => {
                 let Some(base) = env.base_url.as_deref().filter(|value| !value.is_empty()) else {
                     return Err(Error::Policy(PolicyError::Config(
-                        "SNAPIF_BASE_URL".to_string(),
+                        "SNAPIF_BASE_URL is required".to_string(),
                     )));
                 };
                 AnyBackend::Http(compatible_backend(
@@ -547,7 +547,7 @@ fn compatible_backend(
     allow_private_http: bool,
 ) -> Result<crate::backends::http::HttpBackend, Error> {
     let url = url::Url::parse(raw)
-        .map_err(|_| Error::Policy(PolicyError::Config(invariant.to_string())))?;
+        .map_err(|_| Error::Policy(PolicyError::Config(format!("{invariant} must be a URL"))))?;
     if allow_private_http {
         crate::backends::http::HttpBackend::compatible_private(url, key)
     } else {

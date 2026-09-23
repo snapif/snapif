@@ -111,6 +111,45 @@ fn origin_userinfo_is_not_a_threshold() {
 
 #[cfg(feature = "http")]
 #[test]
+fn base_url_missing_and_unparsed_are_different() {
+    let call = std::env::temp_dir().join(format!("snapif-base-{}.json", std::process::id()));
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"untrusted":null}"#,
+    )
+    .expect("call");
+    let missing = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "compatible")
+        .env_remove("SNAPIF_BASE_URL")
+        .output()
+        .expect("run");
+    let missing_err = String::from_utf8_lossy(&missing.stderr);
+    assert_eq!(missing.status.code(), Some(1), "{missing_err}");
+    assert!(
+        missing_err.contains("SNAPIF_BASE_URL is required"),
+        "{missing_err}"
+    );
+    let bad = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "compatible")
+        .env("SNAPIF_BASE_URL", "not a url")
+        .output()
+        .expect("run");
+    let bad_err = String::from_utf8_lossy(&bad.stderr);
+    assert_eq!(bad.status.code(), Some(1), "{bad_err}");
+    assert!(
+        bad_err.contains("SNAPIF_BASE_URL must be a URL"),
+        "{bad_err}"
+    );
+    assert!(!bad_err.contains("is required"), "{bad_err}");
+    let _ = fs::remove_file(call);
+}
+
+#[cfg(feature = "http")]
+#[test]
 fn refused_loopback_says_backend() {
     let call = std::env::temp_dir().join(format!("snapif-refused-{}.json", std::process::id()));
     fs::write(
@@ -840,6 +879,17 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
     let err = String::from_utf8_lossy(&bad.stderr);
     assert_eq!(bad.status.code(), Some(1), "{err}");
     assert!(err.contains(&missing.display().to_string()), "{err}");
+    let blank = bin()
+        .args(["explain", "--action", ""])
+        .env_remove("SNAPIF_BACKEND")
+        .output()
+        .expect("run");
+    let blank_err = String::from_utf8_lossy(&blank.stderr);
+    assert_eq!(blank.status.code(), Some(1), "{blank_err}");
+    assert!(
+        blank_err.contains("action id must not be blank"),
+        "{blank_err}"
+    );
 }
 
 #[test]
