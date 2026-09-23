@@ -38,6 +38,18 @@ pub trait Backend: Send + Sync {
         req: WireRequest,
         deadline: Instant,
     ) -> impl Future<Output = Result<Evaluated, BackendError>> + Send;
+
+    /// Replace the bearer key used by the next `evaluate`.
+    ///
+    /// The default ignores every key, including an empty string, and returns
+    /// `Ok(None)`. Backends that store a bearer token refuse `""` and leave
+    /// the previous key in place. On success the returned value is the
+    /// previous key, so a cascade can restore it if the other hop refuses.
+    /// A call that has already entered `evaluate` keeps the key it copied.
+    fn replace_api_key(&self, key: Option<String>) -> Result<Option<String>, Error> {
+        let _ = key;
+        Ok(None)
+    }
 }
 
 pub enum AnyBackend {
@@ -77,6 +89,16 @@ impl Backend for AnyBackend {
             AnyBackend::Http(backend) => backend.evaluate(req, deadline).await,
             #[cfg(feature = "http")]
             AnyBackend::CascadeHttp(backend) => backend.evaluate(req, deadline).await,
+        }
+    }
+
+    fn replace_api_key(&self, key: Option<String>) -> Result<Option<String>, Error> {
+        match self {
+            AnyBackend::Fake(backend) => backend.replace_api_key(key),
+            #[cfg(feature = "http")]
+            AnyBackend::Http(backend) => backend.replace_api_key(key),
+            #[cfg(feature = "http")]
+            AnyBackend::CascadeHttp(backend) => backend.replace_api_key(key),
         }
     }
 }
@@ -199,6 +221,14 @@ impl<B: Backend> Client<B> {
 
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    /// The next `evaluate` uses `key`. Backends that store a bearer token refuse an empty string.
+    ///
+    /// This does not change the origin. A call already inside `evaluate` keeps the key it copied.
+    /// `FakeBackend` accepts any key, including an empty string, and ignores it.
+    pub fn replace_api_key(&self, key: Option<String>) -> Result<(), Error> {
+        self.backend.replace_api_key(key).map(|_| ())
     }
 
     /// Battery id of the loaded policy, such as `screen` or `tool-gate`.
@@ -781,8 +811,12 @@ fn untyped(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
     use super::{AnyBackend, Backend, Client, ClientConfig};
-    use crate::error::{Error, PolicyError};
+    use crate::error::{BackendError, Error, PolicyError};
+    use crate::wire::WireRequest;
 
     #[test]
     fn from_name_selects_without_env() {
@@ -1028,5 +1062,110 @@ mod tests {
             std::time::Duration::from_secs(1),
         );
         assert_eq!(err.to_string(), "auth: authentication failed (HTTP 401)");
+    }
+
+    struct HoldKey {
+        key: Mutex<String>,
+        seen: Mutex<Vec<String>>,
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        release: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl Backend for HoldKey {
+        fn id(&self) -> &str {
+            "hold"
+        }
+
+        fn replace_api_key(&self, key: Option<String>) -> Result<Option<String>, Error> {
+            let Some(key) = key.filter(|value| !value.is_empty()) else {
+                return Err(Error::Auth("SNAPIF_API_KEY".to_string()));
+            };
+            let mut guard = self.key.lock().expect("key");
+            let previous = Some(guard.clone());
+            *guard = key;
+            Ok(previous)
+        }
+
+        async fn evaluate(
+            &self,
+            _req: WireRequest,
+            _deadline: std::time::Instant,
+        ) -> Result<crate::backend::Evaluated, BackendError> {
+            let key = self.key.lock().expect("key").clone();
+            let n = {
+                let mut seen = self.seen.lock().expect("seen");
+                seen.push(key);
+                seen.len()
+            };
+            if n == 1 {
+                {
+                    let (lock, cv) = &*self.entered;
+                    *lock.lock().expect("entered") = true;
+                    cv.notify_one();
+                }
+                let (lock, cv) = &*self.release;
+                let mut go = lock.lock().expect("release");
+                while !*go {
+                    go = cv.wait(go).expect("wait");
+                }
+            }
+            Err(BackendError::Timeout)
+        }
+    }
+
+    #[test]
+    fn in_flight_evaluate_keeps_the_key_it_copied() {
+        let backend = HoldKey {
+            key: Mutex::new("old".to_string()),
+            seen: Mutex::new(Vec::new()),
+            entered: Arc::new((Mutex::new(false), Condvar::new())),
+            release: Arc::new((Mutex::new(false), Condvar::new())),
+        };
+        let entered = Arc::clone(&backend.entered);
+        let release = Arc::clone(&backend.release);
+        let client = Arc::new(Client::new(backend));
+        let first = Arc::clone(&client);
+        let handle = std::thread::spawn(move || {
+            let req = WireRequest {
+                model: "jev-latest".to_string(),
+                state: serde_json::json!({}),
+                questions: indexmap::IndexMap::new(),
+            };
+            pollster::block_on(
+                first
+                    .backend()
+                    .evaluate(req, Instant::now() + Duration::from_secs(2)),
+            )
+        });
+        {
+            let (lock, cv) = &*entered;
+            let mut ready = lock.lock().expect("entered");
+            while !*ready {
+                ready = cv.wait(ready).expect("wait");
+            }
+        }
+        client
+            .replace_api_key(Some("new".to_string()))
+            .expect("swap");
+        let req = WireRequest {
+            model: "jev-latest".to_string(),
+            state: serde_json::json!({}),
+            questions: indexmap::IndexMap::new(),
+        };
+        let _ = pollster::block_on(
+            client
+                .backend()
+                .evaluate(req, Instant::now() + Duration::from_secs(2)),
+        );
+        {
+            let (lock, cv) = &*release;
+            *lock.lock().expect("release") = true;
+            cv.notify_one();
+        }
+        let _ = handle.join().expect("join");
+        assert_eq!(
+            client.backend().seen.lock().expect("seen").as_slice(),
+            ["old".to_string(), "new".to_string()]
+        );
     }
 }
