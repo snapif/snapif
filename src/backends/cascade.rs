@@ -72,6 +72,17 @@ impl<A: Backend, B: Backend> Backend for Cascaded<A, B> {
         "cascade"
     }
 
+    fn replace_api_key(&self, key: Option<String>) -> Result<Option<String>, crate::error::Error> {
+        let previous_first = self.first.replace_api_key(key.clone())?;
+        match self.fallback.replace_api_key(key) {
+            Ok(_) => Ok(previous_first),
+            Err(err) => {
+                let _ = self.first.replace_api_key(previous_first);
+                Err(err)
+            }
+        }
+    }
+
     async fn evaluate(
         &self,
         req: WireRequest,

@@ -1,4 +1,5 @@
 use std::net::{IpAddr, ToSocketAddrs};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
@@ -13,7 +14,7 @@ const MAX_RETRIES: u32 = 3;
 
 pub struct HttpBackend {
     origin: String,
-    api_key: Option<String>,
+    api_key: Mutex<Option<String>>,
     typesafe: bool,
     client: reqwest::Client,
 }
@@ -77,10 +78,17 @@ impl HttpBackend {
             .map_err(|err| Error::Backend(err.to_string()))?;
         Ok(Self {
             origin: origin.origin().ascii_serialization(),
-            api_key,
+            api_key: Mutex::new(api_key),
             typesafe,
             client,
         })
+    }
+
+    pub(crate) fn current_key(&self) -> Result<Option<String>, BackendError> {
+        self.api_key
+            .lock()
+            .map(|guard| guard.clone())
+            .map_err(|_| BackendError::Transport("api key lock".to_string()))
     }
 }
 
@@ -93,6 +101,23 @@ impl Backend for HttpBackend {
         }
     }
 
+    fn replace_api_key(&self, key: Option<String>) -> Result<Option<String>, Error> {
+        if key.as_ref().is_some_and(|value| value.is_empty()) || (self.typesafe && key.is_none()) {
+            let name = if self.typesafe {
+                "TYPESAFE_API_KEY"
+            } else {
+                "SNAPIF_API_KEY"
+            };
+            return Err(Error::Auth(name.to_string()));
+        }
+        let Ok(mut guard) = self.api_key.lock() else {
+            return Err(Error::Backend("api key lock".to_string()));
+        };
+        let previous = guard.clone();
+        *guard = key;
+        Ok(previous)
+    }
+
     async fn evaluate(
         &self,
         req: WireRequest,
@@ -101,6 +126,7 @@ impl Backend for HttpBackend {
         if Instant::now() >= deadline {
             return Err(BackendError::Timeout);
         }
+        let key = self.current_key()?;
         let url = self.endpoint();
         let mut retries = 0u32;
         loop {
@@ -109,7 +135,7 @@ impl Backend for HttpBackend {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             let mut builder = self.client.post(&url).timeout(remaining).json(&req);
-            if let Some(key) = &self.api_key {
+            if let Some(key) = &key {
                 builder = builder.bearer_auth(key);
             }
             let response = match builder.send().await {
@@ -316,6 +342,25 @@ mod tests {
         assert_eq!(backend.endpoint(), "https://api.typesafe.ai/v1/systemone");
         assert_eq!(backend.id(), "typesafe");
         assert!(HttpBackend::typesafe("").is_err());
+        let before = backend.endpoint();
+        assert!(backend.replace_api_key(Some(String::new())).is_err());
+        assert_eq!(
+            backend.current_key().expect("key").as_deref(),
+            Some("secret")
+        );
+        backend
+            .replace_api_key(Some("next-key".to_string()))
+            .expect("swap");
+        assert_eq!(
+            backend.current_key().expect("key").as_deref(),
+            Some("next-key")
+        );
+        assert_eq!(backend.endpoint(), before);
+        assert!(backend.replace_api_key(None).is_err());
+        assert_eq!(
+            backend.current_key().expect("key").as_deref(),
+            Some("next-key")
+        );
     }
 
     #[test]
@@ -329,6 +374,24 @@ mod tests {
         let loopback = HttpBackend::compatible(url("http://127.0.0.1:9"), None).expect("loopback");
         assert_eq!(loopback.id(), "compatible");
         assert_eq!(loopback.endpoint(), "http://127.0.0.1:9/v1/systemone");
+        let first =
+            HttpBackend::compatible(url("http://127.0.0.1:9"), Some("loop-key".to_string()))
+                .expect("loop");
+        let fallback = HttpBackend::typesafe("ts-key").expect("typesafe");
+        let cascaded = crate::backends::cascade::Cascaded::new(
+            first,
+            fallback,
+            crate::backends::cascade::CascadeRule::new(0.8),
+        );
+        assert!(cascaded.replace_api_key(None).is_err());
+        assert_eq!(
+            cascaded.first.current_key().expect("key").as_deref(),
+            Some("loop-key")
+        );
+        assert_eq!(
+            cascaded.fallback.current_key().expect("key").as_deref(),
+            Some("ts-key")
+        );
         assert!(HttpBackend::compatible(url("https://example.com"), None).is_err());
     }
 
