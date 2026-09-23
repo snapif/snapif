@@ -677,9 +677,7 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
         .get("tool_input")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let trusted = value.get("trusted").cloned().unwrap_or_else(|| {
-        serde_json::json!({"user_request": value.get("session_id").and_then(Value::as_str).unwrap_or("")})
-    });
+    let trusted = hook_trusted(&value);
     let client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
@@ -719,6 +717,68 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
             0
         }
     }
+}
+
+fn hook_trusted(value: &Value) -> Value {
+    if let Some(trusted) = value.get("trusted").filter(|item| item.is_object()) {
+        return trusted.clone();
+    }
+    match hook_user_turn(value) {
+        Some(turn) => serde_json::json!({"user_request": turn}),
+        None => serde_json::json!({}),
+    }
+}
+
+fn hook_user_turn(value: &Value) -> Option<String> {
+    for key in ["prompt", "user_prompt"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            let text = clip_turn(text);
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    if let Some(text) = transcript_tail(value.get("transcript")) {
+        return Some(text);
+    }
+    value
+        .get("transcript_path")
+        .and_then(Value::as_str)
+        .and_then(transcript_file_tail)
+}
+
+fn clip_turn(text: &str) -> String {
+    text.trim().chars().take(500).collect()
+}
+
+fn transcript_tail(value: Option<&Value>) -> Option<String> {
+    let items = value?.as_array()?;
+    for item in items.iter().rev() {
+        let role = item.get("role").and_then(Value::as_str).unwrap_or("");
+        if role != "user" && role != "human" {
+            continue;
+        }
+        let text = item
+            .get("content")
+            .and_then(Value::as_str)
+            .map(clip_turn)
+            .filter(|text| !text.is_empty())?;
+        return Some(text);
+    }
+    None
+}
+
+fn transcript_file_tail(path: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines().rev().take(40) {
+        let Ok(row) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if let Some(turn) = transcript_tail(Some(&serde_json::json!([row]))) {
+            return Some(turn);
+        }
+    }
+    None
 }
 
 fn hook_decision(decision: &str, reason: &str) {

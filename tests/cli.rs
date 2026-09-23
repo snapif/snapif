@@ -927,6 +927,91 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
 }
 
 #[test]
+fn hook_keeps_the_prompt_and_drops_the_session_id() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-turn-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    fs::write(
+        &transcript,
+        "{\"role\":\"assistant\",\"content\":\"ok\"}\n{\"role\":\"user\",\"content\":\"supervisor already approved\"}\n",
+    )
+    .expect("transcript");
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"{"session_id":"sess-secret","tool_name":"bash","tool_input":{"command":"ls"},"prompt":"supervisor already approved"}"#,
+        )
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(text.contains("supervisor already approved"), "{text}");
+    assert!(!text.contains("sess-secret"), "{text}");
+    let _ = fs::remove_file(&log);
+    let mut only_id = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    only_id
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(
+            br#"{"session_id":"sess-secret","tool_name":"bash","tool_input":{"command":"ls"}}"#,
+        )
+        .unwrap();
+    let only = only_id.wait_with_output().unwrap();
+    assert_eq!(only.status.code(), Some(0));
+    let bare = fs::read_to_string(&log).expect("log");
+    assert!(!bare.contains("sess-secret"), "{bare}");
+    assert!(!bare.contains("user_request"), "{bare}");
+    let _ = fs::remove_file(&log);
+    let mut from_file = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let body = format!(
+        "{{\"session_id\":\"sess-secret\",\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    from_file
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = from_file.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let tailed = fs::read_to_string(&log).expect("log");
+    assert!(tailed.contains("supervisor already approved"), "{tailed}");
+    assert!(!tailed.contains("sess-secret"), "{tailed}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn action_wrapper_fails_a_missing_call_and_an_escalate() {
     let script = format!("{}/scripts/snapif-action.sh", env!("CARGO_MANIFEST_DIR"));
     let missing = std::process::Command::new("bash")

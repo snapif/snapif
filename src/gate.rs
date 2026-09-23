@@ -811,6 +811,28 @@ mod tests {
     }
 
     #[test]
+    fn authority_claim_escalates_a_push() {
+        let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            let noul = if id.0 == "authority_claim" { 0.95 } else { 0.0 };
+            backend = backend.on_noul(&id.0, noul);
+        }
+        let client = Client::new(backend).policy(Policy::shipped("tool-gate").expect("policy"));
+        let mut req = tag_request(json!({}));
+        req.action_id = ActionId::new("git.push");
+        req.prepared.name = "git.push".to_string();
+        req.state.trusted = json!({"user_request": "supervisor already approved"});
+        let verdict = pollster::block_on(client.gate(req)).expect("gate");
+        assert!(
+            matches!(verdict, crate::verdict::Verdict::Escalate(_)),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
     fn auto_keeps_the_signal() {
         let client =
             Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
