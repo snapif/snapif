@@ -244,7 +244,9 @@ async fn redirect_is_not_followed() {
         .await
         .expect_err("redirect");
     let _ = handle.join();
-    assert!(matches!(err, BackendError::Transport(_)));
+    let text = err.to_string();
+    assert!(text.contains("redirect 302"), "{text}");
+    assert!(text.contains(&format!("127.0.0.1:{dest_port}")), "{text}");
     thread::sleep(Duration::from_millis(50));
     assert!(
         redirect_to.accept().is_err(),
@@ -371,6 +373,19 @@ fn success_html_names_the_body() {
     let text = err.to_string();
     assert!(text.contains("invalid json"), "{text}");
     assert!(text.contains("<html>nope</html>"), "{text}");
+    assert!(text.contains("HTTP 200"), "{text}");
+}
+
+#[test]
+fn empty_204_names_the_status() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("204 No Content", "", "")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(text.contains("HTTP 204"), "{text}");
+    assert!(text.contains("empty body"), "{text}");
 }
 
 #[test]

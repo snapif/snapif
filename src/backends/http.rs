@@ -122,7 +122,12 @@ impl Backend for HttpBackend {
                 let bytes = read_limited(response).await?;
                 let wire: WireResponse = wire::decode_response(&bytes).map_err(|err| {
                     let snippet = clip_text(&String::from_utf8_lossy(&bytes), 80);
-                    BackendError::Transport(format!("{err}; body: {snippet}"))
+                    let body = if snippet.is_empty() {
+                        "empty body".to_string()
+                    } else {
+                        format!("body: {snippet}")
+                    };
+                    BackendError::Transport(format!("HTTP {status}: {err}; {body}"))
                 })?;
                 return Ok(Evaluated {
                     wire,
@@ -131,7 +136,16 @@ impl Backend for HttpBackend {
                 });
             }
             if response.status().is_redirection() {
-                return Err(BackendError::Transport(format!("redirect {status}")));
+                let location = response
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("");
+                return Err(BackendError::Transport(if location.is_empty() {
+                    format!("redirect {status}")
+                } else {
+                    format!("redirect {status} to {location}")
+                }));
             }
             if status == 429 || status == 529 {
                 if retries >= MAX_RETRIES {
