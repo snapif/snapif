@@ -105,6 +105,12 @@ pub struct ActionHint {
     pub backend_id: String,
     pub meta: IndexMap<String, AnswerMeta>,
     pub facts: GateFacts,
+    /// Shipped policy id. Empty when the policy was loaded from a file.
+    pub pack: String,
+    /// [`crate::policy::Policy::shipped_pack_version`] for `pack`. Zero when `pack` is empty.
+    pub pack_version: u32,
+    /// Model string copied onto the wire request.
+    pub model: String,
 }
 
 impl ActionHint {
@@ -150,5 +156,8 @@ pub(crate) fn hint(action_id: ActionId, reasons: Vec<UnsureReason>) -> ActionHin
         backend_id: String::new(),
         meta: IndexMap::new(),
         facts: GateFacts::default(),
+        pack: String::new(),
+        pack_version: 0,
+        model: String::new(),
     }
 }

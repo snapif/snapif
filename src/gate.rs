@@ -79,6 +79,16 @@ impl<B: Backend> Client<B> {
             }
             wire_questions.insert(id, wire);
         }
+        if wire_questions.len() > QUESTION_CAP {
+            return Ok(self.closed(
+                &req.action_id,
+                &gates,
+                UnsureReason::Wire,
+                Usage::default(),
+                self.backend.id(),
+                IndexMap::new(),
+            ));
+        }
         let mut request = WireRequest {
             model: self.model.clone(),
             state: req.state.to_wire(Some(&req.prepared)),
@@ -297,6 +307,15 @@ impl<B: Backend> Client<B> {
                 auto: stamp.gates.auto,
                 scores: stamp.scores.clone(),
             };
+            if let Some(id) = self
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.shipped_id.clone())
+            {
+                hint.pack_version = crate::policy::Policy::shipped_pack_version(&id);
+                hint.pack = id;
+            }
+            hint.model = self.model.clone();
             hint
         })
     }
@@ -570,6 +589,8 @@ fn block_answer(
     }
 }
 
+const QUESTION_CAP: usize = 32;
+
 fn scored_text(req: &GateRequest) -> String {
     format!(
         "{} {} {}",
@@ -789,7 +810,7 @@ mod tests {
     use super::GateRequest;
     use crate::Client;
     use crate::backends::fake::FakeBackend;
-    use crate::ids::ActionId;
+    use crate::ids::{ActionId, QuestionId};
     use crate::policy::Policy;
     use crate::state::{PreparedCall, State};
     use serde_json::json;
@@ -1022,5 +1043,90 @@ mod tests {
                 .all(|verdict| matches!(verdict, crate::verdict::Verdict::Auto(_)))
         );
         assert_eq!(client.backend().calls(), 2);
+    }
+
+    fn extra_noul(n: usize) -> Vec<crate::question::Question> {
+        (0..n)
+            .map(|index| {
+                crate::question::Question::Noul(crate::question::NoulQ {
+                    id: QuestionId::new(format!("extra-{index}")),
+                    instructions: serde_json::Value::String("extra".to_string()),
+                    criteria: None,
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn shipped_gate_records_pack_and_model() {
+        let client = Client::new(read_backend())
+            .model("other-model")
+            .expect("model")
+            .policy(Policy::shipped("tool-gate").expect("policy"));
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        let hint = match verdict {
+            crate::verdict::Verdict::Auto(hint) => hint,
+            other => panic!("expected auto, got {other:?}"),
+        };
+        assert_eq!(hint.pack, "tool-gate");
+        assert_eq!(hint.pack_version, 1);
+        assert_eq!(hint.model, "other-model");
+    }
+
+    #[test]
+    fn file_policy_leaves_pack_empty() {
+        let raw = include_str!("../policies/tool-gate.toml");
+        let policy = Policy::from_toml_str(raw).expect("toml");
+        let client = Client::new(read_backend()).policy(policy);
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        let hint = match verdict {
+            crate::verdict::Verdict::Auto(hint) => hint,
+            other => panic!("expected auto, got {other:?}"),
+        };
+        assert!(hint.pack.is_empty(), "{}", hint.pack);
+        assert_eq!(hint.pack_version, 0);
+        assert_eq!(hint.model, "jev-latest");
+    }
+
+    #[test]
+    fn extra_questions_past_32_do_not_call_the_backend() {
+        let client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        let mut over = tag_request(json!({}));
+        over.extra_questions = extra_noul(26);
+        let verdict = pollster::block_on(client.gate(over)).expect("gate");
+        assert_eq!(client.backend().calls(), 0);
+        let hint = match verdict {
+            crate::verdict::Verdict::Escalate(hint) => hint,
+            other => panic!("expected escalate, got {other:?}"),
+        };
+        assert!(
+            hint.reasons
+                .iter()
+                .any(|reason| matches!(reason, crate::verdict::UnsureReason::Wire))
+        );
+        let mut exact = tag_request(json!({}));
+        exact.extra_questions = extra_noul(25);
+        let _ = pollster::block_on(client.gate(exact)).expect("gate");
+        assert_eq!(client.backend().calls(), 1);
+    }
+
+    #[test]
+    fn ask_records_model_and_pack() {
+        let client = Client::new(read_backend())
+            .model("ask-model")
+            .expect("model")
+            .policy(Policy::shipped("tool-gate").expect("policy"));
+        let out = pollster::block_on(client.ask(
+            State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            vec![],
+        ))
+        .expect("ask");
+        assert_eq!(out.model, "ask-model");
+        assert_eq!(out.pack, "tool-gate");
+        assert_eq!(out.pack_version, 1);
     }
 }
