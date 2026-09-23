@@ -878,6 +878,32 @@ fn log_failure_names_the_path_and_cache_rejects_words() {
     let help_out = String::from_utf8_lossy(&help.stdout);
     assert!(help_out.contains("SNAPIF_LOG"), "{help_out}");
     assert!(help_out.contains("SNAPIF_CACHE"), "{help_out}");
+    let timeout = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_TIMEOUT_MS", "nope")
+        .output()
+        .expect("run");
+    let timeout_err = String::from_utf8_lossy(&timeout.stderr);
+    assert_eq!(timeout.status.code(), Some(1), "{timeout_err}");
+    assert!(
+        timeout_err.contains("SNAPIF_TIMEOUT_MS must be an integer, got nope"),
+        "{timeout_err}"
+    );
+    let model = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_MODEL", " ")
+        .output()
+        .expect("run");
+    let model_err = String::from_utf8_lossy(&model.stderr);
+    assert_eq!(model.status.code(), Some(1), "{model_err}");
+    assert!(
+        model_err.contains("SNAPIF_MODEL must not be blank"),
+        "{model_err}"
+    );
     let _ = fs::remove_file(&call);
 }
 
