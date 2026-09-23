@@ -349,6 +349,24 @@ fn four_immediate_529s_are_overloaded() {
 }
 
 #[test]
+fn redirect_location_drops_query_secrets() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response(
+            "302 Found",
+            "Location: https://user:pw@example.test/path?access_token=secret&x=1\r\n",
+            "",
+        )],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(text.contains("https://example.test/path"), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(!text.contains("user:pw"), "{text}");
+    assert!(text.len() < 160, "{text}");
+}
+
+#[test]
 fn status_401_is_auth() {
     let (err, hits, _) = expect_backend_err(
         vec![http_response("401 Unauthorized", "", "")],
