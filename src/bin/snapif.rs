@@ -107,11 +107,14 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
     };
     match block_on(client.gate(request)) {
         Ok(verdict) => {
-            if verdict_reasons(&verdict)
+            if let Some(cause) = verdict_reasons(&verdict)
                 .iter()
-                .any(|reason| matches!(reason, snapif::verdict::UnsureReason::Backend))
+                .find_map(|reason| match reason {
+                    snapif::verdict::UnsureReason::Backend { cause } => Some(cause.as_str()),
+                    _ => None,
+                })
             {
-                eprintln!("backend");
+                eprintln!("backend: {cause}");
             }
             println!("{}", verdict_name(&verdict));
             gate_code(&verdict)

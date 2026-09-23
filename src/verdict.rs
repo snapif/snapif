@@ -50,7 +50,10 @@ pub enum UnsureReason {
     },
     Decode(DecodeError),
     Wire,
-    Backend,
+    /// The scorer failed. `cause` is a short timeout, status, or body.
+    Backend {
+        cause: String,
+    },
     CascadeStillUnsure,
     HarmClassBump {
         from: HarmClass,
@@ -92,10 +95,65 @@ pub struct ActionHint {
 impl ActionHint {
     /// Hint a host can show when policy load or `gate` fails before a verdict.
     ///
-    /// The reason is always [`UnsureReason::Backend`]. Policy errors and
-    /// [`crate::error::Error`] both implement [`std::error::Error`].
-    pub fn from_error(_error: &dyn Error, action_id: ActionId) -> Self {
-        hint(action_id, vec![UnsureReason::Backend])
+    /// The reason is [`UnsureReason::Backend`] and its `cause` is `error`'s text.
+    /// Policy errors and [`crate::error::Error`] both implement [`std::error::Error`].
+    pub fn from_error(error: &dyn Error, action_id: ActionId) -> Self {
+        hint(action_id, vec![backend_cause(error)])
+    }
+}
+
+/// Clip a scorer failure so a host line stays short.
+pub fn backend_cause(error: &dyn Error) -> UnsureReason {
+    const MAX: usize = 160;
+    let text = error.to_string();
+    let cause = if text.len() <= MAX {
+        text
+    } else {
+        let mut end = MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &text[..end])
+    };
+    UnsureReason::Backend { cause }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::fmt;
+
+    use super::backend_cause;
+    use crate::verdict::UnsureReason;
+
+    #[derive(Debug)]
+    struct Msg(String);
+
+    impl fmt::Display for Msg {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    impl Error for Msg {}
+
+    #[test]
+    fn backend_cause_keeps_a_short_timeout() {
+        let reason = backend_cause(&Msg("timeout: the deadline was exceeded".to_owned()));
+        assert!(matches!(
+            reason,
+            UnsureReason::Backend { cause } if cause == "timeout: the deadline was exceeded"
+        ));
+    }
+
+    #[test]
+    fn backend_cause_clips_a_long_body() {
+        let reason = backend_cause(&Msg("x".repeat(400)));
+        let UnsureReason::Backend { cause } = reason else {
+            panic!("expected backend");
+        };
+        assert!(cause.ends_with("..."), "{cause}");
+        assert!(cause.len() <= 163, "{}", cause.len());
     }
 }
 
