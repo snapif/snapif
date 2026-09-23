@@ -121,7 +121,7 @@ impl Backend for HttpBackend {
             if response.status().is_success() {
                 let bytes = read_limited(response).await?;
                 let wire: WireResponse = wire::decode_response(&bytes).map_err(|err| {
-                    let snippet = clip_text(&String::from_utf8_lossy(&bytes), 80);
+                    let snippet = host_line(&String::from_utf8_lossy(&bytes));
                     let body = if snippet.is_empty() {
                         "empty body".to_string()
                     } else {
@@ -141,10 +141,11 @@ impl Backend for HttpBackend {
                     .get(reqwest::header::LOCATION)
                     .and_then(|value| value.to_str().ok())
                     .unwrap_or("");
-                return Err(BackendError::Transport(if location.is_empty() {
+                let target = safe_location(location);
+                return Err(BackendError::Transport(if target.is_empty() {
                     format!("redirect {status}")
                 } else {
-                    format!("redirect {status} to {location}")
+                    format!("redirect {status} to {target}")
                 }));
             }
             if status == 429 || status == 529 {
@@ -165,19 +166,32 @@ impl Backend for HttpBackend {
     }
 }
 
-fn clip_text(text: &str, max: usize) -> String {
-    if text.len() <= max {
-        return text.to_string();
+fn host_line(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 80;
+    if flat.len() <= MAX {
+        return flat;
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
+    let mut end = MAX;
+    while !flat.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &text[..end])
+    format!("{}...", &flat[..end])
+}
+
+fn safe_location(raw: &str) -> String {
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return host_line(raw);
+    };
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    host_line(url.as_str())
 }
 
 fn status_error(status: u16, body: &[u8]) -> BackendError {
-    let body = String::from_utf8_lossy(body).into_owned();
+    let body = host_line(&String::from_utf8_lossy(body));
     match status {
         401 => BackendError::Auth,
         429 => BackendError::RateLimit,

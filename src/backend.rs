@@ -492,7 +492,7 @@ fn map_backend(err: BackendError, timeout: Duration) -> Error {
         BackendError::Timeout => Error::Timeout(timeout),
         BackendError::RateLimit => Error::RateLimit,
         BackendError::Overloaded => Error::Overloaded,
-        BackendError::Auth => Error::Auth("auth".to_string()),
+        BackendError::Auth => Error::Auth("authentication failed (HTTP 401)".to_string()),
         BackendError::Rejected { status, body } => Error::Rejected { status, body },
         other => Error::Backend(other.to_string()),
     }
@@ -834,5 +834,14 @@ mod tests {
             panic!("private http cascade");
         };
         assert_eq!(allowed.backend().id(), "cascade");
+    }
+
+    #[test]
+    fn auth_error_reaches_the_client_text() {
+        let err = super::map_backend(
+            crate::error::BackendError::Auth,
+            std::time::Duration::from_secs(1),
+        );
+        assert_eq!(err.to_string(), "auth: authentication failed (HTTP 401)");
     }
 }
