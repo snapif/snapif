@@ -418,6 +418,7 @@ pub fn verdict_with_blocks(
                 vec![UnsureReason::Battery {
                     id: block.id.clone(),
                     when: block.when,
+                    excerpt: String::new(),
                 }],
             )));
         }
