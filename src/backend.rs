@@ -190,7 +190,7 @@ impl<B: Backend> Client<B> {
         let id = id.as_ref().trim();
         if id.is_empty() {
             return Err(Error::Policy(PolicyError::Config(
-                "SNAPIF_MODEL".to_string(),
+                "SNAPIF_MODEL must not be blank".to_string(),
             )));
         }
         self.model = id.to_string();
@@ -460,16 +460,18 @@ fn apply_runtime(
     env: &BackendEnv,
 ) -> Result<Client<AnyBackend>, Error> {
     if let Some(raw) = nonempty(env.timeout_ms.as_deref()) {
-        let ms: u64 = raw
-            .parse()
-            .map_err(|_| Error::Policy(PolicyError::Config("SNAPIF_TIMEOUT_MS".to_string())))?;
+        let ms: u64 = raw.parse().map_err(|_| {
+            Error::Policy(PolicyError::Config(format!(
+                "SNAPIF_TIMEOUT_MS must be an integer, got {raw}"
+            )))
+        })?;
         client = client.timeout(Duration::from_millis(ms));
     }
     if let Some(raw) = env.model.as_deref() {
         let model = raw.trim();
         if model.is_empty() {
             return Err(Error::Policy(PolicyError::Config(
-                "SNAPIF_MODEL".to_string(),
+                "SNAPIF_MODEL must not be blank".to_string(),
             )));
         }
         client.model = model.to_string();
@@ -922,7 +924,11 @@ mod tests {
             let Err(err) = err else {
                 panic!("blank model must fail");
             };
-            assert_eq!(err.to_string(), "policy: SNAPIF_MODEL", "{blank:?} {err}");
+            assert_eq!(
+                err.to_string(),
+                "policy: SNAPIF_MODEL must not be blank",
+                "{blank:?} {err}"
+            );
         }
 
         let trimmed = Client::<AnyBackend>::from_parts(
