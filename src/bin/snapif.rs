@@ -107,6 +107,12 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
     };
     match block_on(client.gate(request)) {
         Ok(verdict) => {
+            if verdict_reasons(&verdict)
+                .iter()
+                .any(|reason| matches!(reason, snapif::verdict::UnsureReason::Backend))
+            {
+                eprintln!("backend");
+            }
             println!("{}", verdict_name(&verdict));
             gate_code(&verdict)
         }
@@ -408,6 +414,11 @@ fn open_client(policy: Option<&str>, shadow: bool) -> Result<Client<AnyBackend>,
 }
 
 fn questions_from_state(value: &Value) -> Result<(State, Vec<Question>), Error> {
+    if !value.is_object() {
+        return Err(Error::Wire(WireError::Json(
+            "state must be an object".to_string(),
+        )));
+    }
     let state = State {
         trusted: value.get("trusted").cloned().unwrap_or(Value::Null),
         untrusted: value.get("untrusted").cloned().unwrap_or(Value::Null),
@@ -521,6 +532,12 @@ fn env_shadow() -> bool {
         std::env::var("SNAPIF_SHADOW").ok().as_deref(),
         Some("1" | "true" | "TRUE" | "True")
     )
+}
+
+fn verdict_reasons(verdict: &Verdict) -> &[snapif::verdict::UnsureReason] {
+    match verdict {
+        Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => &hint.reasons,
+    }
 }
 
 fn verdict_name(verdict: &Verdict) -> &'static str {

@@ -262,7 +262,7 @@ fn host_is_loopback(url: &Url) -> bool {
 }
 
 fn policy(message: &str) -> Error {
-    Error::Policy(PolicyError::Invariant(message.to_string()))
+    Error::Policy(PolicyError::Config(message.to_string()))
 }
 
 #[cfg(test)]
