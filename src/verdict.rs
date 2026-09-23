@@ -44,6 +44,8 @@ pub enum UnsureReason {
     Battery {
         id: QuestionId,
         when: BlockWhen,
+        /// Sentence that supported the hit. Empty when the block is not a claim.
+        excerpt: String,
     },
     AuthorityClaim {
         noul: f64,

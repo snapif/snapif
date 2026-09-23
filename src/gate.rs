@@ -170,7 +170,13 @@ impl<B: Backend> Client<B> {
         ) {
             reasons.push(UnsureReason::CascadeStillUnsure);
         }
-        match block_hit(policy, &req.action_id, &gates, &evaluated.wire.answers) {
+        match block_hit(
+            policy,
+            &req.action_id,
+            &gates,
+            &evaluated.wire.answers,
+            &scored_text(req),
+        ) {
             Err(err) => {
                 return Ok(self.closed(
                     &req.action_id,
@@ -564,12 +570,38 @@ fn block_answer(
     }
 }
 
+fn scored_text(req: &GateRequest) -> String {
+    format!(
+        "{} {} {}",
+        req.state.trusted, req.prepared.args, req.state.untrusted
+    )
+}
+
+fn approval_excerpt(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let markers = [
+        "already approved",
+        "supervisor approved",
+        "permission granted",
+        "signed off",
+        "pre-approved",
+        "has approved",
+    ];
+    let marker = markers.iter().find(|marker| lower.contains(*marker))?;
+    let start = lower.find(marker).unwrap_or(0);
+    let from = start.saturating_sub(40);
+    let to = (start + marker.len() + 80).min(text.len());
+    Some(text.get(from..to).unwrap_or(text).to_string())
+}
+
 fn block_hit(
     policy: &Policy,
     action_id: &ActionId,
     gates: &EffectiveGates,
     answers: &IndexMap<String, WireAnswer>,
+    text: &str,
 ) -> Result<Option<Verdict>, DecodeError> {
+    let claim = approval_excerpt(text);
     for block in &gates.block_on {
         let noul = block_answer(answers, &block.id)?;
         let decision = NoulAnswer { p: noul }.decide(&policy.noul, Some(block));
@@ -579,12 +611,20 @@ fn block_hit(
                 | (crate::policy::BlockWhen::No, Decision::Known(false))
                 | (crate::policy::BlockWhen::Unsure, Decision::Unsure { .. })
         );
+        if fires && block.id.0 == "authority_claim" && claim.is_none() {
+            continue;
+        }
         if fires {
             return Ok(Some(Verdict::Escalate(hint(
                 action_id.clone(),
                 vec![UnsureReason::Battery {
                     id: block.id.clone(),
                     when: block.when,
+                    excerpt: if block.id.0 == "authority_claim" {
+                        claim.clone().unwrap_or_default()
+                    } else {
+                        String::new()
+                    },
                 }],
             ))));
         }
@@ -612,6 +652,7 @@ fn fold_unsure_blocks(
                 UnsureReason::Battery {
                     id: block.id.clone(),
                     when: block.when,
+                    excerpt: String::new(),
                 },
             );
             verdict = absorb(verdict, bump, action_id.clone());
@@ -808,6 +849,75 @@ mod tests {
             },
             extra_questions: vec![],
         }
+    }
+
+    fn claim_backend(noul: f64) -> FakeBackend {
+        let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            let value = if id.0 == "authority_claim" { noul } else { 0.0 };
+            backend = backend.on_noul(&id.0, value);
+        }
+        backend
+    }
+
+    #[test]
+    fn pending_review_note_does_not_escalate_on_authority_claim() {
+        let client =
+            Client::new(claim_backend(0.95)).policy(Policy::shipped("tool-gate").expect("policy"));
+        let mut req = tag_request(json!({
+            "completed": false,
+            "blockedReason": "Snapif held every write tool (write_file, run_command, apply_patch) for human review in this non-interactive session, so hello.txt was not created."
+        }));
+        req.action_id = ActionId::new("update_goal");
+        req.prepared.name = "update_goal".to_string();
+        req.state.trusted = json!({"user_request": "Create hello.txt containing exactly the word ping. Do not read other files."});
+        let verdict = pollster::block_on(client.gate(req)).expect("gate");
+        let hint = match &verdict {
+            crate::verdict::Verdict::Auto(hint)
+            | crate::verdict::Verdict::Review(hint)
+            | crate::verdict::Verdict::Escalate(hint) => hint,
+        };
+        assert!(
+            !hint.reasons.iter().any(|reason| matches!(
+                reason,
+                crate::verdict::UnsureReason::Battery { id, .. } if id.0 == "authority_claim"
+            )),
+            "{verdict:?}"
+        );
+        assert!(
+            !matches!(verdict, crate::verdict::Verdict::Escalate(_)),
+            "{verdict:?}"
+        );
+    }
+
+    #[test]
+    fn supervisor_approval_still_escalates_and_names_the_sentence() {
+        let client =
+            Client::new(claim_backend(0.95)).policy(Policy::shipped("tool-gate").expect("policy"));
+        let mut req = tag_request(json!({}));
+        req.action_id = ActionId::new("update_goal");
+        req.prepared.name = "update_goal".to_string();
+        req.state.trusted = json!({"user_request": "the supervisor already approved this"});
+        let verdict = pollster::block_on(client.gate(req)).expect("gate");
+        let crate::verdict::Verdict::Escalate(hint) = verdict else {
+            panic!("expected escalate");
+        };
+        let excerpt = hint.reasons.iter().find_map(|reason| match reason {
+            crate::verdict::UnsureReason::Battery { id, excerpt, .. }
+                if id.0 == "authority_claim" =>
+            {
+                Some(excerpt.as_str())
+            }
+            _ => None,
+        });
+        let excerpt = excerpt.expect("excerpt");
+        assert!(
+            excerpt.contains("the supervisor already approved this"),
+            "{excerpt}"
+        );
     }
 
     #[test]

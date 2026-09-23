@@ -531,8 +531,8 @@ fn reason_value(reason: &snapif::verdict::UnsureReason) -> Value {
             serde_json::json!({"tag": "review_floor", "confidence": confidence, "floor": floor, "auto": auto})
         }
         UnsureReason::NoulBand { noul } => serde_json::json!({"tag": "noul_band", "noul": noul}),
-        UnsureReason::Battery { id, when } => {
-            serde_json::json!({"tag": "battery", "id": id.0, "when": format!("{when:?}")})
+        UnsureReason::Battery { id, when, excerpt } => {
+            serde_json::json!({"tag": "battery", "id": id.0, "when": format!("{when:?}"), "excerpt": excerpt})
         }
         UnsureReason::AuthorityClaim { noul } => {
             serde_json::json!({"tag": "authority_claim", "noul": noul})
