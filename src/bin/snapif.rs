@@ -601,6 +601,10 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
             return 1;
         }
     };
+    if action.trim().is_empty() {
+        eprintln!("action id must not be blank");
+        return 1;
+    }
     let id = ActionId::new(action);
     let gates = match snapif::policy::effective_gates(&policy, &id, None) {
         Ok(gates) => gates,
