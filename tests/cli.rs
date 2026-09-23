@@ -131,7 +131,8 @@ fn refused_loopback_says_backend() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(11), "{err}");
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "escalate");
-    assert!(err.contains("backend"), "{err}");
+    assert!(err.contains("backend:"), "{err}");
+    assert!(err.len() > "backend:".len() + 4, "{err}");
 }
 
 #[test]

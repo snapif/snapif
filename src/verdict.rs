@@ -50,7 +50,10 @@ pub enum UnsureReason {
     },
     Decode(DecodeError),
     Wire,
-    Backend,
+    /// The scorer failed. `cause` is a short timeout, status, or body.
+    Backend {
+        cause: String,
+    },
     CascadeStillUnsure,
     HarmClassBump {
         from: HarmClass,
@@ -92,11 +95,27 @@ pub struct ActionHint {
 impl ActionHint {
     /// Hint a host can show when policy load or `gate` fails before a verdict.
     ///
-    /// The reason is always [`UnsureReason::Backend`]. Policy errors and
-    /// [`crate::error::Error`] both implement [`std::error::Error`].
-    pub fn from_error(_error: &dyn Error, action_id: ActionId) -> Self {
-        hint(action_id, vec![UnsureReason::Backend])
+    /// The reason is [`UnsureReason::Backend`] and its `cause` is `error`'s text.
+    /// Policy errors and [`crate::error::Error`] both implement [`std::error::Error`].
+    pub fn from_error(error: &dyn Error, action_id: ActionId) -> Self {
+        hint(action_id, vec![backend_cause(error)])
     }
+}
+
+/// Clip a scorer failure so a host line stays short.
+pub fn backend_cause(error: &dyn std::error::Error) -> UnsureReason {
+    const MAX: usize = 160;
+    let text = error.to_string();
+    let cause = if text.len() <= MAX {
+        text
+    } else {
+        let mut end = MAX;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &text[..end])
+    };
+    UnsureReason::Backend { cause }
 }
 
 #[derive(Debug, Clone, PartialEq)]

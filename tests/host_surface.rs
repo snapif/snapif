@@ -11,7 +11,7 @@ fn normative_names_are_exported_and_from_error_marks_backend() {
     assert!(from_policy.meta.is_empty());
     assert!(matches!(
         from_policy.reasons.as_slice(),
-        [UnsureReason::Backend]
+        [UnsureReason::Backend { cause }] if cause.contains("escalate_below")
     ));
     let from_gate = ActionHint::from_error(&Error::EmptyActionId, ActionId::new("bash"));
     assert_eq!(from_gate.action_id.0, "bash");
