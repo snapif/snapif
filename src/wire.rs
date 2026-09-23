@@ -90,11 +90,11 @@ fn to_vec(value: &impl Serialize) -> Result<Vec<u8>, WireError> {
 }
 
 fn known_type(value: &Value) -> Result<(), WireError> {
-    let name = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+    let name = match value.get("type").and_then(Value::as_str) {
+        None => "missing".to_string(),
+        Some("") => "empty".to_string(),
+        Some(name) => name.to_string(),
+    };
     if matches!(name.as_str(), "choice" | "score" | "noul") {
         Ok(())
     } else {

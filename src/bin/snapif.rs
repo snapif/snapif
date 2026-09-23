@@ -527,6 +527,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<T, Error> {
             format!("{}: {err}", path.display()),
         ))
     })?;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
     serde_json::from_str(&text).map_err(|err| Error::Wire(WireError::Json(err.to_string())))
 }
 
