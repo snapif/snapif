@@ -682,11 +682,12 @@ fn ask_unknown_question_exits_2_and_unset_backend_exits_1() {
         .env("SNAPIF_BACKEND", "fake")
         .output()
         .expect("run");
-    assert_eq!(
-        decoded.status.code(),
-        Some(2),
-        "{}",
-        String::from_utf8_lossy(&decoded.stderr)
+    let decoded_err = String::from_utf8_lossy(&decoded.stderr);
+    assert_eq!(decoded.status.code(), Some(2), "{decoded_err}");
+    assert!(
+        decoded_err.contains("unknown question/answer type boolean")
+            && decoded_err.contains("expected choice, score, or noul"),
+        "{decoded_err}"
     );
     let unset = bin()
         .args(["ask", "--state"])
@@ -701,6 +702,50 @@ fn ask_unknown_question_exits_2_and_unset_backend_exits_1() {
         String::from_utf8_lossy(&unset.stderr)
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn ask_missing_type_names_it() {
+    let path = std::env::temp_dir().join(format!("snapif-no-type-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        r#"{"trusted":{},"untrusted":null,"questions":{"q":{"prompt":"ship?"}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("unknown question/answer type missing"),
+        "{err}"
+    );
+    assert!(err.contains("expected choice, score, or noul"), "{err}");
+}
+
+#[test]
+fn gate_strips_a_utf8_bom() {
+    let path = std::env::temp_dir().join(format!("snapif-bom-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        "\u{feff}{\"action_id\":\"tag\",\"name\":\"tag\",\"args\":{},\"trusted\":{},\"untrusted\":null}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(11), "{err}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "escalate");
 }
 
 #[test]

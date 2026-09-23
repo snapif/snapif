@@ -4,7 +4,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
 pub enum WireError {
-    #[error("unknown question/answer type {0}")]
+    #[error("unknown question/answer type {0}; expected choice, score, or noul")]
     UnknownType(String),
     #[error("invalid json: {0}")]
     Json(String),
