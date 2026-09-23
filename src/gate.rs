@@ -95,11 +95,11 @@ impl<B: Backend> Client<B> {
         let deadline = Instant::now() + self.timeout;
         let evaluated = match self.backend.evaluate(request.clone(), deadline).await {
             Ok(evaluated) => evaluated,
-            Err(_) => {
+            Err(err) => {
                 return Ok(self.closed(
                     &req.action_id,
                     &gates,
-                    UnsureReason::Backend,
+                    crate::verdict::backend_cause(&err),
                     Usage::default(),
                     self.backend.id(),
                     IndexMap::new(),
