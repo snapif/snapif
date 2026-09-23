@@ -1,0 +1,14 @@
+{
+  "questions": [
+    {
+      "id": "sensitive",
+      "type": "noul",
+      "instructions": "Does the request contain a secret or a private record?"
+    },
+    {
+      "id": "needs_person",
+      "type": "noul",
+      "instructions": "Should a person look before any tool runs?"
+    }
+  ]
+}
