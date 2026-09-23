@@ -179,6 +179,8 @@ impl Policy {
         let raw = match name {
             "tool-gate" => include_str!("../policies/tool-gate.toml"),
             "triage" => include_str!("../policies/triage.toml"),
+            "review" => include_str!("../policies/review.toml"),
+            "screen" => include_str!("../policies/screen.toml"),
             other => {
                 return Err(PolicyError::Config(format!("unknown policy {other}")));
             }

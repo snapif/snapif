@@ -1,0 +1,14 @@
+schema_version = 1
+fail = "closed"
+cascade_min = 0.80
+battery = "review"
+
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+signal = "confidence"
+
+[default_action]
+review = 0.8
+when_unsure = "escalate"
+class = "read"
