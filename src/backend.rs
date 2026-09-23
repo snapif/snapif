@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
@@ -78,6 +81,40 @@ impl Backend for AnyBackend {
     }
 }
 
+pub(crate) struct GateCache {
+    cap: usize,
+    ttl: Duration,
+    entries: HashMap<u64, (Instant, crate::verdict::Verdict)>,
+}
+
+impl GateCache {
+    pub(crate) fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            ttl: Duration::from_secs(30),
+            entries: HashMap::new(),
+        }
+    }
+}
+
+/// Fields `from_env` already reads. Hosts can fill this instead of exporting variables.
+#[derive(Debug, Clone, Default)]
+pub struct ClientConfig {
+    pub backend: String,
+    pub shadow: bool,
+    pub model: Option<String>,
+    pub timeout_ms: Option<String>,
+    pub policy: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub typesafe_key: Option<String>,
+    pub allow_private_http: bool,
+    pub cascade: Option<String>,
+    pub log_path: Option<PathBuf>,
+    /// `Some(0)` leaves the cache off. `Some(n)` keeps n identical gate results.
+    pub cache_capacity: Option<usize>,
+}
+
 pub struct Client<B: Backend> {
     pub(crate) backend: B,
     pub(crate) policy: Option<Policy>,
@@ -86,6 +123,9 @@ pub struct Client<B: Backend> {
     pub(crate) model: String,
     shadow_override: Option<bool>,
     fail_override: Option<Fail>,
+    pub(crate) log_path: Option<PathBuf>,
+    pub(crate) log_lock: Mutex<()>,
+    pub(crate) cache: Option<Mutex<GateCache>>,
 }
 
 impl<B: Backend> Client<B> {
@@ -98,6 +138,9 @@ impl<B: Backend> Client<B> {
             model: "jev-latest".to_string(),
             shadow_override: None,
             fail_override: None,
+            log_path: None,
+            log_lock: Mutex::new(()),
+            cache: None,
         }
     }
 
@@ -158,6 +201,41 @@ impl<B: Backend> Client<B> {
         &self.backend
     }
 
+    /// Battery id of the loaded policy, such as `screen` or `tool-gate`.
+    pub fn battery_id(&self) -> Option<&str> {
+        self.policy.as_ref().map(|policy| policy.battery.0.as_str())
+    }
+
+    pub(crate) fn cache_get(&self, key: u64) -> Option<crate::verdict::Verdict> {
+        let cache = self.cache.as_ref()?;
+        let mut guard = cache.lock().ok()?;
+        let expired = guard
+            .entries
+            .get(&key)
+            .is_some_and(|(stored, _)| stored.elapsed() > guard.ttl);
+        if expired {
+            guard.entries.remove(&key);
+            return None;
+        }
+        guard.entries.get(&key).map(|(_, verdict)| verdict.clone())
+    }
+
+    pub(crate) fn cache_put(&self, key: u64, verdict: crate::verdict::Verdict) {
+        let Some(cache) = &self.cache else {
+            return;
+        };
+        let Ok(mut guard) = cache.lock() else {
+            return;
+        };
+        if guard.entries.len() >= guard.cap
+            && !guard.entries.contains_key(&key)
+            && let Some(old) = guard.entries.keys().next().copied()
+        {
+            guard.entries.remove(&old);
+        }
+        guard.entries.insert(key, (Instant::now(), verdict));
+    }
+
     /// Observation. Not an execute path.
     ///
     /// Known versus Unsure uses `choice.escalate_below` and `choice.signal`.
@@ -194,17 +272,20 @@ impl<B: Backend> Client<B> {
             backend_id,
         } = evaluated;
         let mut decisions = IndexMap::new();
+        let mut scores = IndexMap::new();
         for (id, question) in &request.questions {
             let Some(answer) = wire.answers.get(id) else {
                 continue;
             };
             record_prob_sum(&mut meta, id, answer);
+            scores.insert(id.clone(), answer_score(answer));
             let key = QuestionId::new(id);
             let decision = untyped(policy, question, answer).map_err(Error::Decode)?;
             decisions.insert(key, decision);
         }
         Ok(AskOut {
             decisions,
+            scores,
             usage: wire.usage,
             backend_id,
             meta,
@@ -252,29 +333,84 @@ impl Client<AnyBackend> {
     /// `typesafe` or `compatible`. Without the `http` feature, `typesafe`,
     /// `compatible`, and a cascade URL stay [`Error::Policy`].
     pub fn from_env() -> Result<Self, Error> {
-        let name = std::env::var("SNAPIF_BACKEND").ok();
-        let shadow = matches!(
-            std::env::var("SNAPIF_SHADOW").ok().as_deref(),
-            Some("1" | "true" | "TRUE" | "True")
-        );
-        let env = BackendEnv {
-            #[cfg(feature = "http")]
-            typesafe_key: std::env::var("TYPESAFE_API_KEY").ok(),
-            #[cfg(feature = "http")]
-            snapif_key: std::env::var("SNAPIF_API_KEY").ok(),
+        let cache_capacity = match std::env::var("SNAPIF_CACHE").ok().as_deref() {
+            None => None,
+            Some(raw) => {
+                let raw = raw.trim();
+                if raw.is_empty() {
+                    None
+                } else {
+                    Some(raw.parse::<usize>().map_err(|_| {
+                        Error::Policy(PolicyError::Config("SNAPIF_CACHE".to_string()))
+                    })?)
+                }
+            }
+        };
+        let config = ClientConfig {
+            backend: std::env::var("SNAPIF_BACKEND").unwrap_or_default(),
+            shadow: matches!(
+                std::env::var("SNAPIF_SHADOW").ok().as_deref(),
+                Some("1" | "true" | "TRUE" | "True")
+            ),
+            model: std::env::var("SNAPIF_MODEL").ok(),
+            timeout_ms: std::env::var("SNAPIF_TIMEOUT_MS").ok(),
+            policy: std::env::var("SNAPIF_POLICY").ok(),
             #[cfg(feature = "http")]
             base_url: std::env::var("SNAPIF_BASE_URL").ok(),
+            #[cfg(not(feature = "http"))]
+            base_url: None,
+            #[cfg(feature = "http")]
+            api_key: std::env::var("SNAPIF_API_KEY").ok(),
+            #[cfg(not(feature = "http"))]
+            api_key: None,
+            #[cfg(feature = "http")]
+            typesafe_key: std::env::var("TYPESAFE_API_KEY").ok(),
+            #[cfg(not(feature = "http"))]
+            typesafe_key: None,
             #[cfg(feature = "http")]
             allow_private_http: matches!(
                 std::env::var("SNAPIF_ALLOW_PRIVATE_HTTP").ok().as_deref(),
                 Some("1" | "true" | "TRUE" | "True")
             ),
+            #[cfg(not(feature = "http"))]
+            allow_private_http: false,
             cascade: std::env::var("SNAPIF_CASCADE_BASE_URL").ok(),
-            model: std::env::var("SNAPIF_MODEL").ok(),
-            timeout_ms: std::env::var("SNAPIF_TIMEOUT_MS").ok(),
-            policy: std::env::var("SNAPIF_POLICY").ok(),
+            log_path: std::env::var("SNAPIF_LOG")
+                .ok()
+                .map(|raw| raw.trim().to_string())
+                .filter(|raw| !raw.is_empty())
+                .map(PathBuf::from),
+            cache_capacity,
         };
-        Self::from_parts(name.as_deref(), shadow, &env)
+        Self::from_config(&config)
+    }
+
+    /// Same client as [`Self::from_env`] for the same values. Does not read the process environment.
+    pub fn from_config(config: &ClientConfig) -> Result<Self, Error> {
+        let env = BackendEnv {
+            #[cfg(feature = "http")]
+            typesafe_key: config.typesafe_key.clone(),
+            #[cfg(feature = "http")]
+            snapif_key: config.api_key.clone(),
+            #[cfg(feature = "http")]
+            base_url: config.base_url.clone(),
+            #[cfg(feature = "http")]
+            allow_private_http: config.allow_private_http,
+            cascade: config.cascade.clone(),
+            model: config.model.clone(),
+            timeout_ms: config.timeout_ms.clone(),
+            policy: config.policy.clone(),
+        };
+        let name = match config.backend.trim() {
+            "" => None,
+            other => Some(other),
+        };
+        let mut client = Self::from_parts(name, config.shadow, &env)?;
+        client.log_path = config.log_path.clone();
+        if let Some(cap) = config.cache_capacity.filter(|cap| *cap > 0) {
+            client.cache = Some(Mutex::new(GateCache::new(cap)));
+        }
+        Ok(client)
     }
 
     #[cfg_attr(not(feature = "http"), allow(unused_variables))]
@@ -419,6 +555,8 @@ fn compatible_backend(
 #[non_exhaustive]
 pub struct AskOut {
     pub decisions: IndexMap<QuestionId, UntypedDecision>,
+    /// Choice confidence, score value, or noul probability, keyed by question id.
+    pub scores: IndexMap<String, f64>,
     pub usage: Usage,
     pub backend_id: String,
     pub meta: IndexMap<String, AnswerMeta>,
@@ -524,6 +662,14 @@ pub(crate) fn wire_question(question: &Question) -> (String, WireQuestion) {
     }
 }
 
+fn answer_score(answer: &WireAnswer) -> f64 {
+    match answer {
+        WireAnswer::Choice { confidence, .. } => *confidence,
+        WireAnswer::Score { score, .. } => *score,
+        WireAnswer::Noul { noul } => *noul,
+    }
+}
+
 pub(crate) fn record_prob_sum(
     meta: &mut IndexMap<String, AnswerMeta>,
     id: &str,
@@ -616,12 +762,28 @@ fn untyped(
 
 #[cfg(test)]
 mod tests {
-    use super::{AnyBackend, Backend, Client};
+    use super::{AnyBackend, Backend, Client, ClientConfig};
     use crate::error::{Error, PolicyError};
 
     #[test]
     fn from_name_selects_without_env() {
         let env = super::BackendEnv::default();
+        let config = ClientConfig {
+            backend: "fake".to_string(),
+            timeout_ms: Some("nope".to_string()),
+            ..ClientConfig::default()
+        };
+        let bad = match Client::<AnyBackend>::from_config(&config) {
+            Err(err) => err,
+            Ok(_) => panic!("timeout"),
+        };
+        assert!(bad.to_string().contains("SNAPIF_TIMEOUT_MS"), "{bad}");
+        let ok = Client::<AnyBackend>::from_config(&ClientConfig {
+            backend: "fake".to_string(),
+            ..ClientConfig::default()
+        })
+        .expect("fake");
+        assert_eq!(ok.backend().id(), "fake");
         let Err(unset) = Client::<AnyBackend>::from_parts(None, false, &env) else {
             panic!("unset must be policy");
         };

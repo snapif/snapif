@@ -12,7 +12,7 @@ use crate::policy::{
 };
 use crate::question::Question;
 use crate::state::{PreparedCall, State};
-use crate::verdict::{ActionHint, Decision, UnsureReason, Verdict, hint};
+use crate::verdict::{ActionHint, Decision, GateFacts, UnsureReason, Verdict, hint};
 use crate::wire::{self, Usage, WireAnswer, WireRequest};
 
 /// Prepared tool call. The host runs path checks and deny-lists before `gate()`.
@@ -30,6 +30,28 @@ impl<B: Backend> Client<B> {
     /// The host checks paths and deny-lists before this call. `Verdict::Auto`
     /// means no objection from the shipped policy.
     pub async fn gate(&self, req: GateRequest) -> Result<Verdict, Error> {
+        if req.action_id.0.is_empty() {
+            return Err(Error::EmptyActionId);
+        }
+        let key = gate_cache_key(self, &req);
+        if let Some(key) = key
+            && let Some(hit) = self.cache_get(key)
+        {
+            return Ok(self.record(&req, None, hit));
+        }
+        let verdict = self.gate_uncached(&req).await?;
+        Ok(self.record(&req, key, verdict))
+    }
+
+    pub async fn gate_many(&self, requests: Vec<GateRequest>) -> Result<Vec<Verdict>, Error> {
+        let mut verdicts = Vec::with_capacity(requests.len());
+        for req in requests {
+            verdicts.push(self.gate(req).await?);
+        }
+        Ok(verdicts)
+    }
+
+    async fn gate_uncached(&self, req: &GateRequest) -> Result<Verdict, Error> {
         if req.action_id.0.is_empty() {
             return Err(Error::EmptyActionId);
         }
@@ -160,14 +182,18 @@ impl<B: Backend> Client<B> {
                 ));
             }
             Ok(Some(verdict)) => {
-                return Ok(self.finish(
-                    push_reasons(verdict, reasons),
-                    evaluated.wire.usage,
-                    evaluated.backend_id,
-                    self.shadow_on(policy.shadow),
-                    Some(harm.label),
+                let scores = answer_scores(&evaluated.wire.answers);
+                return Ok(self.finish(Stamp {
+                    verdict: push_reasons(verdict, reasons),
+                    usage: evaluated.wire.usage,
+                    backend_id: evaluated.backend_id,
+                    shadow: self.shadow_on(policy.shadow),
+                    guess: Some(harm.label.clone()),
                     meta,
-                ));
+                    signal: Some(harm.signal),
+                    gates: &gates,
+                    scores: &scores,
+                }));
             }
             Ok(None) => {}
         }
@@ -206,14 +232,18 @@ impl<B: Backend> Client<B> {
                 req.action_id.clone(),
             );
         }
-        Ok(self.finish(
-            push_reasons(verdict, reasons),
-            evaluated.wire.usage,
-            evaluated.backend_id,
-            self.shadow_on(policy.shadow),
-            Some(harm.label),
+        let scores = answer_scores(&evaluated.wire.answers);
+        Ok(self.finish(Stamp {
+            verdict: push_reasons(verdict, reasons),
+            usage: evaluated.wire.usage,
+            backend_id: evaluated.backend_id,
+            shadow: self.shadow_on(policy.shadow),
+            guess: Some(harm.label),
             meta,
-        ))
+            signal: Some(harm.signal),
+            gates: &gates,
+            scores: &scores,
+        }))
     }
 
     fn closed(
@@ -231,28 +261,234 @@ impl<B: Backend> Client<B> {
         } else {
             Verdict::Escalate(hint(action_id.clone(), vec![reason]))
         };
-        self.finish(verdict, usage, backend_id.to_string(), shadow, None, meta)
+        let empty = IndexMap::new();
+        self.finish(Stamp {
+            verdict,
+            usage,
+            backend_id: backend_id.to_string(),
+            shadow,
+            guess: None,
+            meta,
+            signal: None,
+            gates,
+            scores: &empty,
+        })
     }
 
-    fn finish(
-        &self,
-        verdict: Verdict,
-        usage: Usage,
-        backend_id: String,
-        shadow: bool,
-        guess: Option<String>,
-        meta: IndexMap<String, crate::backend::AnswerMeta>,
-    ) -> Verdict {
-        map_hint(verdict, |mut hint| {
-            hint.usage = usage;
-            hint.backend_id = backend_id;
-            hint.shadow = shadow;
+    fn finish(&self, stamp: Stamp<'_>) -> Verdict {
+        map_hint(stamp.verdict, |mut hint| {
+            hint.usage = stamp.usage;
+            hint.backend_id = stamp.backend_id;
+            hint.shadow = stamp.shadow;
             if hint.guess.is_none() {
-                hint.guess = guess;
+                hint.guess = stamp.guess;
             }
-            hint.meta = meta;
+            hint.meta = stamp.meta;
+            hint.facts = GateFacts {
+                signal: stamp.signal,
+                escalate_below: stamp.gates.escalate_below,
+                review: stamp.gates.review,
+                auto: stamp.gates.auto,
+                scores: stamp.scores.clone(),
+            };
             hint
         })
+    }
+
+    fn record(&self, req: &GateRequest, key: Option<u64>, verdict: Verdict) -> Verdict {
+        if let Some(path) = &self.log_path {
+            let _guard = self.log_lock.lock().ok();
+            if let Err(err) = append_gate_log(path, req, &verdict) {
+                return Verdict::Escalate(hint(
+                    req.action_id.clone(),
+                    vec![crate::verdict::backend_cause(&std::io::Error::other(err))],
+                ));
+            }
+        }
+        if let Some(key) = key
+            && cacheable(&verdict)
+        {
+            self.cache_put(key, verdict.clone());
+        }
+        verdict
+    }
+}
+
+struct Stamp<'a> {
+    verdict: Verdict,
+    usage: Usage,
+    backend_id: String,
+    shadow: bool,
+    guess: Option<String>,
+    meta: IndexMap<String, crate::backend::AnswerMeta>,
+    signal: Option<f64>,
+    gates: &'a EffectiveGates,
+    scores: &'a IndexMap<String, f64>,
+}
+
+fn answer_scores(answers: &IndexMap<String, WireAnswer>) -> IndexMap<String, f64> {
+    answers
+        .iter()
+        .map(|(id, answer)| {
+            let value = match answer {
+                WireAnswer::Choice { confidence, .. } => *confidence,
+                WireAnswer::Score { score, .. } => *score,
+                WireAnswer::Noul { noul } => *noul,
+            };
+            (id.clone(), value)
+        })
+        .collect()
+}
+
+fn cacheable(verdict: &Verdict) -> bool {
+    let reasons = match verdict {
+        Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => &hint.reasons,
+    };
+    !reasons
+        .iter()
+        .any(|reason| matches!(reason, UnsureReason::Backend { .. }))
+}
+
+fn gate_cache_key<B: Backend>(client: &Client<B>, req: &GateRequest) -> Option<u64> {
+    client.cache.as_ref()?;
+    let policy = client.policy.as_ref()?;
+    let extras: Vec<serde_json::Value> = req
+        .extra_questions
+        .iter()
+        .map(|question| {
+            let (id, wire) = crate::backend::wire_question(question);
+            serde_json::json!({"id": id, "wire": wire})
+        })
+        .collect();
+    let body = serde_json::json!({
+        "policy": policy,
+        "model": client.model,
+        "shadow": client.shadow_on(policy.shadow),
+        "action_id": req.action_id.0,
+        "name": req.prepared.name,
+        "args": req.prepared.args,
+        "trusted": req.state.trusted,
+        "untrusted": req.state.untrusted,
+        "extras": extras,
+    });
+    let text = serde_json::to_string(&body).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    text.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn verdict_word(verdict: &Verdict) -> &'static str {
+    match verdict {
+        Verdict::Auto(_) => "auto",
+        Verdict::Review(_) => "review",
+        Verdict::Escalate(_) => "escalate",
+    }
+}
+
+fn append_gate_log(
+    path: &std::path::Path,
+    req: &GateRequest,
+    verdict: &Verdict,
+) -> std::io::Result<()> {
+    let hint = match verdict {
+        Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => hint,
+    };
+    let mut nouls = serde_json::Map::new();
+    for (id, score) in &hint.facts.scores {
+        if id != "harm_class" {
+            nouls.insert(id.clone(), serde_json::json!(score));
+        }
+    }
+    let mut extras = serde_json::Map::new();
+    for question in &req.extra_questions {
+        let (id, wire) = crate::backend::wire_question(question);
+        let Ok(value) = serde_json::to_value(wire) else {
+            return Err(std::io::Error::other("extra question"));
+        };
+        extras.insert(id, value);
+    }
+    let word = verdict_word(verdict);
+    let confidence = match hint.facts.signal {
+        Some(signal) => signal,
+        None if word == "review"
+            && hint.facts.auto.is_some_and(|auto| auto > hint.facts.review) =>
+        {
+            hint.facts.review
+        }
+        None => 0.0,
+    };
+    let row = serde_json::json!({
+        "id": format!("log-{}", req.action_id.0),
+        "gate_request": {
+            "action_id": req.action_id.0,
+            "prepared": {
+                "name": req.prepared.name,
+                "args": redact_value(&req.prepared.args),
+            },
+            "state": {
+                "trusted": redact_value(&req.state.trusted),
+                "untrusted": hashed_untrusted(&req.state.untrusted),
+            },
+            "extra_questions": extras,
+        },
+        "script": {
+            "harm": hint.guess.clone().unwrap_or_else(|| "read".to_string()),
+            "confidence": confidence,
+            "nouls": nouls,
+            "timeout": hint.facts.signal.is_none() && word == "escalate",
+        },
+        "expected": word,
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    use std::io::Write;
+    writeln!(file, "{row}")?;
+    Ok(())
+}
+
+fn hashed_untrusted(value: &serde_json::Value) -> serde_json::Value {
+    if value.is_null() {
+        return serde_json::Value::Null;
+    }
+    serde_json::json!({"len": value.to_string().len()})
+}
+
+fn redact_value(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, item) in map {
+                let lower = key.to_ascii_lowercase();
+                if [
+                    "key",
+                    "token",
+                    "secret",
+                    "authorization",
+                    "password",
+                    "passwd",
+                    "credential",
+                    "cookie",
+                ]
+                .iter()
+                .any(|needle| lower.contains(needle))
+                {
+                    out.insert(
+                        key.clone(),
+                        serde_json::Value::String("redacted".to_string()),
+                    );
+                } else {
+                    out.insert(key.clone(), redact_value(item));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(redact_value).collect())
+        }
+        other => other.clone(),
     }
 }
 
@@ -544,5 +780,113 @@ mod tests {
             client.backend().last_model().as_deref(),
             Some("custom-model")
         );
+    }
+
+    fn read_backend() -> FakeBackend {
+        let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            backend = backend.on_noul(&id.0, 0.0);
+        }
+        backend
+    }
+
+    fn tag_request(args: serde_json::Value) -> GateRequest {
+        GateRequest {
+            action_id: ActionId::new("tag"),
+            prepared: PreparedCall {
+                name: "tag".to_string(),
+                args,
+            },
+            state: State {
+                trusted: json!({"api_key": "secret-value"}),
+                untrusted: json!({"blob": "hidden"}),
+            },
+            extra_questions: vec![],
+        }
+    }
+
+    #[test]
+    fn auto_keeps_the_signal() {
+        let client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        let crate::verdict::Verdict::Auto(hint) = verdict else {
+            panic!("expected auto");
+        };
+        assert_eq!(hint.facts.signal, Some(0.91));
+        assert!(hint.facts.auto.is_some());
+        assert!(hint.facts.scores.contains_key("harm_class"));
+    }
+
+    #[test]
+    fn cache_skips_the_second_identical_gate() {
+        let mut client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.cache = Some(std::sync::Mutex::new(crate::backend::GateCache::new(4)));
+        let first = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(matches!(first, crate::verdict::Verdict::Auto(_)));
+        assert_eq!(client.backend().calls(), 1);
+        let second = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(matches!(second, crate::verdict::Verdict::Auto(_)));
+        assert_eq!(client.backend().calls(), 1);
+        let _ =
+            pollster::block_on(client.gate(tag_request(json!({"path": "other"})))).expect("gate");
+        assert_eq!(client.backend().calls(), 2);
+    }
+
+    #[test]
+    fn timeout_is_not_cached() {
+        let mut backend = FakeBackend::new().on_timeout("harm_class");
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            backend = backend.on_noul(&id.0, 0.0);
+        }
+        let mut client = Client::new(backend).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.cache = Some(std::sync::Mutex::new(crate::backend::GateCache::new(4)));
+        let _ = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        let _ = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert_eq!(client.backend().calls(), 2);
+    }
+
+    #[test]
+    fn log_row_replays_without_the_secret() {
+        let path = std::env::temp_dir().join(format!("snapif-log-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.log_path = Some(path.clone());
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(matches!(verdict, crate::verdict::Verdict::Auto(_)));
+        let text = std::fs::read_to_string(&path).expect("log");
+        assert!(text.contains("\"expected\":\"auto\""));
+        assert!(!text.contains("secret-value"));
+        assert!(!text.contains("hidden"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn gate_many_keeps_order_and_empty_skips_the_backend() {
+        let client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        let empty = pollster::block_on(client.gate_many(vec![])).expect("empty");
+        assert!(empty.is_empty());
+        assert_eq!(client.backend().calls(), 0);
+        let verdicts = pollster::block_on(client.gate_many(vec![
+            tag_request(json!({"n": 1})),
+            tag_request(json!({"n": 2})),
+        ]))
+        .expect("many");
+        assert_eq!(verdicts.len(), 2);
+        assert!(
+            verdicts
+                .iter()
+                .all(|verdict| matches!(verdict, crate::verdict::Verdict::Auto(_)))
+        );
+        assert_eq!(client.backend().calls(), 2);
     }
 }
