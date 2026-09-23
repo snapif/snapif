@@ -41,6 +41,31 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
+        /// Print each decision as JSON. Without this flag, stdout stays `ok`.
+        #[arg(long)]
+        decisions: bool,
+    },
+    /// Print effective gates for one action. Does not call a backend.
+    Explain {
+        #[arg(long)]
+        action: String,
+        /// Shipped id or `.toml` path. Default is tool-gate.
+        #[arg(long)]
+        policy: Option<String>,
+    },
+    /// Claude Code PreToolUse hook. JSON on stdin, a permission decision on stdout.
+    Hook {
+        #[arg(long)]
+        policy: Option<String>,
+        #[arg(long)]
+        shadow: bool,
+    },
+    /// Score labeled rows. Prints Brier for nouls and accuracy for choices.
+    Calibrate {
+        /// A JSONL file, or a directory of `.json` and `.jsonl` files.
+        path: PathBuf,
+        #[arg(long)]
+        policy: Option<String>,
     },
     /// Check conformance JSON. With the http feature, `--base-url` posts each valid vector.
     Test {
@@ -66,7 +91,18 @@ fn main() -> ExitCode {
             call,
             shadow,
         } => ExitCode::from(gate_cmd(policy.as_deref(), &call, shadow)),
-        Command::Ask { state, policy } => ExitCode::from(ask_cmd(&state, policy.as_deref())),
+        Command::Ask {
+            state,
+            policy,
+            decisions,
+        } => ExitCode::from(ask_cmd(&state, policy.as_deref(), decisions)),
+        Command::Explain { action, policy } => {
+            ExitCode::from(explain_cmd(&action, policy.as_deref()))
+        }
+        Command::Hook { policy, shadow } => ExitCode::from(hook_cmd(policy.as_deref(), shadow)),
+        Command::Calibrate { path, policy } => {
+            ExitCode::from(calibrate_cmd(&path, policy.as_deref()))
+        }
         Command::Test { vectors, base_url } => {
             ExitCode::from(test_cmd(&vectors, base_url.as_deref()))
         }
@@ -126,7 +162,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
     }
 }
 
-fn ask_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
+fn ask_cmd(path: &PathBuf, policy: Option<&str>, decisions: bool) -> u8 {
     let client = match open_client(policy, false) {
         Ok(client) => client,
         Err(err) => {
@@ -141,7 +177,8 @@ fn ask_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             return 1;
         }
     };
-    let (state, questions) = match questions_from_state(&value) {
+    let pack = client.battery_id();
+    let (state, questions) = match questions_from_state(&value, pack) {
         Ok(parsed) => parsed,
         Err(err) => {
             eprintln!("{err}");
@@ -149,8 +186,12 @@ fn ask_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         }
     };
     match block_on(client.ask(state, questions)) {
-        Ok(_) => {
-            println!("ok");
+        Ok(out) => {
+            if decisions {
+                println!("{}", decisions_json(&out));
+            } else {
+                println!("ok");
+            }
             0
         }
         Err(err) => {
@@ -343,7 +384,12 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
         } else {
             row.gate_request.prepared.name.clone()
         };
-        let backend = scripted(&row.script.harm, row.script.confidence, &row.script.nouls);
+        let backend = scripted(
+            &row.script.harm,
+            row.script.confidence,
+            &row.script.nouls,
+            row.script.timeout,
+        );
         let mut client = Client::new(backend).policy(policy.clone());
         if shadow || env_shadow() {
             client = client.shadow(true);
@@ -393,7 +439,15 @@ fn block_on<T>(future: impl std::future::Future<Output = Result<T, Error>>) -> R
     runtime.block_on(future)
 }
 
-fn scripted(harm: &str, confidence: f64, nouls: &serde_json::Map<String, Value>) -> FakeBackend {
+fn scripted(
+    harm: &str,
+    confidence: f64,
+    nouls: &serde_json::Map<String, Value>,
+    timeout: bool,
+) -> FakeBackend {
+    if timeout {
+        return FakeBackend::new().on_timeout("harm_class");
+    }
     let mut backend = FakeBackend::new().on_choice("harm_class", harm, confidence);
     for id in snapif::backends::cascade::battery_ids() {
         if id.0 == "harm_class" {
@@ -416,7 +470,10 @@ fn open_client(policy: Option<&str>, shadow: bool) -> Result<Client<AnyBackend>,
     Ok(client)
 }
 
-fn questions_from_state(value: &Value) -> Result<(State, Vec<Question>), Error> {
+fn questions_from_state(
+    value: &Value,
+    policy: Option<&str>,
+) -> Result<(State, Vec<Question>), Error> {
     if !value.is_object() {
         return Err(Error::Wire(WireError::Json(
             "state must be an object".to_string(),
@@ -426,6 +483,11 @@ fn questions_from_state(value: &Value) -> Result<(State, Vec<Question>), Error> 
         trusted: value.get("trusted").cloned().unwrap_or(Value::Null),
         untrusted: value.get("untrusted").cloned().unwrap_or(Value::Null),
     };
+    if value.get("questions").is_none()
+        && let Some(pack) = pack_questions(policy)
+    {
+        return Ok((state, pack));
+    }
     let questions = value
         .get("questions")
         .cloned()
@@ -439,6 +501,381 @@ fn questions_from_state(value: &Value) -> Result<(State, Vec<Question>), Error> 
         }
     };
     Ok((state, questions))
+}
+
+fn pack_questions(policy: Option<&str>) -> Option<Vec<Question>> {
+    match policy? {
+        "triage" => Some(snapif::triage::questions()),
+        "review" => Some(snapif::review::questions()),
+        "screen" => Some(snapif::screen::questions()),
+        _ => None,
+    }
+}
+
+fn reason_value(reason: &snapif::verdict::UnsureReason) -> Value {
+    use snapif::verdict::UnsureReason;
+    match reason {
+        UnsureReason::BelowFloor { confidence, floor } => {
+            serde_json::json!({"tag": "below_floor", "confidence": confidence, "floor": floor})
+        }
+        UnsureReason::BelowAuto { confidence, auto } => {
+            serde_json::json!({"tag": "below_auto", "confidence": confidence, "auto": auto})
+        }
+        UnsureReason::ReviewFloor {
+            confidence,
+            floor,
+            auto,
+        } => {
+            serde_json::json!({"tag": "review_floor", "confidence": confidence, "floor": floor, "auto": auto})
+        }
+        UnsureReason::NoulBand { noul } => serde_json::json!({"tag": "noul_band", "noul": noul}),
+        UnsureReason::Battery { id, when } => {
+            serde_json::json!({"tag": "battery", "id": id.0, "when": format!("{when:?}")})
+        }
+        UnsureReason::AuthorityClaim { noul } => {
+            serde_json::json!({"tag": "authority_claim", "noul": noul})
+        }
+        UnsureReason::Decode(err) => {
+            serde_json::json!({"tag": "decode", "message": err.to_string()})
+        }
+        UnsureReason::Wire => serde_json::json!({"tag": "wire"}),
+        UnsureReason::Backend { cause } => serde_json::json!({"tag": "backend", "cause": cause}),
+        UnsureReason::CascadeStillUnsure => serde_json::json!({"tag": "cascade_still_unsure"}),
+        UnsureReason::HarmClassBump { from, to } => {
+            serde_json::json!({"tag": "harm_class_bump", "from": format!("{from:?}"), "to": format!("{to:?}")})
+        }
+        UnsureReason::Truncated => serde_json::json!({"tag": "truncated"}),
+        _ => serde_json::json!({"tag": "other"}),
+    }
+}
+
+fn decisions_json(out: &snapif::AskOut) -> String {
+    use snapif::verdict::{Decision, UntypedDecision};
+    let rows: Vec<Value> = out
+        .decisions
+        .iter()
+        .map(|(id, decision)| {
+            let score = out.scores.get(id.0.as_str()).copied();
+            match decision {
+                UntypedDecision::Choice(Decision::Known(label)) => serde_json::json!({
+                    "id": id.0, "type": "choice", "known": label, "score": score,
+                }),
+                UntypedDecision::Choice(Decision::Unsure { reason, guess }) => serde_json::json!({
+                    "id": id.0, "type": "choice", "unsure": reason_value(reason), "guess": guess, "score": score,
+                }),
+                UntypedDecision::Score(Decision::Known(value)) => serde_json::json!({
+                    "id": id.0, "type": "score", "known": value, "score": score,
+                }),
+                UntypedDecision::Score(Decision::Unsure { reason, guess }) => serde_json::json!({
+                    "id": id.0, "type": "score", "unsure": reason_value(reason), "guess": guess, "score": score,
+                }),
+                UntypedDecision::Noul(Decision::Known(value)) => serde_json::json!({
+                    "id": id.0, "type": "noul", "known": value, "score": score,
+                }),
+                UntypedDecision::Noul(Decision::Unsure { reason, guess }) => serde_json::json!({
+                    "id": id.0, "type": "noul", "unsure": reason_value(reason), "guess": guess, "score": score,
+                }),
+            }
+        })
+        .collect();
+    serde_json::json!({
+        "decisions": rows,
+        "usage": out.usage,
+        "backend_id": out.backend_id,
+        "truncated": out.truncated_untrusted,
+    })
+    .to_string()
+}
+
+fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
+    let policy = match policy {
+        Some(spec) => Policy::load(spec),
+        None => Policy::shipped("tool-gate").map_err(Error::Policy),
+    };
+    let policy = match policy {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let id = ActionId::new(action);
+    let gates = match snapif::policy::effective_gates(&policy, &id, None) {
+        Ok(gates) => gates,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let row = policy.actions.get(&id).or(policy.default_action.as_ref());
+    let Some(row) = row else {
+        eprintln!("unknown action {action}");
+        return 1;
+    };
+    let raw_auto = row
+        .auto
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let effective_auto = gates
+        .auto
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    println!("action {action}");
+    println!("class {:?}", row.class);
+    println!("when_unsure {:?}", row.when_unsure);
+    println!(
+        "block_on {}",
+        row.block_on
+            .iter()
+            .map(|block| block.id.0.as_str())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    println!("raw_auto {raw_auto}");
+    println!("raw_review {}", row.review);
+    println!("escalate_below {}", gates.escalate_below);
+    println!("review {}", gates.review);
+    println!("auto {effective_auto}");
+    if row.auto != gates.auto {
+        println!(
+            "auto moved from the raw value because a floor raised it or a harm bump cleared it"
+        );
+    }
+    println!("battery {}", policy.battery.0);
+    0
+}
+
+fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
+    use std::io::Read;
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("invalid json");
+        return 1;
+    }
+    let value: Value = match serde_json::from_str::<Value>(&input) {
+        Ok(value) if value.is_object() => value,
+        _ => {
+            eprintln!("invalid json");
+            return 1;
+        }
+    };
+    let name = value
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    let args = value
+        .get("tool_input")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    let trusted = value.get("trusted").cloned().unwrap_or_else(|| {
+        serde_json::json!({"user_request": value.get("session_id").and_then(Value::as_str).unwrap_or("")})
+    });
+    let client = match open_client(policy, shadow) {
+        Ok(client) => client,
+        Err(err) => {
+            hook_decision("deny", &err.to_string());
+            return 0;
+        }
+    };
+    let request = GateRequest {
+        action_id: ActionId::new(name),
+        prepared: PreparedCall {
+            name: name.to_string(),
+            args,
+        },
+        state: State {
+            trusted,
+            untrusted: value.get("tool_input").cloned().unwrap_or(Value::Null),
+        },
+        extra_questions: Vec::new(),
+    };
+    match block_on(client.gate(request)) {
+        Ok(verdict) => {
+            let name = verdict_name(&verdict);
+            if shadow {
+                eprintln!("{name}");
+                hook_decision("allow", name);
+                return 0;
+            }
+            match verdict {
+                Verdict::Auto(_) => hook_decision("allow", "auto"),
+                Verdict::Review(_) => hook_decision("deny", "review"),
+                Verdict::Escalate(_) => hook_decision("deny", "escalate"),
+            }
+            0
+        }
+        Err(err) => {
+            hook_decision("deny", &err.to_string());
+            0
+        }
+    }
+}
+
+fn hook_decision(decision: &str, reason: &str) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision,
+                "permissionDecisionReason": reason,
+            }
+        })
+    );
+}
+
+fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
+    let rows = match read_calibrate_rows(path) {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    if rows.is_empty() {
+        eprintln!("{}: no calibration rows", path.display());
+        return 1;
+    }
+    let client = match open_client(policy, false) {
+        Ok(client) => client,
+        Err(err) => {
+            eprintln!("{err}");
+            return ask_code(&err);
+        }
+    };
+    let pack = client.battery_id();
+    let mut card = snapif::scorecard::Scorecard::default();
+    for (line_no, line) in rows.iter().enumerate() {
+        let row: Value = match serde_json::from_str(line) {
+            Ok(row) => row,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                return 1;
+            }
+        };
+        let (state, questions) = match questions_from_state(&row, pack) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                eprintln!("{err}");
+                return ask_code(&err);
+            }
+        };
+        let out = match block_on(client.ask(state, questions)) {
+            Ok(out) => out,
+            Err(err) => {
+                eprintln!("{err}");
+                return ask_code(&err);
+            }
+        };
+        let labels = row.get("labels").and_then(Value::as_object);
+        let Some(labels) = labels else {
+            eprintln!("line {}: missing labels", line_no + 1);
+            return 1;
+        };
+        for (id, score) in &out.scores {
+            let Some(label) = labels.get(id) else {
+                continue;
+            };
+            if let Some(truth) = label.as_bool() {
+                card.add_noul(*score, truth);
+            } else if let Some(expected) = label.as_str() {
+                let matched = out.decisions.iter().any(|(key, decision)| {
+                    key.0 == *id && choice_known(decision) == Some(expected)
+                });
+                card.add_choice(matched);
+            }
+        }
+    }
+    if card.is_empty() {
+        eprintln!("{}: no labeled scores", path.display());
+        return 1;
+    }
+    if let Some(brier) = card.brier() {
+        println!("brier {brier}");
+        for (index, count, fraction) in card.bins() {
+            println!("bin {index} count {count} true_fraction {fraction}");
+        }
+    }
+    if let Some(accuracy) = card.choice_accuracy() {
+        println!("choice_accuracy {accuracy}");
+    }
+    0
+}
+
+fn choice_known(decision: &snapif::verdict::UntypedDecision) -> Option<&str> {
+    match decision {
+        snapif::verdict::UntypedDecision::Choice(snapif::verdict::Decision::Known(label)) => {
+            Some(label.as_str())
+        }
+        _ => None,
+    }
+}
+
+fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<String>, Error> {
+    let mut rows = Vec::new();
+    if path.is_dir() {
+        let mut names: Vec<_> = fs::read_dir(path)
+            .map_err(|err| {
+                Error::Io(std::io::Error::new(
+                    err.kind(),
+                    format!("{}: {err}", path.display()),
+                ))
+            })?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|entry| {
+                entry
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext == "json" || ext == "jsonl")
+            })
+            .collect();
+        names.sort();
+        if names.is_empty() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{}: no calibration rows", path.display()),
+            )));
+        }
+        for name in names {
+            push_calibrate_rows(&mut rows, &name)?;
+        }
+        return Ok(rows);
+    }
+    push_calibrate_rows(&mut rows, path)?;
+    Ok(rows)
+}
+
+fn push_calibrate_rows(rows: &mut Vec<String>, path: &std::path::Path) -> Result<(), Error> {
+    let text = fs::read_to_string(path).map_err(|err| {
+        Error::Io(std::io::Error::new(
+            err.kind(),
+            format!("{}: {err}", path.display()),
+        ))
+    })?;
+    let json_doc = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext == "json");
+    if json_doc {
+        let value: Value = serde_json::from_str(&text)
+            .map_err(|err| Error::Wire(WireError::Json(format!("{}: {err}", path.display()))))?;
+        match value {
+            Value::Array(items) => {
+                for item in items {
+                    rows.push(item.to_string());
+                }
+            }
+            other => rows.push(other.to_string()),
+        }
+        return Ok(());
+    }
+    for line in text.lines() {
+        if !line.trim().is_empty() {
+            rows.push(line.to_string());
+        }
+    }
+    Ok(())
 }
 
 fn wire_questions(map: &serde_json::Map<String, Value>) -> Result<Vec<Question>, Error> {
@@ -620,12 +1057,20 @@ struct ReplayState {
 
 #[derive(Debug, Deserialize)]
 struct ReplayScript {
+    #[serde(default = "default_harm")]
     harm: String,
+    #[serde(default)]
     confidence: f64,
     #[serde(default)]
     nouls: serde_json::Map<String, Value>,
+    #[serde(default)]
+    timeout: bool,
 }
 
 fn default_name() -> String {
     "call".to_string()
+}
+
+fn default_harm() -> String {
+    "read".to_string()
 }

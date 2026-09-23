@@ -12,6 +12,7 @@ mod macros;
 pub mod policy;
 pub mod question;
 pub mod review;
+pub mod scorecard;
 pub mod screen;
 pub mod state;
 pub mod triage;
@@ -19,7 +20,7 @@ pub mod usage;
 pub mod verdict;
 pub mod wire;
 
-pub use backend::{AnswerMeta, AnyBackend, AskOut, CascadeHop, Client};
+pub use backend::{AnswerMeta, AnyBackend, AskOut, CascadeHop, Client, ClientConfig};
 pub use backends::fake::FakeBackend;
 pub use error::Error;
 pub use gate::GateRequest;
@@ -28,7 +29,7 @@ pub use policy::{Fail, Policy};
 pub use question::Question;
 pub use state::{PreparedCall, State};
 pub use usage::UsageFn;
-pub use verdict::{ActionHint, Decision, Verdict};
+pub use verdict::{ActionHint, Decision, GateFacts, Verdict};
 
 #[cfg(test)]
 mod tests {

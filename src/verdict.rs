@@ -80,6 +80,18 @@ pub enum Verdict {
     Escalate(ActionHint),
 }
 
+/// Numbers that selected a verdict. Present on Auto as well as Review and Escalate.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GateFacts {
+    /// Combined signal passed to `verdict_from_signal`. Empty when the scorer never answered.
+    pub signal: Option<f64>,
+    pub escalate_below: f64,
+    pub review: f64,
+    pub auto: Option<f64>,
+    /// Choice confidence, score value, or noul probability, keyed by question id.
+    pub scores: IndexMap<String, f64>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct ActionHint {
@@ -90,6 +102,7 @@ pub struct ActionHint {
     pub usage: Usage,
     pub backend_id: String,
     pub meta: IndexMap<String, AnswerMeta>,
+    pub facts: GateFacts,
 }
 
 impl ActionHint {
@@ -134,5 +147,6 @@ pub(crate) fn hint(action_id: ActionId, reasons: Vec<UnsureReason>) -> ActionHin
         usage: Usage::default(),
         backend_id: String::new(),
         meta: IndexMap::new(),
+        facts: GateFacts::default(),
     }
 }

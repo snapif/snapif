@@ -769,3 +769,199 @@ fn replay_prints_every_row_and_continues_after_a_mismatch() {
     assert!(stdout.contains("\"id\":\"later\""));
     assert!(stdout.contains("\"got\":\"auto\""));
 }
+
+#[test]
+fn ask_decisions_flag_prints_json_and_screen_loads_the_pack() {
+    let dir = std::env::temp_dir().join(format!("snapif-dec-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let state = dir.join("state.json");
+    fs::write(&state, r#"{"trusted":{"text":"hello"},"untrusted":null}"#).expect("write");
+    let plain = bin()
+        .args(["ask", "--decisions", "--policy", "tool-gate", "--state"])
+        .arg(&state)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    assert_eq!(plain.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&plain.stdout);
+    assert!(stdout.contains("\"decisions\""), "{stdout}");
+    let screen = bin()
+        .args(["ask", "--policy", "screen", "--state"])
+        .arg(&state)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&screen.stderr);
+    assert_eq!(screen.status.code(), Some(2), "{err}");
+    assert!(err.contains("missing answer sensitive"), "{err}");
+    let from_env = bin()
+        .args(["ask", "--state"])
+        .arg(&state)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_POLICY", "screen")
+        .output()
+        .expect("run");
+    let env_err = String::from_utf8_lossy(&from_env.stderr);
+    assert_eq!(from_env.status.code(), Some(2), "{env_err}");
+    assert!(env_err.contains("missing answer sensitive"), "{env_err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
+    let output = bin()
+        .args(["explain", "--action", "git.push"])
+        .env_remove("SNAPIF_BACKEND")
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("auto none"), "{stdout}");
+    assert!(stdout.contains("exfil"), "{stdout}");
+    let missing =
+        std::env::temp_dir().join(format!("snapif-missing-policy-{}.toml", std::process::id()));
+    let bad = bin()
+        .args(["explain", "--action", "git.push", "--policy"])
+        .arg(&missing)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert_eq!(bad.status.code(), Some(1), "{err}");
+    assert!(err.contains(&missing.display().to_string()), "{err}");
+}
+
+fn hook_output(body: &[u8], shadow: bool) -> std::process::Output {
+    let mut command = bin();
+    command
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if shadow {
+        command.arg("--shadow");
+    }
+    let mut child = command.spawn().expect("spawn");
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(body).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
+    let denied = hook_output(
+        br#"{"tool_name":"bash","tool_input":{"command":"ls"}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    let shadow = hook_output(
+        br#"{"tool_name":"bash","tool_input":{"command":"ls"}}"#,
+        true,
+    );
+    let shadow_out = String::from_utf8_lossy(&shadow.stdout);
+    assert_eq!(shadow.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"allow\""),
+        "{shadow_out}"
+    );
+    let bad = hook_output(b"not-json", false);
+    assert_eq!(bad.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("invalid json"));
+}
+
+#[test]
+fn action_wrapper_fails_a_missing_call_and_an_escalate() {
+    let script = format!("{}/scripts/snapif-action.sh", env!("CARGO_MANIFEST_DIR"));
+    let missing = std::process::Command::new("bash")
+        .arg(&script)
+        .arg("gate")
+        .arg("")
+        .env("SNAPIF_BIN", env!("CARGO_BIN_EXE_snapif"))
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    assert_ne!(missing.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("missing call file"));
+    let call = std::env::temp_dir().join(format!("snapif-act-{}.json", std::process::id()));
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"untrusted":null}"#,
+    )
+    .expect("write");
+    let escalated = std::process::Command::new("bash")
+        .arg(&script)
+        .args(["gate", call.to_str().unwrap(), "", ""])
+        .env("SNAPIF_BIN", env!("CARGO_BIN_EXE_snapif"))
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&call);
+    assert_eq!(
+        escalated.status.code(),
+        Some(11),
+        "{}",
+        String::from_utf8_lossy(&escalated.stderr)
+    );
+}
+
+#[test]
+fn snapif_log_row_replays_offline() {
+    let dir = std::env::temp_dir().join(format!("snapif-log-cli-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    let log = dir.join("log.jsonl");
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{"api_key":"secret-value"},"trusted":{},"untrusted":{"blob":"hidden"}}"#,
+    )
+    .expect("write");
+    let gated = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .output()
+        .expect("gate");
+    assert_eq!(gated.status.code(), Some(11));
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(!text.contains("secret-value"), "{text}");
+    assert!(!text.contains("hidden"), "{text}");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&log)
+        .env("SNAPIF_BACKEND", "typesafe")
+        .env("SNAPIF_CASCADE_BASE_URL", "http://127.0.0.1:9")
+        .output()
+        .expect("replay");
+    let stdout = String::from_utf8_lossy(&replayed.stdout);
+    assert_eq!(
+        replayed.status.code(),
+        Some(0),
+        "{stdout} {}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    assert!(stdout.contains("\"got\":\"escalate\""), "{stdout}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn calibrate_empty_file_names_the_path() {
+    let path = std::env::temp_dir().join(format!("snapif-cal-{}.jsonl", std::process::id()));
+    fs::write(&path, "\n").expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("no calibration rows"), "{err}");
+    let _ = fs::remove_file(&path);
+}

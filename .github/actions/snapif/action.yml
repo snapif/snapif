@@ -1,0 +1,36 @@
+name: snapif
+description: Run snapif gate or ask and fail the step when the verdict is not auto or a labeled ask misses.
+inputs:
+  mode:
+    description: gate or ask
+    required: true
+    default: gate
+  call:
+    description: Path to a gate call JSON file
+    required: false
+    default: ""
+  state:
+    description: Path to an ask state JSON file
+    required: false
+    default: ""
+  policy:
+    description: Shipped policy id or toml path
+    required: false
+    default: ""
+  question:
+    description: Ask question id that must be a known false noul or a known choice label
+    required: false
+    default: ""
+  deny_label:
+    description: Choice label or the word true that fails the ask step
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: snapif
+      shell: bash
+      env:
+        SNAPIF_BACKEND: ${{ env.SNAPIF_BACKEND }}
+        SNAPIF_POLICY: ${{ inputs.policy }}
+      run: bash "${{ github.action_path }}/../../../scripts/snapif-action.sh" "${{ inputs.mode }}" "${{ inputs.call }}" "${{ inputs.state }}" "${{ inputs.policy }}" "${{ inputs.question }}" "${{ inputs.deny_label }}"

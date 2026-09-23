@@ -19,6 +19,7 @@ pub struct FakeBackend {
     scripts: IndexMap<String, Script>,
     last_state: Mutex<Option<Value>>,
     last_model: Mutex<Option<String>>,
+    calls: Mutex<u64>,
 }
 
 impl FakeBackend {
@@ -29,6 +30,7 @@ impl FakeBackend {
             scripts: IndexMap::new(),
             last_state: Mutex::new(None),
             last_model: Mutex::new(None),
+            calls: Mutex::new(0),
         }
     }
 
@@ -65,6 +67,10 @@ impl FakeBackend {
     pub fn last_model(&self) -> Option<String> {
         self.last_model.lock().ok().and_then(|guard| guard.clone())
     }
+
+    pub fn calls(&self) -> u64 {
+        self.calls.lock().map(|guard| *guard).unwrap_or(0)
+    }
 }
 
 impl Backend for FakeBackend {
@@ -86,6 +92,9 @@ impl Backend for FakeBackend {
         }
         if let Ok(mut guard) = self.last_model.lock() {
             *guard = Some(req.model.clone());
+        }
+        if let Ok(mut guard) = self.calls.lock() {
+            *guard += 1;
         }
         if Instant::now() >= deadline {
             return Err(BackendError::Timeout);
