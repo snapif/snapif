@@ -354,6 +354,23 @@ fn status_401_is_auth() {
     );
     assert_eq!(hits.len(), 1);
     assert!(matches!(err, BackendError::Auth), "{err:?}");
+    assert!(err.to_string().contains("401"), "{err}");
+}
+
+#[test]
+fn success_html_names_the_body() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response(
+            "200 OK",
+            "Content-Type: text/html\r\n",
+            "<html>nope</html>",
+        )],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(text.contains("invalid json"), "{text}");
+    assert!(text.contains("<html>nope</html>"), "{text}");
 }
 
 #[test]

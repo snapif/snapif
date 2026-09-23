@@ -120,8 +120,10 @@ impl Backend for HttpBackend {
             let status = response.status().as_u16();
             if response.status().is_success() {
                 let bytes = read_limited(response).await?;
-                let wire: WireResponse = wire::decode_response(&bytes)
-                    .map_err(|err| BackendError::Transport(err.to_string()))?;
+                let wire: WireResponse = wire::decode_response(&bytes).map_err(|err| {
+                    let snippet = clip_text(&String::from_utf8_lossy(&bytes), 80);
+                    BackendError::Transport(format!("{err}; body: {snippet}"))
+                })?;
                 return Ok(Evaluated {
                     wire,
                     meta: IndexMap::new(),
@@ -147,6 +149,17 @@ impl Backend for HttpBackend {
             return Err(status_error(status, &body));
         }
     }
+}
+
+fn clip_text(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &text[..end])
 }
 
 fn status_error(status: u16, body: &[u8]) -> BackendError {
