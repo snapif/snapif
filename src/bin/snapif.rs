@@ -173,8 +173,8 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
                 return 1;
             }
         };
-        if let Err(err) = client.replace_fake(backend) {
-            eprintln!("{err}");
+        if client.replace_fake(backend).is_err() {
+            eprintln!("script is only used when SNAPIF_BACKEND=fake");
             return 1;
         }
     }

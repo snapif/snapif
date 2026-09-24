@@ -137,6 +137,23 @@ pub struct ClientConfig {
     pub cache_capacity: Option<usize>,
 }
 
+/// Host choice for one `gate` or `ask`. Empty model keeps the client model.
+#[derive(Clone, Copy, Default)]
+pub struct CallChoice<'a> {
+    pub model: Option<&'a str>,
+    pub policy: Option<&'a Policy>,
+}
+
+/// What the next call will use. The API key is not included.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientStatus {
+    pub backend: String,
+    pub model: String,
+    pub policy: String,
+    pub log: bool,
+    pub cache: bool,
+}
+
 pub struct Client<B: Backend> {
     pub(crate) backend: B,
     pub(crate) policy: Option<Policy>,
@@ -172,14 +189,12 @@ impl<B: Backend> Client<B> {
         self
     }
 
-    pub(crate) fn fail_mode(&self) -> Fail {
+    /// `Client::fail` wins. Otherwise the call policy, then fail-closed.
+    pub(crate) fn fail_for(&self, policy: Option<&Policy>) -> Fail {
         if let Some(fail) = self.fail_override {
             return fail;
         }
-        self.policy
-            .as_ref()
-            .map(|policy| policy.fail)
-            .unwrap_or(Fail::Closed)
+        policy.map(|policy| policy.fail).unwrap_or(Fail::Closed)
     }
 
     /// Overrides `policy.shadow` for `gate()`. Does not rewrite the verdict.
@@ -221,6 +236,21 @@ impl<B: Backend> Client<B> {
 
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    /// Backend id, model, and policy id for a status line. No API key.
+    pub fn status(&self) -> ClientStatus {
+        ClientStatus {
+            backend: self.backend.id().to_string(),
+            model: self.model.clone(),
+            policy: self
+                .policy
+                .as_ref()
+                .and_then(|policy| policy.shipped_id.clone())
+                .unwrap_or_default(),
+            log: self.log_path.is_some(),
+            cache: self.cache.is_some(),
+        }
     }
 
     /// The next `evaluate` uses `key`. Backends that store a bearer token refuse an empty string.
@@ -272,13 +302,27 @@ impl<B: Backend> Client<B> {
     /// Per-action auto thresholds are not consulted, and `prepared` is not injected.
     /// A trimmed untrusted state is reported on [`AskOut`] and does not change the decision.
     pub async fn ask(&self, state: State, questions: Vec<Question>) -> Result<AskOut, Error> {
-        let policy = self
+        self.ask_with(state, questions, CallChoice::default()).await
+    }
+
+    /// Same as [`Self::ask`], with a host-chosen model and policy for this call.
+    pub async fn ask_with(
+        &self,
+        state: State,
+        questions: Vec<Question>,
+        choice: CallChoice<'_>,
+    ) -> Result<AskOut, Error> {
+        let policy = choice
             .policy
-            .as_ref()
+            .or(self.policy.as_ref())
             .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
+        let model = match choice.model.map(str::trim).filter(|text| !text.is_empty()) {
+            Some(model) => model.to_string(),
+            None => self.model.clone(),
+        };
         policy.ensure_checked()?;
         let mut request = WireRequest {
-            model: self.model.clone(),
+            model: model.clone(),
             state: state.to_wire(None),
             questions: questions.iter().map(wire_question).collect(),
         };
@@ -329,8 +373,22 @@ impl<B: Backend> Client<B> {
             truncated_untrusted: encoded.truncated_untrusted,
             pack,
             pack_version,
-            model: self.model.clone(),
+            model,
         })
+    }
+}
+
+impl<B: Backend> std::fmt::Debug for Client<B> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let status = self.status();
+        formatter
+            .debug_struct("Client")
+            .field("backend", &status.backend)
+            .field("model", &status.model)
+            .field("policy", &status.policy)
+            .field("log", &status.log)
+            .field("cache", &status.cache)
+            .finish()
     }
 }
 
@@ -464,7 +522,7 @@ impl Client<AnyBackend> {
             }
             #[cfg(feature = "http")]
             _ => Err(Error::Policy(PolicyError::Config(
-                "script is only used when SNAPIF_BACKEND=fake".to_string(),
+                "replace_fake requires a fake backend".to_string(),
             ))),
         }
     }
@@ -966,6 +1024,61 @@ mod tests {
             },
         );
         assert!(matches!(bad_policy, Err(Error::Policy(_))));
+    }
+
+    #[test]
+    fn status_reads_the_resolved_model_and_hides_the_key() {
+        let client = Client::<AnyBackend>::from_config(&ClientConfig {
+            backend: "fake".to_string(),
+            model: Some("jev-1.12".to_string()),
+            policy: Some("tool-gate".to_string()),
+            api_key: Some("super-secret-key".to_string()),
+            log_path: Some(std::path::PathBuf::from("/tmp/snapif.log")),
+            cache_capacity: Some(2),
+            ..ClientConfig::default()
+        })
+        .expect("config");
+        let status = client.status();
+        assert_eq!(status.backend, "fake");
+        assert_eq!(status.model, "jev-1.12");
+        assert_eq!(status.policy, "tool-gate");
+        assert!(status.log);
+        assert!(status.cache);
+        let shown = format!("{client:?} {status:?}");
+        assert!(!shown.contains("super-secret-key"), "{shown}");
+        let plain = Client::<AnyBackend>::from_config(&ClientConfig {
+            backend: "fake".to_string(),
+            ..ClientConfig::default()
+        })
+        .expect("default");
+        assert_eq!(plain.status().model, "jev-latest");
+        assert_eq!(plain.status().policy, "tool-gate");
+        let raw = include_str!("../policies/tool-gate.toml");
+        let file_policy = Client::new(crate::backends::fake::FakeBackend::new())
+            .policy(crate::policy::Policy::from_toml_str(raw).expect("toml"));
+        assert!(file_policy.status().policy.is_empty());
+    }
+
+    #[cfg(feature = "http")]
+    #[test]
+    fn replace_fake_on_typesafe_does_not_blame_the_env() {
+        let mut client = Client::<AnyBackend>::from_config(&ClientConfig {
+            backend: "typesafe".to_string(),
+            typesafe_key: Some("sekrit-key-xyz".to_string()),
+            ..ClientConfig::default()
+        })
+        .expect("typesafe");
+        let err = client
+            .replace_fake(crate::backends::fake::FakeBackend::new())
+            .expect_err("not fake");
+        let text = err.to_string();
+        assert!(
+            text.contains("replace_fake requires a fake backend"),
+            "{text}"
+        );
+        assert!(!text.contains("SNAPIF_BACKEND"), "{text}");
+        assert!(!text.contains("script"), "{text}");
+        assert!(!text.contains("sekrit-key-xyz"), "{text}");
     }
 
     #[test]
