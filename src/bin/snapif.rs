@@ -148,6 +148,10 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             return 1;
         }
     };
+    if !value.is_object() {
+        eprintln!("call file must be a JSON object");
+        return 1;
+    }
     let file: CallFile = match serde_json::from_value(value.clone()) {
         Ok(file) => file,
         Err(err) => {
