@@ -1149,6 +1149,9 @@ fn vector_request(
         Err(WireError::UnknownType(_)) if expects_reject(bytes) => Ok(None),
         Err(err) => {
             eprintln!("{path:?}: {err}");
+            if err.to_string().contains("missing field") {
+                eprintln!("a conformance vector needs state and questions");
+            }
             Err(2)
         }
     }
