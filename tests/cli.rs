@@ -288,6 +288,46 @@ fn gate_without_backend_exits_1_and_fake_does_not_auto() {
 }
 
 #[test]
+fn gate_fake_script_prints_auto_and_refuses_other_backends() {
+    let dir = std::env::temp_dir().join(format!("snapif-script-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"list_files","args":{},"trusted":{"user_request":"list the workspace"},"untrusted":null,"script":{"harm":"read","confidence":0.91}}"#,
+    )
+    .expect("write");
+    let auto = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let auto_out = String::from_utf8_lossy(&auto.stdout);
+    let auto_err = String::from_utf8_lossy(&auto.stderr);
+    assert_eq!(auto.status.code(), Some(0), "{auto_out}{auto_err}");
+    assert_eq!(auto_out.trim(), "auto");
+
+    let refused = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "compatible")
+        .env("SNAPIF_BASE_URL", "http://127.0.0.1:9")
+        .env_remove("SNAPIF_API_KEY")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let refused_err = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{refused_err}");
+    assert!(
+        refused_err.contains("script is only used when SNAPIF_BACKEND=fake"),
+        "{refused_err}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([

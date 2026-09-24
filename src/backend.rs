@@ -455,6 +455,20 @@ impl Client<AnyBackend> {
         Ok(client)
     }
 
+    /// Install a scripted fake scorer. Refuses any other backend.
+    pub fn replace_fake(&mut self, backend: FakeBackend) -> Result<(), Error> {
+        match &mut self.backend {
+            AnyBackend::Fake(slot) => {
+                *slot = backend;
+                Ok(())
+            }
+            #[cfg(feature = "http")]
+            _ => Err(Error::Policy(PolicyError::Config(
+                "script is only used when SNAPIF_BACKEND=fake".to_string(),
+            ))),
+        }
+    }
+
     #[cfg_attr(not(feature = "http"), allow(unused_variables))]
     fn from_parts(name: Option<&str>, shadow: bool, env: &BackendEnv) -> Result<Self, Error> {
         let name = match name.map(str::trim) {
