@@ -130,6 +130,10 @@ fn main() -> ExitCode {
 }
 
 fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
+    if call.is_dir() {
+        eprintln!("{}: call path must be a file", call.display());
+        return 1;
+    }
     let mut client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
@@ -235,6 +239,10 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
 }
 
 fn ask_cmd(path: &PathBuf, policy: Option<&str>, decisions: bool) -> u8 {
+    if path.is_dir() {
+        eprintln!("{}: state path must be a file", path.display());
+        return 1;
+    }
     let client = match open_client(policy, false) {
         Ok(client) => client,
         Err(err) => {
@@ -373,7 +381,7 @@ fn each_vector(
     let entries = match fs::read_dir(vectors) {
         Ok(entries) => entries,
         Err(err) => {
-            eprintln!("{}: {err}", vectors.display());
+            eprintln!("{}: {}", vectors.display(), io_text(&err));
             return Err(1);
         }
     };
@@ -430,7 +438,7 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
-            eprintln!("{}: {err}", path.display());
+            eprintln!("{}: {}", path.display(), io_text(&err));
             return 1;
         }
     };
@@ -1019,7 +1027,7 @@ fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<String>, Error> {
             .map_err(|err| {
                 Error::Io(std::io::Error::new(
                     err.kind(),
-                    format!("{}: {err}", path.display()),
+                    format!("{}: {}", path.display(), io_text(&err)),
                 ))
             })?
             .filter_map(|entry| entry.ok())
@@ -1051,7 +1059,7 @@ fn push_calibrate_rows(rows: &mut Vec<String>, path: &std::path::Path) -> Result
     let text = fs::read_to_string(path).map_err(|err| {
         Error::Io(std::io::Error::new(
             err.kind(),
-            format!("{}: {err}", path.display()),
+            format!("{}: {}", path.display(), io_text(&err)),
         ))
     })?;
     let json_doc = path
@@ -1158,11 +1166,19 @@ fn expects_reject(bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+fn io_text(err: &std::io::Error) -> String {
+    let text = err.to_string();
+    match text.split_once(" (os error") {
+        Some((head, _)) => head.to_string(),
+        None => text,
+    }
+}
+
 fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<T, Error> {
     let text = fs::read_to_string(path).map_err(|err| {
         Error::Io(std::io::Error::new(
             err.kind(),
-            format!("{}: {err}", path.display()),
+            format!("{}: {}", path.display(), io_text(&err)),
         ))
     })?;
     let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();

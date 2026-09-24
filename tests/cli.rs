@@ -50,6 +50,7 @@ fn missing_paths_name_the_file() {
         let err = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{args:?} {err}");
         assert!(err.contains(path), "{args:?} {err}");
+        assert!(!err.contains("os error"), "{args:?} {err}");
     }
     let call = std::env::temp_dir().join(format!("snapif-call-ok-{}", std::process::id()));
     fs::write(
@@ -68,6 +69,26 @@ fn missing_paths_name_the_file() {
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(err.contains(&policy), "{err}");
     let _ = fs::remove_file(call);
+}
+
+#[test]
+fn gate_and_ask_directory_name_the_path() {
+    let path = std::env::temp_dir().join(format!("snapif-call-dir-{}", std::process::id()));
+    fs::create_dir_all(&path).expect("dir");
+    for args in [vec!["gate", "--call"], vec!["ask", "--state"]] {
+        let output = bin()
+            .args(&args)
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{args:?} {err}");
+        assert!(err.contains("must be a file"), "{args:?} {err}");
+        assert!(err.contains(&path.display().to_string()), "{args:?} {err}");
+        assert!(!err.contains("os error"), "{args:?} {err}");
+    }
+    let _ = fs::remove_dir(&path);
 }
 
 #[test]
