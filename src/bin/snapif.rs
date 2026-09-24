@@ -134,12 +134,18 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
         }
     };
     if let Some(script) = &file.script {
-        let backend = scripted(
+        let backend = match scripted(
             &script.harm,
             script.confidence,
             &script.nouls,
             script.timeout,
-        );
+        ) {
+            Ok(backend) => backend,
+            Err(err) => {
+                eprintln!("{err}");
+                return 1;
+            }
+        };
         if let Err(err) = client.replace_fake(backend) {
             eprintln!("{err}");
             return 1;
@@ -404,12 +410,18 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
         } else {
             row.gate_request.prepared.name.clone()
         };
-        let backend = scripted(
+        let backend = match scripted(
             &row.script.harm,
             row.script.confidence,
             &row.script.nouls,
             row.script.timeout,
-        );
+        ) {
+            Ok(backend) => backend,
+            Err(err) => {
+                eprintln!("{}: {err}", row.id);
+                return 1;
+            }
+        };
         let mut client = Client::new(backend).policy(policy.clone());
         if shadow || env_shadow() {
             client = client.shadow(true);
@@ -464,9 +476,14 @@ fn scripted(
     confidence: f64,
     nouls: &serde_json::Map<String, Value>,
     timeout: bool,
-) -> FakeBackend {
+) -> Result<FakeBackend, Error> {
     if timeout {
-        return FakeBackend::new().on_timeout("harm_class");
+        return Ok(FakeBackend::new().on_timeout("harm_class"));
+    }
+    if !(0.0..=1.0).contains(&confidence) {
+        return Err(Error::Policy(snapif::error::PolicyError::Config(format!(
+            "script confidence must be from 0 to 1, got {confidence}"
+        ))));
     }
     let mut backend = FakeBackend::new().on_choice("harm_class", harm, confidence);
     for id in snapif::backends::cascade::battery_ids() {
@@ -476,7 +493,7 @@ fn scripted(
         let value = nouls.get(&id.0).and_then(Value::as_f64).unwrap_or(0.0);
         backend = backend.on_noul(&id.0, value);
     }
-    backend
+    Ok(backend)
 }
 
 fn open_client(policy: Option<&str>, shadow: bool) -> Result<Client<AnyBackend>, Error> {

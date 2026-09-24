@@ -328,6 +328,38 @@ fn gate_fake_script_prints_auto_and_refuses_other_backends() {
 }
 
 #[test]
+fn gate_script_confidence_outside_zero_to_one_exits_1() {
+    let dir = std::env::temp_dir().join(format!("snapif-conf-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    for (name, confidence) in [("over", "2"), ("neg", "-1")] {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"tag","name":"list_files","args":{{}},"script":{{"harm":"read","confidence":{confidence}}}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(
+            err.contains("script confidence must be from 0 to 1"),
+            "{err}"
+        );
+        assert!(out.trim().is_empty(), "{out}");
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([
