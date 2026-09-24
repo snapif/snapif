@@ -202,6 +202,28 @@ fn replay_directory_exits_1() {
 }
 
 #[test]
+fn replay_gate_call_names_the_row_fields() {
+    let path =
+        std::env::temp_dir().join(format!("snapif-replay-gate-{}.jsonl", std::process::id()));
+    fs::write(
+        &path,
+        r#"{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null},"script":{"harm":"read","confidence":0.91}}"#,
+    )
+    .expect("write");
+    let output = bin().arg("replay").arg(&path).output().expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("a replay row needs id, gate_request, script, and expected"),
+        "{err}"
+    );
+    let help = bin().args(["replay", "--help"]).output().expect("help");
+    let help_out = String::from_utf8_lossy(&help.stdout);
+    assert!(help_out.contains("gate_request"), "{help_out}");
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")
@@ -1027,6 +1049,10 @@ fn log_failure_names_the_path_and_cache_rejects_words() {
     let help_out = String::from_utf8_lossy(&help.stdout);
     assert!(help_out.contains("SNAPIF_LOG"), "{help_out}");
     assert!(help_out.contains("SNAPIF_CACHE"), "{help_out}");
+    assert!(
+        help_out.contains("optional `script` sets harm and confidence"),
+        "{help_out}"
+    );
     let timeout = bin()
         .args(["gate", "--call"])
         .arg(&call)

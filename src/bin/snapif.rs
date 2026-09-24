@@ -33,13 +33,16 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
+        /// Call JSON file. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
         #[arg(long)]
         call: PathBuf,
+        /// Return the real verdict. The exit code stays the same.
         #[arg(long)]
         shadow: bool,
     },
     /// Observation. Exit 0 ok, 2 decode, 3 api, 4 rate limit, 5 auth, 1 programmer error.
     Ask {
+        /// JSON object with `trusted` and `untrusted`.
         #[arg(long)]
         state: PathBuf,
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
@@ -51,6 +54,7 @@ enum Command {
     },
     /// Print effective gates for one action. Does not call a backend.
     Explain {
+        /// Action id, such as `tag`.
         #[arg(long)]
         action: String,
         /// Shipped id or `.toml` path. Default is tool-gate.
@@ -59,8 +63,10 @@ enum Command {
     },
     /// Claude Code PreToolUse hook. JSON on stdin, a permission decision on stdout.
     Hook {
+        /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
+        /// Print the verdict on stderr and allow the tool.
         #[arg(long)]
         shadow: bool,
     },
@@ -68,21 +74,26 @@ enum Command {
     Calibrate {
         /// A JSONL file, or a directory of `.json` and `.jsonl` files.
         path: PathBuf,
+        /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
     },
     /// Check conformance JSON. With the http feature, `--base-url` posts each valid vector.
     Test {
+        /// Directory of conformance JSON files.
         #[arg(long)]
         vectors: PathBuf,
+        /// Post each valid vector to this URL. Needs the http feature.
         #[arg(long)]
         base_url: Option<String>,
     },
     /// Replay action fixtures on FakeBackend. Never uses the network.
     Replay {
+        /// JSONL rows with `id`, `gate_request`, `script`, and `expected`.
         path: PathBuf,
         #[arg(long, default_value = "tool-gate")]
         policy: String,
+        /// Score each row and still compare `expected`.
         #[arg(long)]
         shadow: bool,
     },
@@ -395,6 +406,9 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
             Ok(row) => row,
             Err(err) => {
                 eprintln!("line {}: {err}", line_no + 1);
+                if err.to_string().contains("missing field") {
+                    eprintln!("a replay row needs id, gate_request, script, and expected");
+                }
                 return 1;
             }
         };
