@@ -322,7 +322,14 @@ impl<B: Backend> Client<B> {
 
     fn record(&self, req: &GateRequest, key: Option<u64>, verdict: Verdict) -> Verdict {
         if let Some(path) = &self.log_path {
-            let _guard = self.log_lock.lock().ok();
+            let Ok(_guard) = self.log_lock.lock() else {
+                return Verdict::Escalate(hint(
+                    req.action_id.clone(),
+                    vec![crate::verdict::backend_cause(&std::io::Error::other(
+                        format!("{}: log lock poisoned", path.display()),
+                    ))],
+                ));
+            };
             if let Err(err) = append_gate_log(path, req, &verdict) {
                 return Verdict::Escalate(hint(
                     req.action_id.clone(),
@@ -1021,6 +1028,27 @@ mod tests {
         assert!(text.contains("\"expected\":\"auto\""));
         assert!(!text.contains("secret-value"));
         assert!(!text.contains("hidden"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn poisoned_log_lock_escalates() {
+        let path = std::env::temp_dir().join(format!("snapif-poison-log-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.log_path = Some(path.clone());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = client.log_lock.lock().expect("lock");
+            panic!("poison the log lock");
+        }));
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        let crate::verdict::Verdict::Escalate(hint) = verdict else {
+            panic!("expected escalate, got {verdict:?}");
+        };
+        let text = format!("{hint:?}");
+        assert!(text.contains("log lock poisoned"), "{text}");
+        assert!(!path.exists(), "poisoned lock must not create the log");
         let _ = std::fs::remove_file(&path);
     }
 
