@@ -472,6 +472,25 @@ fn bad_policy_exits_one() {
 }
 
 #[test]
+fn vector_missing_state_names_the_fields() {
+    let dir = std::env::temp_dir().join(format!("snapif-vec-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(dir.join("one.json"), r#"{"questions":{}}"#).expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("a conformance vector needs state and questions"),
+        "{err}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn vectors_pass_locally_and_base_url_does_not_connect() {
     let output = bin()
         .args(["test", "--vectors"])
