@@ -655,10 +655,7 @@ fn block_answer(
 const QUESTION_CAP: usize = 32;
 
 fn scored_text(req: &GateRequest) -> String {
-    format!(
-        "{} {} {}",
-        req.state.trusted, req.prepared.args, req.state.untrusted
-    )
+    format!("{} {}", req.state.trusted, req.prepared.args)
 }
 
 fn approval_excerpt(text: &str) -> Option<String> {
