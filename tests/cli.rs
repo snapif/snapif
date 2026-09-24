@@ -190,6 +190,18 @@ fn replay_blank_file_exits_1() {
 }
 
 #[test]
+fn replay_directory_exits_1() {
+    let path = std::env::temp_dir().join(format!("snapif-replay-dir-{}", std::process::id()));
+    fs::create_dir_all(&path).expect("dir");
+    let output = bin().arg("replay").arg(&path).output().expect("run");
+    let _ = fs::remove_dir(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("replay path must be a file"), "{err}");
+    assert!(!err.contains("os error"), "{err}");
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")

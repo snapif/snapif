@@ -353,6 +353,10 @@ fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
             return 1;
         }
     };
+    if path.is_dir() {
+        eprintln!("{}: replay path must be a file", path.display());
+        return 1;
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(err) => {
