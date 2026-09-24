@@ -26,6 +26,8 @@ struct Cli {
 enum Command {
     /// Action path. Exit 0 Auto, 10 Review, 11 Escalate, 1 programmer error.
     ///
+    /// An optional `script` object on the call file is used only when `SNAPIF_BACKEND=fake`.
+    ///
     /// `SNAPIF_LOG` appends one replay row per gate. `SNAPIF_CACHE` is an integer capacity; unset leaves the cache off.
     Gate {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
@@ -117,7 +119,7 @@ fn main() -> ExitCode {
 }
 
 fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
-    let client = match open_client(policy, shadow) {
+    let mut client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
             eprintln!("{err}");
@@ -131,6 +133,18 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             return 1;
         }
     };
+    if let Some(script) = &file.script {
+        let backend = scripted(
+            &script.harm,
+            script.confidence,
+            &script.nouls,
+            script.timeout,
+        );
+        if let Err(err) = client.replace_fake(backend) {
+            eprintln!("{err}");
+            return 1;
+        }
+    }
     let request = GateRequest {
         action_id: ActionId::new(&file.action_id),
         prepared: PreparedCall {
@@ -1135,6 +1149,8 @@ struct CallFile {
     trusted: Value,
     #[serde(default)]
     untrusted: Value,
+    #[serde(default)]
+    script: Option<ReplayScript>,
 }
 
 #[derive(Debug, Deserialize)]
