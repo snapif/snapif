@@ -350,6 +350,61 @@ fn gate_fake_script_prints_auto_and_refuses_other_backends() {
 }
 
 #[test]
+fn gate_nested_call_keeps_the_prepared_tool_in_the_log() {
+    let dir = std::env::temp_dir().join(format!("snapif-nested-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    let log = dir.join("log.jsonl");
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","prepared":{"name":"tag","args":{"api_key":"secret-value"}},"state":{"trusted":{"user_request":"tag the file"},"untrusted":{"blob":"hidden"}},"script":{"harm":"read","confidence":0.91}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "auto");
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(text.contains("\"name\":\"tag\""), "{text}");
+    assert!(text.contains("tag the file"), "{text}");
+    assert!(text.contains("\"len\":"), "{text}");
+    assert!(text.contains("redacted"), "{text}");
+    assert!(!text.contains("secret-value"), "{text}");
+    assert!(!text.contains("hidden"), "{text}");
+    assert!(!text.contains("\"name\":\"call\""), "{text}");
+    let mixed = dir.join("mixed.json");
+    let mixed_log = dir.join("mixed.jsonl");
+    fs::write(
+        &mixed,
+        r#"{"action_id":"tag","name":"flat","args":null,"trusted":null,"untrusted":null,"prepared":{"name":"nested","args":{"keep":true}},"state":{"trusted":{"user_request":"from nested"},"untrusted":{"blob":"hidden"}},"script":{"harm":"read","confidence":0.91}}"#,
+    )
+    .expect("write");
+    let mixed_out = bin()
+        .args(["gate", "--call"])
+        .arg(&mixed)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &mixed_log)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    assert_eq!(mixed_out.status.code(), Some(0));
+    let mixed_text = fs::read_to_string(&mixed_log).expect("log");
+    assert!(mixed_text.contains("\"name\":\"flat\""), "{mixed_text}");
+    assert!(!mixed_text.contains("nested"), "{mixed_text}");
+    assert!(!mixed_text.contains("from nested"), "{mixed_text}");
+    assert!(!mixed_text.contains("keep"), "{mixed_text}");
+    assert!(!mixed_text.contains("\"len\":"), "{mixed_text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn gate_script_confidence_outside_zero_to_one_exits_1() {
     let dir = std::env::temp_dir().join(format!("snapif-conf-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

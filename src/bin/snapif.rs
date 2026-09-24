@@ -33,7 +33,7 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
-        /// Call JSON file. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
+        /// Call JSON file. Top-level `name`, `args`, `trusted`, and `untrusted`, or nested `prepared` and `state`. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
         #[arg(long)]
         call: PathBuf,
         /// Return the real verdict. The exit code stays the same.
@@ -137,13 +137,21 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             return 1;
         }
     };
-    let file: CallFile = match read_json(call) {
-        Ok(file) => file,
+    let value: Value = match read_json(call) {
+        Ok(value) => value,
         Err(err) => {
             eprintln!("{err}");
             return 1;
         }
     };
+    let file: CallFile = match serde_json::from_value(value.clone()) {
+        Ok(file) => file,
+        Err(err) => {
+            eprintln!("wire: invalid json: {err}");
+            return 1;
+        }
+    };
+    let present = value.as_object();
     if let Some(script) = &file.script {
         let backend = match scripted(
             &script.harm,
@@ -162,16 +170,47 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             return 1;
         }
     }
+    let has = |key: &str| present.is_some_and(|obj| obj.contains_key(key));
+    let prepared_name = file
+        .prepared
+        .as_ref()
+        .map(|prepared| prepared.name.clone())
+        .filter(|name| !name.is_empty());
+    let name = if has("name") {
+        file.name
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(default_name)
+    } else {
+        prepared_name.unwrap_or_else(default_name)
+    };
+    let args = if has("args") {
+        file.args.unwrap_or(Value::Null)
+    } else {
+        file.prepared
+            .as_ref()
+            .map(|prepared| prepared.args.clone())
+            .unwrap_or(Value::Null)
+    };
+    let trusted = if has("trusted") {
+        file.trusted.unwrap_or(Value::Null)
+    } else {
+        file.state
+            .as_ref()
+            .map(|state| state.trusted.clone())
+            .unwrap_or(Value::Null)
+    };
+    let untrusted = if has("untrusted") {
+        file.untrusted.unwrap_or(Value::Null)
+    } else {
+        file.state
+            .as_ref()
+            .map(|state| state.untrusted.clone())
+            .unwrap_or(Value::Null)
+    };
     let request = GateRequest {
         action_id: ActionId::new(&file.action_id),
-        prepared: PreparedCall {
-            name: file.name,
-            args: file.args,
-        },
-        state: State {
-            trusted: file.trusted,
-            untrusted: file.untrusted,
-        },
+        prepared: PreparedCall { name, args },
+        state: State { trusted, untrusted },
         extra_questions: Vec::new(),
     };
     match block_on(client.gate(request)) {
@@ -1172,14 +1211,18 @@ fn ask_code(err: &Error) -> u8 {
 #[derive(Debug, Deserialize)]
 struct CallFile {
     action_id: String,
-    #[serde(default = "default_name")]
-    name: String,
     #[serde(default)]
-    args: Value,
+    name: Option<String>,
     #[serde(default)]
-    trusted: Value,
+    args: Option<Value>,
     #[serde(default)]
-    untrusted: Value,
+    trusted: Option<Value>,
+    #[serde(default)]
+    untrusted: Option<Value>,
+    #[serde(default)]
+    prepared: Option<ReplayPrepared>,
+    #[serde(default)]
+    state: Option<ReplayState>,
     #[serde(default)]
     script: Option<ReplayScript>,
 }
