@@ -50,6 +50,7 @@ fn missing_paths_name_the_file() {
         let err = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(1), "{args:?} {err}");
         assert!(err.contains(path), "{args:?} {err}");
+        assert!(!err.contains("os error"), "{args:?} {err}");
     }
     let call = std::env::temp_dir().join(format!("snapif-call-ok-{}", std::process::id()));
     fs::write(
