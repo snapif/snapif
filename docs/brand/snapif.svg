@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="metal2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7f8fb"/>
+      <stop offset="0.5" stop-color="#c5ccd6"/>
+      <stop offset="1" stop-color="#8b95a3"/>
+    </linearGradient>
+    <linearGradient id="panL2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e7f0ff"/>
+      <stop offset="1" stop-color="#1d4fb8"/>
+    </linearGradient>
+    <linearGradient id="panR2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe7d2"/>
+      <stop offset="1" stop-color="#c4321a"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#14171c"/>
+  <rect x="28.8" y="11.2" width="6.4" height="40.8" rx="1.4" fill="url(#metal2)"/>
+  <rect x="16" y="52" width="32" height="10" rx="5" fill="url(#metal2)"/>
+  <circle cx="32" cy="12" r="4.4" fill="url(#metal2)"/>
+  <g transform="rotate(9 32 12)">
+    <rect x="4" y="9.2" width="56" height="5.6" rx="2.8" fill="url(#metal2)"/>
+    <rect x="7.9" y="14.8" width="2.8" height="22" rx="1.2" fill="#d5dbe3"/>
+    <rect x="23.3" y="14.8" width="2.8" height="22" rx="1.2" fill="#d5dbe3"/>
+    <rect x="37.9" y="14.8" width="2.8" height="22" rx="1.2" fill="#d5dbe3"/>
+    <rect x="53.3" y="14.8" width="2.8" height="22" rx="1.2" fill="#d5dbe3"/>
+    <path d="M5 36.8h24a12 11 0 0 1-24 0z" fill="url(#panL2)"/>
+    <path d="M35 36.8h24a12 11 0 0 1-24 0z" fill="url(#panR2)"/>
+  </g>
+</svg>
