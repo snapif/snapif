@@ -47,6 +47,31 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertNotIn("branches:", on_block)
         self.assertIn("Signed-off-by:", text)
 
+    def test_gitleaks_gates_ci_and_is_not_an_install_action_tool(self) -> None:
+        text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("name: Gitleaks", text)
+        self.assertIn("needs: [stealth, lint, workflows, test, gitleaks]", text)
+        self.assertIn('test "$GITLEAKS" = success', text)
+        self.assertNotIn("tool: gitleaks@", text)
+        self.assertIn("gitleaks_8.30.1_linux_x64.tar.gz", text)
+
+    def test_public_scanners_stay_commented(self) -> None:
+        text = (WORKFLOWS / "security.yml").read_text(encoding="utf-8")
+        live = "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        )
+        for needle in (
+            "codeql-action",
+            "dependency-review-action",
+            "scorecard-action",
+            "fossa-action",
+            "FOSSA_API_KEY",
+        ):
+            self.assertNotIn(needle, live)
+            self.assertIn(needle, text)
+        self.assertNotIn("pull_request:", _on_block(text))
+        self.assertNotIn("push:", _on_block(text))
+
 
 if __name__ == "__main__":
     unittest.main()
