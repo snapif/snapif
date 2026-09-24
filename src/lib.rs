@@ -20,7 +20,9 @@ pub mod usage;
 pub mod verdict;
 pub mod wire;
 
-pub use backend::{AnswerMeta, AnyBackend, AskOut, CascadeHop, Client, ClientConfig};
+pub use backend::{
+    AnswerMeta, AnyBackend, AskOut, CallChoice, CascadeHop, Client, ClientConfig, ClientStatus,
+};
 pub use backends::fake::FakeBackend;
 pub use error::Error;
 pub use gate::GateRequest;

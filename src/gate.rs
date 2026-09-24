@@ -3,7 +3,7 @@ use std::time::Instant;
 use indexmap::IndexMap;
 
 use crate::answer::{ChoiceAnswer, NoulAnswer, ScoreAnswer};
-use crate::backend::{Backend, Client, wire_question};
+use crate::backend::{Backend, CallChoice, Client, wire_question};
 use crate::battery::shipped_questions;
 use crate::error::{DecodeError, Error, PolicyError};
 use crate::ids::{ActionId, QuestionId};
@@ -30,16 +30,32 @@ impl<B: Backend> Client<B> {
     /// The host checks paths and deny-lists before this call. `Verdict::Auto`
     /// means no objection from the shipped policy.
     pub async fn gate(&self, req: GateRequest) -> Result<Verdict, Error> {
+        self.gate_with(req, CallChoice::default()).await
+    }
+
+    /// Same as [`Self::gate`], with a host-chosen model and policy for this call.
+    ///
+    /// An empty or whitespace model keeps the client model.
+    pub async fn gate_with(
+        &self,
+        req: GateRequest,
+        choice: CallChoice<'_>,
+    ) -> Result<Verdict, Error> {
         if req.action_id.0.is_empty() {
             return Err(Error::EmptyActionId);
         }
-        let key = gate_cache_key(self, &req);
+        let policy = choice
+            .policy
+            .or(self.policy.as_ref())
+            .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
+        let model = chosen_model(&self.model, choice.model);
+        let key = gate_cache_key(self, &req, policy, &model);
         if let Some(key) = key
             && let Some(hit) = self.cache_get(key)
         {
             return Ok(self.record(&req, None, hit));
         }
-        let verdict = self.gate_uncached(&req).await?;
+        let verdict = self.gate_uncached(&req, policy, &model).await?;
         Ok(self.record(&req, key, verdict))
     }
 
@@ -51,14 +67,15 @@ impl<B: Backend> Client<B> {
         Ok(verdicts)
     }
 
-    async fn gate_uncached(&self, req: &GateRequest) -> Result<Verdict, Error> {
+    async fn gate_uncached(
+        &self,
+        req: &GateRequest,
+        policy: &Policy,
+        model: &str,
+    ) -> Result<Verdict, Error> {
         if req.action_id.0.is_empty() {
             return Err(Error::EmptyActionId);
         }
-        let policy = self
-            .policy
-            .as_ref()
-            .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
         let gates = effective_gates(policy, &req.action_id, None)?;
         let mut wire_questions = IndexMap::new();
         for question in shipped_questions() {
@@ -75,6 +92,8 @@ impl<B: Backend> Client<B> {
                     Usage::default(),
                     self.backend.id(),
                     IndexMap::new(),
+                    policy,
+                    model,
                 ));
             }
             wire_questions.insert(id, wire);
@@ -87,10 +106,12 @@ impl<B: Backend> Client<B> {
                 Usage::default(),
                 self.backend.id(),
                 IndexMap::new(),
+                policy,
+                model,
             ));
         }
         let mut request = WireRequest {
-            model: self.model.clone(),
+            model: model.to_string(),
             state: req.state.to_wire(Some(&req.prepared)),
             questions: wire_questions,
         };
@@ -104,6 +125,8 @@ impl<B: Backend> Client<B> {
                     Usage::default(),
                     self.backend.id(),
                     IndexMap::new(),
+                    policy,
+                    model,
                 ));
             }
         };
@@ -119,6 +142,8 @@ impl<B: Backend> Client<B> {
                         Usage::default(),
                         self.backend.id(),
                         IndexMap::new(),
+                        policy,
+                        model,
                     ));
                 }
             };
@@ -135,6 +160,8 @@ impl<B: Backend> Client<B> {
                     Usage::default(),
                     self.backend.id(),
                     IndexMap::new(),
+                    policy,
+                    model,
                 ));
             }
         };
@@ -153,6 +180,8 @@ impl<B: Backend> Client<B> {
                 evaluated.wire.usage,
                 &evaluated.backend_id,
                 meta,
+                policy,
+                model,
             ));
         }
         let harm = match harm_choice(&evaluated.wire.answers, policy.choice.signal) {
@@ -165,6 +194,8 @@ impl<B: Backend> Client<B> {
                     evaluated.wire.usage,
                     &evaluated.backend_id,
                     meta,
+                    policy,
+                    model,
                 ));
             }
         };
@@ -195,6 +226,8 @@ impl<B: Backend> Client<B> {
                     evaluated.wire.usage,
                     &evaluated.backend_id,
                     meta,
+                    policy,
+                    model,
                 ));
             }
             Ok(Some(verdict)) => {
@@ -209,6 +242,8 @@ impl<B: Backend> Client<B> {
                     signal: Some(harm.signal),
                     gates: &gates,
                     scores: &scores,
+                    policy,
+                    model,
                 }));
             }
             Ok(None) => {}
@@ -230,6 +265,8 @@ impl<B: Backend> Client<B> {
                     evaluated.wire.usage,
                     &evaluated.backend_id,
                     meta,
+                    policy,
+                    model,
                 ));
             }
         };
@@ -259,9 +296,12 @@ impl<B: Backend> Client<B> {
             signal: Some(harm.signal),
             gates: &gates,
             scores: &scores,
+            policy,
+            model,
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn closed(
         &self,
         action_id: &ActionId,
@@ -270,9 +310,11 @@ impl<B: Backend> Client<B> {
         usage: Usage,
         backend_id: &str,
         meta: IndexMap<String, crate::backend::AnswerMeta>,
+        policy: &Policy,
+        model: &str,
     ) -> Verdict {
-        let shadow = self.shadow_on(self.policy.as_ref().is_some_and(|policy| policy.shadow));
-        let verdict = if self.fail_mode() == Fail::Open && gates.auto.is_some() {
+        let shadow = self.shadow_on(policy.shadow);
+        let verdict = if self.fail_for(Some(policy)) == Fail::Open && gates.auto.is_some() {
             Verdict::Review(hint(action_id.clone(), vec![reason]))
         } else {
             Verdict::Escalate(hint(action_id.clone(), vec![reason]))
@@ -288,6 +330,8 @@ impl<B: Backend> Client<B> {
             signal: None,
             gates,
             scores: &empty,
+            policy,
+            model,
         })
     }
 
@@ -307,15 +351,11 @@ impl<B: Backend> Client<B> {
                 auto: stamp.gates.auto,
                 scores: stamp.scores.clone(),
             };
-            if let Some(id) = self
-                .policy
-                .as_ref()
-                .and_then(|policy| policy.shipped_id.clone())
-            {
+            if let Some(id) = stamp.policy.shipped_id.clone() {
                 hint.pack_version = crate::policy::Policy::shipped_pack_version(&id);
                 hint.pack = id;
             }
-            hint.model = self.model.clone();
+            hint.model = stamp.model.to_string();
             hint
         })
     }
@@ -358,6 +398,8 @@ struct Stamp<'a> {
     signal: Option<f64>,
     gates: &'a EffectiveGates,
     scores: &'a IndexMap<String, f64>,
+    policy: &'a Policy,
+    model: &'a str,
 }
 
 fn answer_scores(answers: &IndexMap<String, WireAnswer>) -> IndexMap<String, f64> {
@@ -383,9 +425,23 @@ fn cacheable(verdict: &Verdict) -> bool {
         .any(|reason| matches!(reason, UnsureReason::Backend { .. }))
 }
 
-fn gate_cache_key<B: Backend>(client: &Client<B>, req: &GateRequest) -> Option<u64> {
+fn chosen_model(fallback: &str, override_model: Option<&str>) -> String {
+    match override_model
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        Some(model) => model.to_string(),
+        None => fallback.to_string(),
+    }
+}
+
+fn gate_cache_key<B: Backend>(
+    client: &Client<B>,
+    req: &GateRequest,
+    policy: &Policy,
+    model: &str,
+) -> Option<u64> {
     client.cache.as_ref()?;
-    let policy = client.policy.as_ref()?;
     let extras: Vec<serde_json::Value> = req
         .extra_questions
         .iter()
@@ -396,7 +452,7 @@ fn gate_cache_key<B: Backend>(client: &Client<B>, req: &GateRequest) -> Option<u
         .collect();
     let body = serde_json::json!({
         "policy": policy,
-        "model": client.model,
+        "model": model,
         "shadow": client.shadow_on(policy.shadow),
         "action_id": req.action_id.0,
         "name": req.prepared.name,
@@ -816,6 +872,7 @@ fn map_hint(verdict: Verdict, map: impl FnOnce(ActionHint) -> ActionHint) -> Ver
 mod tests {
     use super::GateRequest;
     use crate::Client;
+    use crate::backend::{AnyBackend, CallChoice};
     use crate::backends::fake::FakeBackend;
     use crate::ids::{ActionId, QuestionId};
     use crate::policy::Policy;
@@ -851,6 +908,114 @@ mod tests {
             client.backend().last_model().as_deref(),
             Some("custom-model")
         );
+    }
+
+    #[test]
+    fn one_client_uses_a_different_model_per_call() {
+        let client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        let first = pollster::block_on(client.gate_with(
+            tag_request(json!({})),
+            CallChoice {
+                model: Some("model-a"),
+                policy: None,
+            },
+        ))
+        .expect("gate");
+        assert_eq!(super::take_hint(first).model, "model-a");
+        assert_eq!(client.backend().last_model().as_deref(), Some("model-a"));
+        let second = pollster::block_on(client.gate_with(
+            tag_request(json!({})),
+            CallChoice {
+                model: Some("model-b"),
+                policy: None,
+            },
+        ))
+        .expect("gate");
+        assert_eq!(super::take_hint(second).model, "model-b");
+        let asked = pollster::block_on(client.ask_with(
+            State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            vec![],
+            CallChoice {
+                model: Some("model-c"),
+                policy: None,
+            },
+        ))
+        .expect("ask");
+        assert_eq!(asked.model, "model-c");
+        assert_eq!(client.backend().last_model().as_deref(), Some("model-c"));
+        let fallback = pollster::block_on(client.gate_with(
+            tag_request(json!({})),
+            CallChoice {
+                model: Some("   "),
+                policy: None,
+            },
+        ))
+        .expect("gate");
+        assert_eq!(super::take_hint(fallback).model, "jev-latest");
+    }
+
+    #[test]
+    fn call_policy_fail_beats_the_client_policy_on_wire_overflow() {
+        let mut open = Policy::shipped("tool-gate").expect("policy");
+        open.fail = crate::Fail::Open;
+        let mut shut = Policy::shipped("tool-gate").expect("policy");
+        shut.fail = crate::Fail::Closed;
+        let client = Client::new(read_backend()).policy(shut.clone());
+        let mut over = tag_request(json!({}));
+        over.extra_questions = extra_noul(26);
+        let reviewed = pollster::block_on(client.gate_with(
+            over,
+            CallChoice {
+                model: None,
+                policy: Some(&open),
+            },
+        ))
+        .expect("gate");
+        assert!(matches!(reviewed, crate::verdict::Verdict::Review(_)));
+
+        let open_client = Client::new(read_backend()).policy(open);
+        let mut over = tag_request(json!({}));
+        over.extra_questions = extra_noul(26);
+        let escalated = pollster::block_on(open_client.gate_with(
+            over,
+            CallChoice {
+                model: None,
+                policy: Some(&shut),
+            },
+        ))
+        .expect("gate");
+        assert!(matches!(escalated, crate::verdict::Verdict::Escalate(_)));
+
+        let forced = Client::new(read_backend())
+            .policy(shut.clone())
+            .fail(crate::Fail::Open);
+        let mut over = tag_request(json!({}));
+        over.extra_questions = extra_noul(26);
+        let still_open = pollster::block_on(forced.gate_with(
+            over,
+            CallChoice {
+                model: None,
+                policy: Some(&shut),
+            },
+        ))
+        .expect("gate");
+        assert!(matches!(still_open, crate::verdict::Verdict::Review(_)));
+    }
+
+    #[test]
+    fn replace_fake_installs_the_script_used_by_the_next_gate() {
+        let mut client = Client::<AnyBackend>::from_config(&crate::ClientConfig {
+            backend: "fake".to_string(),
+            ..crate::ClientConfig::default()
+        })
+        .expect("fake");
+        client.replace_fake(read_backend()).expect("script");
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(matches!(verdict, crate::verdict::Verdict::Auto(_)));
     }
 
     fn read_backend() -> FakeBackend {
