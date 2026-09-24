@@ -972,8 +972,8 @@ mod tests {
             panic!("expected auto");
         };
         assert_eq!(hint.facts.signal, Some(0.91));
-        assert!(hint.facts.auto.is_some());
-        assert!(hint.facts.scores.contains_key("harm_class"));
+        assert_eq!(hint.facts.auto, Some(0.8));
+        assert_eq!(hint.facts.scores.get("harm_class"), Some(&0.91));
     }
 
     #[test]
