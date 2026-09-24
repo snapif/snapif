@@ -71,6 +71,26 @@ fn missing_paths_name_the_file() {
 }
 
 #[test]
+fn gate_and_ask_directory_name_the_path() {
+    let path = std::env::temp_dir().join(format!("snapif-call-dir-{}", std::process::id()));
+    fs::create_dir_all(&path).expect("dir");
+    for args in [vec!["gate", "--call"], vec!["ask", "--state"]] {
+        let output = bin()
+            .args(&args)
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{args:?} {err}");
+        assert!(err.contains("must be a file"), "{args:?} {err}");
+        assert!(err.contains(&path.display().to_string()), "{args:?} {err}");
+        assert!(!err.contains("os error"), "{args:?} {err}");
+    }
+    let _ = fs::remove_dir(&path);
+}
+
+#[test]
 fn ask_array_is_not_ok() {
     let path = std::env::temp_dir().join(format!("snapif-array-{}.json", std::process::id()));
     fs::write(&path, "[]").expect("write");

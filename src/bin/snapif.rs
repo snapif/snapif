@@ -130,6 +130,10 @@ fn main() -> ExitCode {
 }
 
 fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
+    if call.is_dir() {
+        eprintln!("{}: call path must be a file", call.display());
+        return 1;
+    }
     let mut client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
@@ -235,6 +239,10 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
 }
 
 fn ask_cmd(path: &PathBuf, policy: Option<&str>, decisions: bool) -> u8 {
+    if path.is_dir() {
+        eprintln!("{}: state path must be a file", path.display());
+        return 1;
+    }
     let client = match open_client(policy, false) {
         Ok(client) => client,
         Err(err) => {
