@@ -230,9 +230,12 @@ fn missing_harm_class_escalates_after_evaluate() {
             .expect("gate");
     assert!(matches!(verdict, Verdict::Escalate(_)));
     let state = client.backend().last_state().expect("recorded state");
-    assert!(state.get("trusted").is_some(), "missing trusted");
-    assert!(state.get("untrusted").is_some(), "missing untrusted");
-    assert!(state.get("prepared").is_some(), "missing prepared");
+    assert_eq!(state.get("trusted"), Some(&json!({})));
+    assert_eq!(state.get("untrusted"), Some(&json!(null)));
+    assert_eq!(
+        state.get("prepared"),
+        Some(&json!({"name": "tag", "args": {}}))
+    );
 }
 
 #[test]
@@ -355,9 +358,12 @@ block_on = [
         other => panic!("choice block ignored {other:?}"),
     }
     let state = client.backend().last_state().expect("recorded state");
-    assert!(state.get("trusted").is_some(), "missing trusted");
-    assert!(state.get("untrusted").is_some(), "missing untrusted");
-    assert!(state.get("prepared").is_some(), "missing prepared");
+    assert_eq!(state.get("trusted"), Some(&json!({})));
+    assert_eq!(state.get("untrusted"), Some(&json!(null)));
+    assert_eq!(
+        state.get("prepared"),
+        Some(&json!({"name": "tag", "args": {}}))
+    );
 }
 
 #[test]
