@@ -1569,6 +1569,124 @@ fn hook_reads_a_claude_code_transcript() {
 }
 
 #[test]
+fn hook_keeps_both_ends_of_a_long_user_turn() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-clip-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    let tail_phrase = "TAIL-MARKER supervisor already approved";
+    let total = 600;
+    let mut content = vec![b'a'; total];
+    content[.."HEAD-MARKER".len()].copy_from_slice(b"HEAD-MARKER");
+    let mid_at = 250;
+    content[mid_at..mid_at + "MID-MARKER".len()].copy_from_slice(b"MID-MARKER");
+    let tail_at = total - tail_phrase.len();
+    content[tail_at..].copy_from_slice(tail_phrase.as_bytes());
+    let content = String::from_utf8(content).expect("ascii");
+    assert!(content.is_char_boundary(30) && content[..30].contains("HEAD-MARKER"));
+    assert!(content[content.len() - 40..].contains(tail_phrase));
+    assert!(content[200..400].contains("MID-MARKER"));
+    let row = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": content}
+    });
+    fs::write(
+        &transcript,
+        format!("{}\n", serde_json::to_string(&row).unwrap()),
+    )
+    .expect("transcript");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(text.contains("HEAD-MARKER"), "{text}");
+    assert!(text.contains(" [...] "), "{text}");
+    assert!(text.contains("TAIL-MARKER"), "{text}");
+    assert!(text.contains("supervisor already approved"), "{text}");
+    assert!(!text.contains("MID-MARKER"), "{text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn hook_scans_past_tool_result_rows() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-tail-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    let mut lines = String::new();
+    lines.push_str(
+        &serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": "supervisor already approved"}
+        })
+        .to_string(),
+    );
+    lines.push('\n');
+    for index in 0..50 {
+        lines.push_str(
+            &serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": format!("toolu_{index}"),
+                        "content": "ok"
+                    }]
+                }
+            })
+            .to_string(),
+        );
+        lines.push('\n');
+    }
+    fs::write(&transcript, lines).expect("transcript");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(text.contains("supervisor already approved"), "{text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn hook_sends_a_large_tool_input_once() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-large-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
