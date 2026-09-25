@@ -877,7 +877,16 @@ fn hook_user_turn(value: &Value) -> Option<String> {
 }
 
 fn clip_turn(text: &str) -> String {
-    text.trim().chars().take(500).collect()
+    let trimmed = text.trim();
+    let count = trimmed.chars().count();
+    if count <= 500 {
+        return trimmed.to_string();
+    }
+    // `[` and `]` are not word gaps (whitespace, hyphen, slash, U+200B),
+    // so an approval phrase cannot match across the cut.
+    let head: String = trimmed.chars().take(200).collect();
+    let tail: String = trimmed.chars().skip(count - 200).collect();
+    format!("{head} [...] {tail}")
 }
 
 fn transcript_tail(value: Option<&Value>) -> Option<String> {
@@ -941,11 +950,11 @@ fn content_text(content: &Value) -> Option<String> {
 
 fn transcript_file_tail(path: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines().rev().take(40) {
+    for line in text.lines().rev().take(4_000) {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if let Some(turn) = transcript_tail(Some(&serde_json::json!([row]))) {
+        if let Some(turn) = user_row_text(&row) {
             return Some(turn);
         }
     }
