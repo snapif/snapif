@@ -33,7 +33,7 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
-        /// Call JSON file. Top-level `name`, `args`, `trusted`, and `untrusted`, or nested `prepared` and `state`. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
+        /// Call JSON file. `action_id` selects the policy row. When it is omitted, `name` is the action. Also `args`, `trusted`, and `untrusted`, or nested `prepared` and `state`. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
         #[arg(long)]
         call: PathBuf,
         /// Return the real verdict. The exit code stays the same.
@@ -215,8 +215,13 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             .map(|state| state.untrusted.clone())
             .unwrap_or(Value::Null)
     };
+    let action_id = if file.action_id.is_empty() {
+        name.clone()
+    } else {
+        file.action_id.clone()
+    };
     let request = GateRequest {
-        action_id: ActionId::new(&file.action_id),
+        action_id: ActionId::new(&action_id),
         prepared: PreparedCall { name, args },
         state: State { trusted, untrusted },
         extra_questions: Vec::new(),
@@ -1284,6 +1289,7 @@ fn ask_code(err: &Error) -> u8 {
 
 #[derive(Debug, Deserialize)]
 struct CallFile {
+    #[serde(default)]
     action_id: String,
     #[serde(default)]
     name: Option<String>,

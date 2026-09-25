@@ -388,6 +388,30 @@ fn gate_fake_script_prints_auto_and_refuses_other_backends() {
 }
 
 #[test]
+fn gate_call_without_action_id_uses_name() {
+    let dir = std::env::temp_dir().join(format!("snapif-name-action-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        r#"{"name":"tag","args":{"path":"notes.md"},"trusted":{"user_request":"tag the notes file"},"untrusted":"hello","script":{"harm":"read","confidence":0.91}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{out}{err}");
+    assert_eq!(out.trim(), "auto");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn gate_nested_call_keeps_the_prepared_tool_in_the_log() {
     let dir = std::env::temp_dir().join(format!("snapif-nested-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
