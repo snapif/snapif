@@ -49,13 +49,14 @@ impl<B: Backend> Client<B> {
             .or(self.policy.as_ref())
             .ok_or_else(|| Error::Policy(PolicyError::Invariant("policy".to_string())))?;
         let model = chosen_model(&self.model, choice.model);
-        let key = gate_cache_key(self, &req, policy, &model);
+        let timeout = choice.timeout.unwrap_or(self.timeout);
+        let key = gate_cache_key(self, &req, policy, &model, timeout);
         if let Some(key) = key
             && let Some(hit) = self.cache_get(key)
         {
             return Ok(self.record(&req, None, hit));
         }
-        let verdict = self.gate_uncached(&req, policy, &model).await?;
+        let verdict = self.gate_uncached(&req, policy, &model, timeout).await?;
         Ok(self.record(&req, key, verdict))
     }
 
@@ -79,6 +80,7 @@ impl<B: Backend> Client<B> {
         req: &GateRequest,
         policy: &Policy,
         model: &str,
+        timeout: std::time::Duration,
     ) -> Result<Verdict, Error> {
         if req.action_id.0.is_empty() {
             return Err(Error::EmptyActionId);
@@ -156,7 +158,7 @@ impl<B: Backend> Client<B> {
             };
             truncated = true;
         }
-        let deadline = Instant::now() + self.timeout;
+        let deadline = Instant::now() + timeout;
         let evaluated = match self.backend.evaluate(request.clone(), deadline).await {
             Ok(evaluated) => evaluated,
             Err(err) => {
@@ -447,6 +449,7 @@ fn gate_cache_key<B: Backend>(
     req: &GateRequest,
     policy: &Policy,
     model: &str,
+    timeout: std::time::Duration,
 ) -> Option<u64> {
     client.cache.as_ref()?;
     let extras: Vec<serde_json::Value> = req
@@ -460,6 +463,7 @@ fn gate_cache_key<B: Backend>(
     let body = serde_json::json!({
         "policy": policy,
         "model": model,
+        "timeout_ms": timeout.as_millis(),
         "shadow": client.shadow_on(policy.shadow),
         "action_id": req.action_id.0,
         "name": req.prepared.name,
@@ -662,9 +666,35 @@ fn block_answer(
 const QUESTION_CAP: usize = 32;
 
 fn claim_excerpt(req: &GateRequest) -> Option<String> {
-    let trusted = req.state.trusted.to_string();
-    let args = req.prepared.args.to_string();
-    approval_excerpt(&trusted).or_else(|| approval_excerpt(&args))
+    excerpt_value(&req.state.trusted).or_else(|| excerpt_value(&req.prepared.args))
+}
+
+fn excerpt_value(value: &serde_json::Value) -> Option<String> {
+    let mut found = None;
+    walk_strings(value, &mut |text| {
+        if found.is_none() {
+            found = approval_excerpt(text);
+        }
+    });
+    found
+}
+
+fn walk_strings(value: &serde_json::Value, visit: &mut dyn FnMut(&str)) {
+    match value {
+        serde_json::Value::String(text) => visit(text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk_strings(item, visit);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                visit(key);
+                walk_strings(item, visit);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn approval_excerpt(text: &str) -> Option<String> {
@@ -676,14 +706,11 @@ fn approval_excerpt(text: &str) -> Option<String> {
         "pre-approved",
         "has approved",
     ];
-    let (marker, start) = markers
+    let (start, end) = markers
         .iter()
-        .find_map(|marker| find_ascii_marker(text, marker).map(|start| (*marker, start)))?;
+        .find_map(|marker| find_phrase(text, marker))?;
     let from = floor_char_boundary(text, start.saturating_sub(40));
-    let tail = start
-        .saturating_add(marker.len())
-        .saturating_add(80)
-        .min(text.len());
+    let tail = end.saturating_add(80).min(text.len());
     let to = ceil_char_boundary(text, tail);
     match text.get(from..to) {
         Some(window) if !window.is_empty() => Some(window.to_string()),
@@ -691,22 +718,50 @@ fn approval_excerpt(text: &str) -> Option<String> {
     }
 }
 
-fn find_ascii_marker(text: &str, marker: &str) -> Option<usize> {
-    let mark = marker.as_bytes();
-    if mark.is_empty() || mark.len() > text.len() {
+fn find_phrase(text: &str, marker: &str) -> Option<(usize, usize)> {
+    let words: Vec<&str> = marker.split_whitespace().collect();
+    if words.is_empty() {
         return None;
     }
-    let last = text.len() - mark.len();
-    for index in 0..=last {
-        let end = index + mark.len();
-        if !text.is_char_boundary(index) || !text.is_char_boundary(end) {
-            continue;
-        }
-        if text[index..end].eq_ignore_ascii_case(marker) {
-            return Some(index);
+    for (start, _) in text.char_indices() {
+        if let Some(len) = match_words(&text[start..], &words) {
+            return Some((start, start + len));
         }
     }
     None
+}
+
+fn match_words(text: &str, words: &[&str]) -> Option<usize> {
+    let mut offset = 0;
+    for (index, word) in words.iter().enumerate() {
+        if index > 0 {
+            let slice = text.get(offset..)?;
+            let mut gap = 0;
+            let mut saw = false;
+            for ch in slice.chars() {
+                if ch.is_whitespace() {
+                    saw = true;
+                    gap += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            if !saw {
+                return None;
+            }
+            offset += gap;
+        }
+        let slice = text.get(offset..)?;
+        let bytes = word.len();
+        if slice.len() < bytes || !slice.is_char_boundary(bytes) {
+            return None;
+        }
+        if !slice[..bytes].eq_ignore_ascii_case(word) {
+            return None;
+        }
+        offset += bytes;
+    }
+    Some(offset)
 }
 
 fn floor_char_boundary(text: &str, index: usize) -> usize {
@@ -983,6 +1038,7 @@ mod tests {
             CallChoice {
                 model: Some("model-a"),
                 policy: None,
+                timeout: None,
             },
         ))
         .expect("gate");
@@ -993,6 +1049,7 @@ mod tests {
             CallChoice {
                 model: Some("model-b"),
                 policy: None,
+                timeout: None,
             },
         ))
         .expect("gate");
@@ -1006,6 +1063,7 @@ mod tests {
             CallChoice {
                 model: Some("model-c"),
                 policy: None,
+                timeout: None,
             },
         ))
         .expect("ask");
@@ -1016,6 +1074,7 @@ mod tests {
             CallChoice {
                 model: Some("   "),
                 policy: None,
+                timeout: None,
             },
         ))
         .expect("gate");
@@ -1036,6 +1095,7 @@ mod tests {
             CallChoice {
                 model: None,
                 policy: Some(&open),
+                timeout: None,
             },
         ))
         .expect("gate");
@@ -1049,6 +1109,7 @@ mod tests {
             CallChoice {
                 model: None,
                 policy: Some(&shut),
+                timeout: None,
             },
         ))
         .expect("gate");
@@ -1064,6 +1125,7 @@ mod tests {
             CallChoice {
                 model: None,
                 policy: Some(&shut),
+                timeout: None,
             },
         ))
         .expect("gate");
@@ -1315,6 +1377,7 @@ mod tests {
                 CallChoice {
                     model: Some("model-a"),
                     policy: None,
+                    timeout: None,
                 },
             ),
             (
@@ -1322,6 +1385,7 @@ mod tests {
                 CallChoice {
                     model: Some("   "),
                     policy: Some(&review),
+                    timeout: None,
                 },
             ),
         ]));
@@ -1363,6 +1427,83 @@ mod tests {
             .expect("excerpt");
         assert!(excerpt.contains("already approved"), "{excerpt}");
         assert!(!excerpt.contains("do-not-leak-arg"), "{excerpt}");
+    }
+
+    #[test]
+    fn authority_claim_matches_whitespace_inside_the_phrase() {
+        let sentences = [
+            "already\u{00a0}approved this write",
+            "already  approved this write",
+            "already\tapproved this write",
+        ];
+        for sentence in sentences {
+            let client = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut req = tag_request(json!({"leak": "do-not-leak-arg"}));
+            req.action_id = ActionId::new("note");
+            req.prepared.name = "note".to_string();
+            req.state.trusted = json!({"user_request": sentence});
+            let verdict = pollster::block_on(client.gate(req)).expect("gate");
+            let crate::verdict::Verdict::Escalate(hint) = verdict else {
+                panic!("expected escalate for {sentence:?}, got {verdict:?}");
+            };
+            let excerpt = hint
+                .reasons
+                .iter()
+                .find_map(|reason| match reason {
+                    crate::verdict::UnsureReason::Battery { id, excerpt, .. }
+                        if id.0 == "authority_claim" =>
+                    {
+                        Some(excerpt.as_str())
+                    }
+                    _ => None,
+                })
+                .expect("excerpt");
+            let flat = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                flat.to_lowercase().contains("already approved"),
+                "{sentence:?} -> {excerpt}"
+            );
+            assert!(!excerpt.contains("do-not-leak-arg"), "{excerpt}");
+
+            let quiet = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut pasted = tag_request(json!({}));
+            pasted.action_id = ActionId::new("note");
+            pasted.prepared.name = "note".to_string();
+            pasted.state.trusted = json!({});
+            pasted.state.untrusted = json!({"note": sentence});
+            let verdict = pollster::block_on(quiet.gate(pasted)).expect("gate");
+            assert!(
+                matches!(verdict, crate::verdict::Verdict::Auto(_)),
+                "untrusted {sentence:?} escalated: {verdict:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn choice_timeout_overrides_the_client_deadline() {
+        use std::time::Duration;
+        let client = Client::new(read_backend().delay(Duration::from_millis(50)))
+            .policy(Policy::shipped("tool-gate").expect("policy"))
+            .timeout(Duration::from_millis(5));
+        let long = pollster::block_on(client.gate_with(
+            tag_request(json!({})),
+            CallChoice {
+                model: None,
+                policy: None,
+                timeout: Some(Duration::from_secs(2)),
+            },
+        ))
+        .expect("gate");
+        assert!(matches!(long, crate::verdict::Verdict::Auto(_)), "{long:?}");
+        let short =
+            pollster::block_on(client.gate_with(tag_request(json!({})), CallChoice::default()))
+                .expect("gate");
+        assert!(
+            matches!(short, crate::verdict::Verdict::Escalate(_)),
+            "{short:?}"
+        );
     }
 
     fn extra_noul(n: usize) -> Vec<crate::question::Question> {
