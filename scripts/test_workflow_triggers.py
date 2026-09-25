@@ -72,6 +72,18 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertNotIn("pull_request:", _on_block(text))
         self.assertNotIn("push:", _on_block(text))
 
+    def test_release_please_runs_on_main_and_does_not_test(self) -> None:
+        text = (WORKFLOWS / "release-please.yml").read_text(encoding="utf-8")
+        on_block = _on_block(text)
+        self.assertIn("push:", on_block)
+        self.assertIn("branches: [main]", on_block)
+        self.assertIn("workflow_dispatch:", on_block)
+        self.assertNotIn("pull_request:", on_block)
+        self.assertNotIn("cargo test", text)
+        self.assertNotIn("cargo publish", text)
+        approve = (WORKFLOWS / "auto-approve.yml").read_text(encoding="utf-8")
+        self.assertIn("startsWith(github.head_ref, 'release-please')", approve)
+
 
 if __name__ == "__main__":
     unittest.main()
