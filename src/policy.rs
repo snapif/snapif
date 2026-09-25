@@ -60,6 +60,9 @@ pub struct Policy {
     /// Set only by [`Policy::shipped`]. A path load leaves this empty.
     #[serde(skip)]
     pub shipped_id: Option<String>,
+    /// Set by [`Policy::load`] when the spec is a `.toml` path.
+    #[serde(skip)]
+    pub source_path: Option<String>,
     /// Set only by `finish` after the invariant checks.
     #[serde(skip)]
     sealed: bool,
@@ -207,7 +210,9 @@ impl Policy {
             let text = std::fs::read_to_string(spec).map_err(|err| {
                 Error::Io(std::io::Error::new(err.kind(), format!("{spec}: {err}")))
             })?;
-            Ok(Self::from_toml_str(&text)?)
+            let mut policy = Self::from_toml_str(&text)?;
+            policy.source_path = Some(spec.to_string());
+            Ok(policy)
         } else {
             Ok(Self::shipped(spec)?)
         }
