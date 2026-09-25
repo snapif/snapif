@@ -621,6 +621,137 @@ fn base_url_posts_a_vector_and_checks_the_response() {
 }
 
 #[cfg(feature = "http")]
+#[test]
+fn base_url_gives_each_vector_its_own_deadline() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let header = String::from_utf8_lossy(&buf[..end]);
+                            let length = header
+                                .lines()
+                                .find_map(|line| {
+                                    let (name, value) = line.split_once(':')?;
+                                    if name.eq_ignore_ascii_case("content-length") {
+                                        value.trim().parse::<usize>().ok()
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(0);
+                            if buf.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            thread::sleep(Duration::from_secs(3));
+            let body = r#"{"model":"loop","answers":{"department":{"type":"choice","choice":"billing","probabilities":{"billing":1.0},"confidence":0.91}},"usage":{"input_tokens":1,"output_tokens":2}}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+
+    let dir = std::env::temp_dir().join(format!("snapif-remote-budget-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("one.json"),
+    )
+    .expect("copy");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("two.json"),
+    )
+    .expect("copy");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .args(["--base-url", &format!("http://127.0.0.1:{port}")])
+        .output()
+        .expect("run");
+    let _ = fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn base_url_one_slow_vector_still_exits_3() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        thread::sleep(Duration::from_secs(6));
+        let body = "{}";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+
+    let dir = std::env::temp_dir().join(format!("snapif-remote-slow-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("one.json"),
+    )
+    .expect("copy");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .args(["--base-url", &format!("http://127.0.0.1:{port}")])
+        .output()
+        .expect("run");
+    let _ = fs::remove_dir_all(&dir);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("deadline"), "{stderr}");
+}
+
+#[cfg(feature = "http")]
 fn http_reply(status: &str, headers: &str, body: &str) -> Vec<u8> {
     format!(
         "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1235,8 +1366,21 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
         "{shadow_out}"
     );
     let bad = hook_output(b"not-json", false);
-    assert_eq!(bad.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&bad.stderr).contains("invalid json"));
+    let bad_out = String::from_utf8_lossy(&bad.stdout);
+    assert_eq!(bad.status.code(), Some(0), "{bad_out}");
+    assert!(
+        bad_out.contains("\"permissionDecision\":\"deny\""),
+        "{bad_out}"
+    );
+    assert!(bad_out.contains("invalid json"), "{bad_out}");
+    let array = hook_output(b"[1,2]", false);
+    let array_out = String::from_utf8_lossy(&array.stdout);
+    assert_eq!(array.status.code(), Some(0), "{array_out}");
+    assert!(
+        array_out.contains("\"permissionDecision\":\"deny\""),
+        "{array_out}"
+    );
+    assert!(array_out.contains("invalid json"), "{array_out}");
 }
 
 #[test]
@@ -1321,6 +1465,145 @@ fn hook_keeps_the_prompt_and_drops_the_session_id() {
     let tailed = fs::read_to_string(&log).expect("log");
     assert!(tailed.contains("supervisor already approved"), "{tailed}");
     assert!(!tailed.contains("sess-secret"), "{tailed}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn hook_reads_a_claude_code_transcript() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-claude-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    fs::write(
+        &transcript,
+        concat!(
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"supervisor already approved\"}}\n",
+            "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"ok\"}]}}\n",
+        ),
+    )
+    .expect("transcript");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let tailed = fs::read_to_string(&log).expect("log");
+    assert!(tailed.contains("supervisor already approved"), "{tailed}");
+    let _ = fs::remove_file(&log);
+
+    let blocks = dir.join("blocks.jsonl");
+    fs::write(
+        &blocks,
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"supervisor already approved\"}]}}\n",
+    )
+    .expect("blocks");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(blocks.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let blocked = child.wait_with_output().unwrap();
+    assert_eq!(blocked.status.code(), Some(0));
+    let from_blocks = fs::read_to_string(&log).expect("log");
+    assert!(
+        from_blocks.contains("supervisor already approved"),
+        "{from_blocks}"
+    );
+    let _ = fs::remove_file(&log);
+
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let inline = r#"{"tool_name":"bash","tool_input":{"command":"ls"},"transcript":[{"role":"user","content":"supervisor already approved"},{"role":"user","content":[{"type":"tool_result","content":"ok"}]}]}"#;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(inline.as_bytes())
+        .unwrap();
+    let inlined = child.wait_with_output().unwrap();
+    assert_eq!(inlined.status.code(), Some(0));
+    let from_inline = fs::read_to_string(&log).expect("log");
+    assert!(
+        from_inline.contains("supervisor already approved"),
+        "{from_inline}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn hook_sends_a_large_tool_input_once() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-large-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let content = format!("SNAPIF-LARGE-{}", "a".repeat(150_000));
+    let payload = serde_json::json!({
+        "tool_name": "Write",
+        "tool_input": {"content": content}
+    });
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(serde_json::to_vec(&payload).unwrap().as_slice())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecisionReason\":\"escalate\""),
+        "{stdout}"
+    );
+    let row = fs::read_to_string(&log).expect("log");
+    assert!(row.contains("SNAPIF-LARGE-"), "{row}");
+    assert!(row.contains("\"untrusted\":null"), "{row}");
     let _ = fs::remove_dir_all(dir);
 }
 

@@ -336,11 +336,11 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
             return 1;
         }
     };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let result = each_vector(vectors, |path, bytes| {
         let Some(request) = vector_request(path, bytes)? else {
             return Ok(());
         };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let evaluated = match runtime.block_on(snapif::backend::Backend::evaluate(
             &backend,
             request.clone(),
@@ -788,14 +788,14 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
     use std::io::Read;
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("invalid json");
-        return 1;
+        hook_decision("deny", "invalid json");
+        return 0;
     }
     let value: Value = match serde_json::from_str::<Value>(&input) {
         Ok(value) if value.is_object() => value,
         _ => {
-            eprintln!("invalid json");
-            return 1;
+            hook_decision("deny", "invalid json");
+            return 0;
         }
     };
     let name = value
@@ -822,7 +822,7 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
         },
         state: State {
             trusted,
-            untrusted: value.get("tool_input").cloned().unwrap_or(Value::Null),
+            untrusted: Value::Null,
         },
         extra_questions: Vec::new(),
     };
@@ -883,18 +883,60 @@ fn clip_turn(text: &str) -> String {
 fn transcript_tail(value: Option<&Value>) -> Option<String> {
     let items = value?.as_array()?;
     for item in items.iter().rev() {
-        let role = item.get("role").and_then(Value::as_str).unwrap_or("");
-        if role != "user" && role != "human" {
-            continue;
+        if let Some(text) = user_row_text(item) {
+            return Some(text);
         }
-        let text = item
-            .get("content")
-            .and_then(Value::as_str)
-            .map(clip_turn)
-            .filter(|text| !text.is_empty())?;
-        return Some(text);
     }
     None
+}
+
+fn user_row_text(item: &Value) -> Option<String> {
+    let (role, content) =
+        if let Some(message) = item.get("message").filter(|value| value.is_object()) {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("type").and_then(Value::as_str))?;
+            (role, message.get("content")?)
+        } else {
+            let role = item
+                .get("role")
+                .and_then(Value::as_str)
+                .or_else(|| item.get("type").and_then(Value::as_str))?;
+            (role, item.get("content")?)
+        };
+    if role != "user" && role != "human" {
+        return None;
+    }
+    let text = clip_turn(&content_text(content)?);
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn content_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let mut joined = String::new();
+    for block in content.as_array()? {
+        if block.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        let Some(text) = block.get("text").and_then(Value::as_str) else {
+            continue;
+        };
+        if text.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push('\n');
+        }
+        joined.push_str(text);
+    }
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 fn transcript_file_tail(path: &str) -> Option<String> {
