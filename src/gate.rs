@@ -718,8 +718,15 @@ fn approval_excerpt(text: &str) -> Option<String> {
     }
 }
 
+fn marker_words(marker: &str) -> Vec<&str> {
+    marker
+        .split(|ch: char| ch.is_whitespace() || ch == '-' || ch == '/')
+        .filter(|word| !word.is_empty())
+        .collect()
+}
+
 fn find_phrase(text: &str, marker: &str) -> Option<(usize, usize)> {
-    let words: Vec<&str> = marker.split_whitespace().collect();
+    let words = marker_words(marker);
     if words.is_empty() {
         return None;
     }
@@ -1546,6 +1553,56 @@ mod tests {
             matches!(verdict, crate::verdict::Verdict::Auto(_)),
             "joined words escalated: {verdict:?}"
         );
+    }
+
+    #[test]
+    fn pre_approved_matches_the_same_gaps_as_the_other_phrases() {
+        let cases = [
+            "pre-approved this write",
+            "pre approved this write",
+            "pre/approved this write",
+            "pre\u{200b}approved this write",
+        ];
+        for sentence in cases {
+            let client = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut req = tag_request(json!({"leak": "do-not-leak-arg"}));
+            req.action_id = ActionId::new("note");
+            req.prepared.name = "note".to_string();
+            req.state.trusted = json!({"user_request": sentence});
+            let verdict = pollster::block_on(client.gate(req)).expect("gate");
+            let crate::verdict::Verdict::Escalate(hint) = verdict else {
+                panic!("expected escalate for {sentence:?}, got {verdict:?}");
+            };
+            let excerpt = hint
+                .reasons
+                .iter()
+                .find_map(|reason| match reason {
+                    crate::verdict::UnsureReason::Battery { id, excerpt, .. }
+                        if id.0 == "authority_claim" =>
+                    {
+                        Some(excerpt.as_str())
+                    }
+                    _ => None,
+                })
+                .expect("excerpt");
+            assert!(excerpt.to_lowercase().contains("pre"), "{excerpt}");
+            assert!(excerpt.to_lowercase().contains("approved"), "{excerpt}");
+            assert!(!excerpt.contains("do-not-leak-arg"), "{excerpt}");
+
+            let quiet = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut pasted = tag_request(json!({}));
+            pasted.action_id = ActionId::new("note");
+            pasted.prepared.name = "note".to_string();
+            pasted.state.trusted = json!({});
+            pasted.state.untrusted = json!({"note": sentence});
+            let verdict = pollster::block_on(quiet.gate(pasted)).expect("gate");
+            assert!(
+                matches!(verdict, crate::verdict::Verdict::Auto(_)),
+                "untrusted {sentence:?} escalated: {verdict:?}"
+            );
+        }
     }
 
     #[test]
