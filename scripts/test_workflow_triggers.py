@@ -81,6 +81,9 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertNotIn("pull_request:", on_block)
         self.assertNotIn("cargo test", text)
         self.assertNotIn("cargo publish", text)
+        config = (ROOT / "release-please-config.json").read_text(encoding="utf-8")
+        self.assertIn('"bootstrap-sha":', config)
+        self.assertLess(config.index('"bootstrap-sha":'), config.index('"packages":'))
         approve = (WORKFLOWS / "auto-approve.yml").read_text(encoding="utf-8")
         self.assertIn("startsWith(github.head_ref, 'release-please')", approve)
 
