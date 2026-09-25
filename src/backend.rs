@@ -238,16 +238,12 @@ impl<B: Backend> Client<B> {
         &self.backend
     }
 
-    /// Backend id, model, and policy id for a status line. No API key.
+    /// Backend id, model, and policy label for a status line. No API key.
     pub fn status(&self) -> ClientStatus {
         ClientStatus {
             backend: self.backend.id().to_string(),
             model: self.model.clone(),
-            policy: self
-                .policy
-                .as_ref()
-                .and_then(|policy| policy.shipped_id.clone())
-                .unwrap_or_default(),
+            policy: self.policy.as_ref().map(policy_label).unwrap_or_default(),
             log: self.log_path.is_some(),
             cache: self.cache.is_some(),
         }
@@ -557,6 +553,17 @@ impl Client<AnyBackend> {
         };
         let client = apply_runtime(client, env)?;
         Ok(if shadow { client.shadow(true) } else { client })
+    }
+}
+
+/// Shipped policies keep their id. A file load names the battery and the path.
+fn policy_label(policy: &Policy) -> String {
+    if let Some(id) = &policy.shipped_id {
+        return id.clone();
+    }
+    match &policy.source_path {
+        Some(path) => format!("{} {path}", policy.battery.0),
+        None => policy.battery.0.clone(),
     }
 }
 
@@ -1056,7 +1063,47 @@ mod tests {
         let raw = include_str!("../policies/tool-gate.toml");
         let file_policy = Client::new(crate::backends::fake::FakeBackend::new())
             .policy(crate::policy::Policy::from_toml_str(raw).expect("toml"));
-        assert!(file_policy.status().policy.is_empty());
+        assert_eq!(file_policy.status().policy, "tool-gate");
+    }
+
+    #[test]
+    fn status_names_a_file_policy_without_the_key() {
+        let dir = std::env::temp_dir().join(format!("snapif-status-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("desk.toml");
+        std::fs::write(
+            &path,
+            r#"
+schema_version = 1
+battery = "desk-pack"
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+[default_action]
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+"#,
+        )
+        .expect("toml");
+        let client = Client::<AnyBackend>::from_config(&ClientConfig {
+            backend: "fake".to_string(),
+            policy: Some(path.display().to_string()),
+            api_key: Some("super-secret-key".to_string()),
+            ..ClientConfig::default()
+        })
+        .expect("config");
+        let status = client.status();
+        assert!(status.policy.contains("desk-pack"), "{}", status.policy);
+        assert!(
+            status.policy.contains(&path.display().to_string()),
+            "{}",
+            status.policy
+        );
+        let shown = format!("{client:?} {status:?}");
+        assert!(!shown.contains("super-secret-key"), "{shown}");
+        assert!(!shown.contains("when_unsure"), "{shown}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(feature = "http")]

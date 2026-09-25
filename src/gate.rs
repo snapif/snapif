@@ -59,12 +59,19 @@ impl<B: Backend> Client<B> {
         Ok(self.record(&req, key, verdict))
     }
 
-    pub async fn gate_many(&self, requests: Vec<GateRequest>) -> Result<Vec<Verdict>, Error> {
-        let mut verdicts = Vec::with_capacity(requests.len());
-        for req in requests {
-            verdicts.push(self.gate(req).await?);
+    /// One gate per item. `choice` applies only to that item.
+    ///
+    /// An empty or whitespace model keeps the client model. One item's
+    /// error is that item's `Err`. Later items still run.
+    pub async fn gate_many<'a>(
+        &self,
+        items: Vec<(GateRequest, CallChoice<'a>)>,
+    ) -> Vec<Result<Verdict, Error>> {
+        let mut verdicts = Vec::with_capacity(items.len());
+        for (req, choice) in items {
+            verdicts.push(self.gate_with(req, choice).await);
         }
-        Ok(verdicts)
+        verdicts
     }
 
     async fn gate_uncached(
@@ -659,7 +666,6 @@ fn scored_text(req: &GateRequest) -> String {
 }
 
 fn approval_excerpt(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
     let markers = [
         "already approved",
         "supervisor approved",
@@ -668,11 +674,71 @@ fn approval_excerpt(text: &str) -> Option<String> {
         "pre-approved",
         "has approved",
     ];
-    let marker = markers.iter().find(|marker| lower.contains(*marker))?;
-    let start = lower.find(marker).unwrap_or(0);
-    let from = start.saturating_sub(40);
-    let to = (start + marker.len() + 80).min(text.len());
-    Some(text.get(from..to).unwrap_or(text).to_string())
+    let (marker, start) = markers
+        .iter()
+        .find_map(|marker| find_ascii_marker(text, marker).map(|start| (*marker, start)))?;
+    let from = floor_char_boundary(text, start.saturating_sub(40));
+    let tail = start
+        .saturating_add(marker.len())
+        .saturating_add(80)
+        .min(text.len());
+    let to = ceil_char_boundary(text, tail);
+    match text.get(from..to) {
+        Some(window) if !window.is_empty() => Some(window.to_string()),
+        _ => Some(short_prefix(text)),
+    }
+}
+
+fn find_ascii_marker(text: &str, marker: &str) -> Option<usize> {
+    let mark = marker.as_bytes();
+    if mark.is_empty() || mark.len() > text.len() {
+        return None;
+    }
+    let last = text.len() - mark.len();
+    for index in 0..=last {
+        let end = index + mark.len();
+        if !text.is_char_boundary(index) || !text.is_char_boundary(end) {
+            continue;
+        }
+        if text[index..end].eq_ignore_ascii_case(marker) {
+            return Some(index);
+        }
+    }
+    None
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let mut at = 0;
+    for (offset, _) in text.char_indices() {
+        if offset > index {
+            break;
+        }
+        at = offset;
+    }
+    at
+}
+
+fn ceil_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    if text.is_char_boundary(index) {
+        return index;
+    }
+    for (offset, _) in text.char_indices() {
+        if offset > index {
+            return offset;
+        }
+    }
+    text.len()
+}
+
+fn short_prefix(text: &str) -> String {
+    let end = ceil_char_boundary(text, 120.min(text.len()));
+    text.get(..end).unwrap_or("").to_string()
 }
 
 fn block_hit(
@@ -1218,21 +1284,84 @@ mod tests {
     fn gate_many_keeps_order_and_empty_skips_the_backend() {
         let client =
             Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
-        let empty = pollster::block_on(client.gate_many(vec![])).expect("empty");
+        let empty = pollster::block_on(client.gate_many(vec![]));
         assert!(empty.is_empty());
         assert_eq!(client.backend().calls(), 0);
         let verdicts = pollster::block_on(client.gate_many(vec![
-            tag_request(json!({"n": 1})),
-            tag_request(json!({"n": 2})),
-        ]))
-        .expect("many");
+            (tag_request(json!({"n": 1})), CallChoice::default()),
+            (tag_request(json!({"n": 2})), CallChoice::default()),
+        ]));
         assert_eq!(verdicts.len(), 2);
         assert!(
             verdicts
                 .iter()
-                .all(|verdict| matches!(verdict, crate::verdict::Verdict::Auto(_)))
+                .all(|verdict| matches!(verdict, Ok(crate::verdict::Verdict::Auto(_))))
         );
         assert_eq!(client.backend().calls(), 2);
+    }
+
+    #[test]
+    fn gate_many_keeps_going_after_one_error_and_records_each_choice() {
+        let client =
+            Client::new(read_backend()).policy(Policy::shipped("tool-gate").expect("policy"));
+        let review = Policy::shipped("review").expect("review");
+        let mut broken = tag_request(json!({}));
+        broken.action_id = ActionId::new("");
+        let results = pollster::block_on(client.gate_many(vec![
+            (broken, CallChoice::default()),
+            (
+                tag_request(json!({"n": 1})),
+                CallChoice {
+                    model: Some("model-a"),
+                    policy: None,
+                },
+            ),
+            (
+                tag_request(json!({"n": 2})),
+                CallChoice {
+                    model: Some("   "),
+                    policy: Some(&review),
+                },
+            ),
+        ]));
+        assert!(results[0].is_err(), "{:?}", results[0]);
+        let first = super::take_hint(results[1].as_ref().expect("second").clone());
+        let second = super::take_hint(results[2].as_ref().expect("third").clone());
+        assert_eq!(first.model, "model-a");
+        assert_eq!(first.pack, "tool-gate");
+        assert_eq!(second.model, "jev-latest");
+        assert_eq!(second.pack, "review");
+        assert_ne!(first.model, second.model);
+        assert_ne!(first.pack, second.pack);
+    }
+
+    #[test]
+    fn authority_excerpt_ignores_a_casefold_index() {
+        let client =
+            Client::new(claim_backend(0.95)).policy(Policy::shipped("tool-gate").expect("policy"));
+        let mut req = tag_request(json!({"leak": "do-not-leak-arg"}));
+        req.action_id = ActionId::new("git.push");
+        req.prepared.name = "git.push".to_string();
+        let prefix = format!("ß{} already approved {}", "x".repeat(39), "y".repeat(100));
+        req.state.trusted = json!({"user_request": prefix});
+        let verdict = pollster::block_on(client.gate(req)).expect("gate");
+        let crate::verdict::Verdict::Escalate(hint) = verdict else {
+            panic!("expected escalate, got {verdict:?}");
+        };
+        let excerpt = hint
+            .reasons
+            .iter()
+            .find_map(|reason| match reason {
+                crate::verdict::UnsureReason::Battery { id, excerpt, .. }
+                    if id.0 == "authority_claim" =>
+                {
+                    Some(excerpt.as_str())
+                }
+                _ => None,
+            })
+            .expect("excerpt");
+        assert!(excerpt.contains("already approved"), "{excerpt}");
+        assert!(!excerpt.contains("do-not-leak-arg"), "{excerpt}");
     }
 
     fn extra_noul(n: usize) -> Vec<crate::question::Question> {
