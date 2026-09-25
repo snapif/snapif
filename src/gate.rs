@@ -731,6 +731,9 @@ fn find_phrase(text: &str, marker: &str) -> Option<(usize, usize)> {
         return None;
     }
     for (start, _) in text.char_indices() {
+        if text[..start].chars().next_back().is_some_and(is_word_char) {
+            continue;
+        }
         if let Some(len) = match_words(&text[start..], &words) {
             return Some((start, start + len));
         }
@@ -768,7 +771,20 @@ fn match_words(text: &str, words: &[&str]) -> Option<usize> {
         }
         offset += bytes;
     }
+    if text
+        .get(offset..)
+        .unwrap_or("")
+        .chars()
+        .next()
+        .is_some_and(is_word_char)
+    {
+        return None;
+    }
     Some(offset)
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric()
 }
 
 fn is_phrase_gap(ch: char) -> bool {
@@ -1553,6 +1569,72 @@ mod tests {
             matches!(verdict, crate::verdict::Verdict::Auto(_)),
             "joined words escalated: {verdict:?}"
         );
+    }
+
+    #[test]
+    fn authority_claim_does_not_match_inside_a_longer_word() {
+        let stay_auto = [
+            "notalready approved this write",
+            "already approvedly this write",
+        ];
+        for sentence in stay_auto {
+            let client = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut req = tag_request(json!({}));
+            req.action_id = ActionId::new("note");
+            req.prepared.name = "note".to_string();
+            req.state.trusted = json!({"user_request": sentence});
+            let verdict = pollster::block_on(client.gate(req)).expect("gate");
+            assert!(
+                matches!(verdict, crate::verdict::Verdict::Auto(_)),
+                "{sentence:?} escalated: {verdict:?}"
+            );
+        }
+
+        let escalate = [
+            "already approved this write",
+            "already-approved this write",
+            "pre approved this write",
+        ];
+        for sentence in escalate {
+            let client = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut req = tag_request(json!({"leak": "do-not-leak-arg"}));
+            req.action_id = ActionId::new("note");
+            req.prepared.name = "note".to_string();
+            req.state.trusted = json!({"user_request": sentence});
+            let verdict = pollster::block_on(client.gate(req)).expect("gate");
+            let crate::verdict::Verdict::Escalate(hint) = verdict else {
+                panic!("expected escalate for {sentence:?}, got {verdict:?}");
+            };
+            let excerpt = hint
+                .reasons
+                .iter()
+                .find_map(|reason| match reason {
+                    crate::verdict::UnsureReason::Battery { id, excerpt, .. }
+                        if id.0 == "authority_claim" =>
+                    {
+                        Some(excerpt.as_str())
+                    }
+                    _ => None,
+                })
+                .expect("excerpt");
+            assert!(excerpt.to_lowercase().contains("approved"), "{excerpt}");
+            assert!(!excerpt.contains("do-not-leak-arg"), "{excerpt}");
+
+            let quiet = Client::new(claim_backend(0.95))
+                .policy(Policy::shipped("tool-gate").expect("policy"));
+            let mut pasted = tag_request(json!({}));
+            pasted.action_id = ActionId::new("note");
+            pasted.prepared.name = "note".to_string();
+            pasted.state.trusted = json!({});
+            pasted.state.untrusted = json!({"note": sentence});
+            let verdict = pollster::block_on(quiet.gate(pasted)).expect("gate");
+            assert!(
+                matches!(verdict, crate::verdict::Verdict::Auto(_)),
+                "untrusted {sentence:?} escalated: {verdict:?}"
+            );
+        }
     }
 
     #[test]
