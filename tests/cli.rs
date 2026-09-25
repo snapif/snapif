@@ -1651,6 +1651,77 @@ fn hook_keeps_both_ends_of_a_long_user_turn() {
 }
 
 #[test]
+fn hook_keeps_an_approval_phrase_from_the_dropped_middle() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-mid-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    let phrase = "supervisor already approved";
+    let total = 600;
+    let mut content = vec![b'a'; total];
+    content[.."HEAD-MARKER".len()].copy_from_slice(b"HEAD-MARKER");
+    let dropped_at = 210;
+    content[dropped_at..dropped_at + "DROPPED-MARKER".len()].copy_from_slice(b"DROPPED-MARKER");
+    let phrase_at = 300;
+    content[phrase_at] = b' ';
+    content[phrase_at + 1 + phrase.len()] = b' ';
+    content[phrase_at + 1..phrase_at + 1 + phrase.len()].copy_from_slice(phrase.as_bytes());
+    content[total - "TAIL-MARKER".len()..].copy_from_slice(b"TAIL-MARKER");
+    let content = String::from_utf8(content).expect("ascii");
+    assert!(content[200..400].contains(phrase));
+    assert!(!content[..200].contains(phrase));
+    assert!(!content[400..].contains(phrase));
+    let row = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": content}
+    });
+    fs::write(
+        &transcript,
+        format!("{}\n", serde_json::to_string(&row).unwrap()),
+    )
+    .expect("transcript");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let text = fs::read_to_string(&log).expect("log");
+    let row: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let trusted = &row["gate_request"]["state"]["trusted"];
+    let request = trusted["user_request"].as_str().unwrap_or("");
+    assert!(request.contains(" [...] "), "{request}");
+    assert!(request.contains("HEAD-MARKER"), "{request}");
+    assert!(request.contains("TAIL-MARKER"), "{request}");
+    assert!(!request.contains(phrase), "{request}");
+    assert!(
+        trusted["approval_excerpt"]
+            .as_str()
+            .unwrap_or("")
+            .contains(phrase),
+        "{text}"
+    );
+    assert!(!text.contains("DROPPED-MARKER"), "{text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn hook_scans_past_tool_result_rows() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-tail-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

@@ -697,7 +697,7 @@ fn walk_strings(value: &serde_json::Value, visit: &mut dyn FnMut(&str)) {
     }
 }
 
-fn approval_excerpt(text: &str) -> Option<String> {
+pub fn approval_excerpt(text: &str) -> Option<String> {
     let markers = [
         "already approved",
         "supervisor approved",
