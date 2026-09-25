@@ -80,10 +80,10 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", on_block)
         self.assertNotIn("pull_request:", on_block)
         self.assertNotIn("cargo test", text)
-        self.assertNotIn("cargo publish", text)
+        self.assertIn("cargo publish --locked", text)
+        self.assertIn("CARGO_REGISTRY_TOKEN", text)
         config = (ROOT / "release-please-config.json").read_text(encoding="utf-8")
-        self.assertIn('"bootstrap-sha":', config)
-        self.assertLess(config.index('"bootstrap-sha":'), config.index('"packages":'))
+        self.assertIn('"release-as": "0.1.0"', config)
         approve = (WORKFLOWS / "auto-approve.yml").read_text(encoding="utf-8")
         self.assertIn("startsWith(github.head_ref, 'release-please')", approve)
 
