@@ -4,8 +4,7 @@
     ".": {
       "release-type": "rust",
       "bump-minor-pre-major": true,
-      "changelog-path": "CHANGELOG.md",
-      "release-as": "0.1.0"
+      "changelog-path": "CHANGELOG.md"
     }
   }
 }

@@ -83,7 +83,8 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("cargo publish --locked", text)
         self.assertIn("CARGO_REGISTRY_TOKEN", text)
         config = (ROOT / "release-please-config.json").read_text(encoding="utf-8")
-        self.assertIn('"release-as": "0.1.0"', config)
+        self.assertNotIn("release-as", config)
+        self.assertIn('"release-type": "rust"', config)
         approve = (WORKFLOWS / "auto-approve.yml").read_text(encoding="utf-8")
         self.assertIn("startsWith(github.head_ref, 'release-please')", approve)
 
