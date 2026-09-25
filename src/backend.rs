@@ -137,11 +137,15 @@ pub struct ClientConfig {
     pub cache_capacity: Option<usize>,
 }
 
-/// Host choice for one `gate` or `ask`. Empty model keeps the client model.
+/// Host choice for one `gate` or `ask`.
+///
+/// An empty model keeps the client model. An empty timeout keeps the
+/// client timeout.
 #[derive(Clone, Copy, Default)]
 pub struct CallChoice<'a> {
     pub model: Option<&'a str>,
     pub policy: Option<&'a Policy>,
+    pub timeout: Option<Duration>,
 }
 
 /// What the next call will use. The API key is not included.
@@ -326,12 +330,13 @@ impl<B: Backend> Client<B> {
         if encoded.truncated_untrusted {
             request = wire::decode_request(&encoded.body)?;
         }
-        let deadline = Instant::now() + self.timeout;
+        let timeout = choice.timeout.unwrap_or(self.timeout);
+        let deadline = Instant::now() + timeout;
         let evaluated = self
             .backend
             .evaluate(request.clone(), deadline)
             .await
-            .map_err(|err| map_backend(err, self.timeout))?;
+            .map_err(|err| map_backend(err, timeout))?;
         if let Some(on_usage) = &self.on_usage {
             on_usage(evaluated.wire.usage);
         }

@@ -1,5 +1,5 @@
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -20,6 +20,7 @@ pub struct FakeBackend {
     last_state: Mutex<Option<Value>>,
     last_model: Mutex<Option<String>>,
     calls: Mutex<u64>,
+    delay: Duration,
 }
 
 impl FakeBackend {
@@ -31,7 +32,14 @@ impl FakeBackend {
             last_state: Mutex::new(None),
             last_model: Mutex::new(None),
             calls: Mutex::new(0),
+            delay: Duration::ZERO,
         }
+    }
+
+    /// Sleep this long at the start of `evaluate`, then honor the deadline.
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     pub fn on_choice(mut self, id: &str, label: &str, confidence: f64) -> Self {
@@ -95,6 +103,9 @@ impl Backend for FakeBackend {
         }
         if let Ok(mut guard) = self.calls.lock() {
             *guard += 1;
+        }
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
         }
         if Instant::now() >= deadline {
             return Err(BackendError::Timeout);
