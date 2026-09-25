@@ -176,6 +176,16 @@ pub fn encode(request: &WireRequest) -> Result<EncodedRequest, WireError> {
     }
 }
 
+fn unit_confidence(key: &str, confidence: f64) -> Result<(), DecodeError> {
+    if confidence.is_finite() && (0.0..=1.0).contains(&confidence) {
+        Ok(())
+    } else {
+        Err(DecodeError::OutOfRange {
+            key: QuestionId::new(key),
+        })
+    }
+}
+
 pub fn check_response(
     questions: &IndexMap<String, WireQuestion>,
     response: &WireResponse,
@@ -187,13 +197,19 @@ pub fn check_response(
             });
         };
         match (question, answer) {
-            (WireQuestion::Choice { criteria, .. }, WireAnswer::Choice { choice, .. }) => {
+            (
+                WireQuestion::Choice { criteria, .. },
+                WireAnswer::Choice {
+                    choice, confidence, ..
+                },
+            ) => {
                 if !criteria.contains_key(choice) {
                     return Err(DecodeError::UnknownLabel {
                         key: QuestionId::new(key),
                         label: choice.clone(),
                     });
                 }
+                unit_confidence(key, *confidence)?;
             }
             (WireQuestion::Noul { .. }, WireAnswer::Noul { noul }) => {
                 if !(0.0..=1.0).contains(noul) {
@@ -202,13 +218,19 @@ pub fn check_response(
                     });
                 }
             }
-            (WireQuestion::Score { criteria, .. }, WireAnswer::Score { score, .. }) => {
+            (
+                WireQuestion::Score { criteria, .. },
+                WireAnswer::Score {
+                    score, confidence, ..
+                },
+            ) => {
                 let max = (criteria.len() as f64) - 1.0;
                 if *score < -1e-6 || *score > max + 1e-6 {
                     return Err(DecodeError::OutOfRange {
                         key: QuestionId::new(key),
                     });
                 }
+                unit_confidence(key, *confidence)?;
             }
             _ => {
                 return Err(DecodeError::TypeMismatch {

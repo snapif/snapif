@@ -150,6 +150,51 @@ fn boolean_type_is_unknown() {
 }
 
 #[test]
+fn confidence_outside_zero_to_one_is_out_of_range() {
+    let request = decode_request(DEPARTMENT.as_bytes()).unwrap();
+    for confidence in ["95", "1.1", "-0.1"] {
+        let raw = format!(
+            r#"{{"model":"m","answers":{{"department":{{"type":"choice","choice":"billing","probabilities":{{}},"confidence":{confidence}}}}},"usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+        );
+        let response = decode_response(raw.as_bytes()).unwrap();
+        assert!(
+            matches!(
+                check_response(&request.questions, &response),
+                Err(snapif::error::DecodeError::OutOfRange { key }) if key == QuestionId::new("department")
+            ),
+            "{confidence}"
+        );
+    }
+    for confidence in ["0.0", "1.0"] {
+        let raw = format!(
+            r#"{{"model":"m","answers":{{"department":{{"type":"choice","choice":"billing","probabilities":{{"billing":1.0}},"confidence":{confidence}}}}},"usage":{{"input_tokens":0,"output_tokens":0}}}}"#
+        );
+        let response = decode_response(raw.as_bytes()).unwrap();
+        assert!(
+            check_response(&request.questions, &response).is_ok(),
+            "{confidence}"
+        );
+    }
+
+    let score_request = decode_request(FRUSTRATION.as_bytes()).unwrap();
+    let low = decode_response(
+        br#"{"model":"m","answers":{"frustration":{"type":"score","score":1.0,"legend":{"0":"a","1":"b"},"probabilities":{},"confidence":-0.1}},"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        check_response(&score_request.questions, &low),
+        Err(snapif::error::DecodeError::OutOfRange { key }) if key == QuestionId::new("frustration")
+    ));
+
+    let noul_request = decode_request(NOUL_BARE.as_bytes()).unwrap();
+    let noul = decode_response(
+        br#"{"model":"m","answers":{"is_urgent":{"type":"noul","noul":0.2,"confidence":95}},"usage":{"input_tokens":1,"output_tokens":1}}"#,
+    )
+    .unwrap();
+    assert!(check_response(&noul_request.questions, &noul).is_ok());
+}
+
+#[test]
 fn noul_ignores_extra_confidence() {
     let raw = r#"{"model":"jev-1","answers":{"is_urgent":{"type":"noul","noul":0.2,"confidence":0.9}},"usage":{"input_tokens":1,"output_tokens":1}}"#;
     let response = decode_response(raw.as_bytes()).unwrap();
@@ -268,9 +313,19 @@ fn encode_cap_replaces_only_untrusted() {
 
     let text = WireRequest {
         state: Value::String("s".repeat(ENCODE_CAP)),
-        ..request
+        ..request.clone()
     };
     assert!(matches!(encode(&text), Err(WireError::BodyCap(_))));
+
+    let prepared_only = WireRequest {
+        state: json!({
+            "trusted": {},
+            "prepared": {"name": "Write", "args": {"content": "c".repeat(ENCODE_CAP)}},
+            "untrusted": null
+        }),
+        ..request
+    };
+    assert!(matches!(encode(&prepared_only), Err(WireError::BodyCap(_))));
 }
 
 #[test]
