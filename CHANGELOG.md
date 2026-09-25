@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.1](https://github.com/snapif/snapif/compare/snapif-v0.1.0...snapif-v0.1.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* accept a gate call file that names the action with name ([#120](https://github.com/snapif/snapif/issues/120)) ([ce2e547](https://github.com/snapif/snapif/commit/ce2e547fe25f35a3a611465a895b8a417c5e6ac7))
+* fail closed on hook input, transcripts, and confidence ([#118](https://github.com/snapif/snapif/issues/118)) ([e025766](https://github.com/snapif/snapif/commit/e0257668a1e0b72fefd54e15fd449712da0e44cc)), closes [#113](https://github.com/snapif/snapif/issues/113) [#114](https://github.com/snapif/snapif/issues/114) [#115](https://github.com/snapif/snapif/issues/115) [#116](https://github.com/snapif/snapif/issues/116) [#117](https://github.com/snapif/snapif/issues/117)
+* keep a middle approval phrase when the hook clips a long turn ([#122](https://github.com/snapif/snapif/issues/122)) ([f2e91f4](https://github.com/snapif/snapif/commit/f2e91f4ab54bbdb33ab769de822a1bd34c6887a7)), closes [#121](https://github.com/snapif/snapif/issues/121)
+* keep both ends of a long hook prompt and scan past tool results ([#119](https://github.com/snapif/snapif/issues/119)) ([f3e809e](https://github.com/snapif/snapif/commit/f3e809e570efd0c0df7a29b6ff895bddcfd7c1bd))
+* require a word boundary around an approval phrase ([#111](https://github.com/snapif/snapif/issues/111)) ([4b171f7](https://github.com/snapif/snapif/commit/4b171f749832de3c902115d17a6ad066b47c07cb)), closes [#110](https://github.com/snapif/snapif/issues/110)
+
 ## 0.1.0 (2026-09-25)
 
 
