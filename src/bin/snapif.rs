@@ -857,18 +857,35 @@ fn hook_trusted(value: &Value) -> Value {
     if let Some(trusted) = value.get("trusted").filter(|item| item.is_object()) {
         return trusted.clone();
     }
-    match hook_user_turn(value) {
-        Some(turn) => serde_json::json!({"user_request": turn}),
-        None => serde_json::json!({}),
+    let Some(full) = hook_user_turn(value) else {
+        return serde_json::json!({});
+    };
+    let clipped = clip_turn(&full);
+    if clipped.is_empty() {
+        return serde_json::json!({});
     }
+    let mut trusted = serde_json::Map::new();
+    trusted.insert(
+        "user_request".to_string(),
+        serde_json::Value::String(clipped.clone()),
+    );
+    if snapif::gate::approval_excerpt(&clipped).is_none()
+        && let Some(excerpt) = snapif::gate::approval_excerpt(&full)
+    {
+        trusted.insert(
+            "approval_excerpt".to_string(),
+            serde_json::Value::String(excerpt),
+        );
+    }
+    serde_json::Value::Object(trusted)
 }
 
 fn hook_user_turn(value: &Value) -> Option<String> {
     for key in ["prompt", "user_prompt"] {
         if let Some(text) = value.get(key).and_then(Value::as_str) {
-            let text = clip_turn(text);
+            let text = text.trim();
             if !text.is_empty() {
-                return Some(text);
+                return Some(text.to_string());
             }
         }
     }
@@ -922,8 +939,13 @@ fn user_row_text(item: &Value) -> Option<String> {
     if role != "user" && role != "human" {
         return None;
     }
-    let text = clip_turn(&content_text(content)?);
-    if text.is_empty() { None } else { Some(text) }
+    let text = content_text(content)?;
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
 }
 
 fn content_text(content: &Value) -> Option<String> {
