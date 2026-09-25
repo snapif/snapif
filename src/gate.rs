@@ -223,7 +223,7 @@ impl<B: Backend> Client<B> {
             &req.action_id,
             &gates,
             &evaluated.wire.answers,
-            &scored_text(req),
+            claim_excerpt(req).as_deref(),
         ) {
             Err(err) => {
                 return Ok(self.closed(
@@ -661,8 +661,10 @@ fn block_answer(
 
 const QUESTION_CAP: usize = 32;
 
-fn scored_text(req: &GateRequest) -> String {
-    format!("{} {}", req.state.trusted, req.prepared.args)
+fn claim_excerpt(req: &GateRequest) -> Option<String> {
+    let trusted = req.state.trusted.to_string();
+    let args = req.prepared.args.to_string();
+    approval_excerpt(&trusted).or_else(|| approval_excerpt(&args))
 }
 
 fn approval_excerpt(text: &str) -> Option<String> {
@@ -746,9 +748,8 @@ fn block_hit(
     action_id: &ActionId,
     gates: &EffectiveGates,
     answers: &IndexMap<String, WireAnswer>,
-    text: &str,
+    claim: Option<&str>,
 ) -> Result<Option<Verdict>, DecodeError> {
-    let claim = approval_excerpt(text);
     for block in &gates.block_on {
         let noul = block_answer(answers, &block.id)?;
         let decision = NoulAnswer { p: noul }.decide(&policy.noul, Some(block));
@@ -768,7 +769,7 @@ fn block_hit(
                     id: block.id.clone(),
                     when: block.when,
                     excerpt: if block.id.0 == "authority_claim" {
-                        claim.clone().unwrap_or_default()
+                        claim.unwrap_or("").to_string()
                     } else {
                         String::new()
                     },
@@ -1342,7 +1343,7 @@ mod tests {
         let mut req = tag_request(json!({"leak": "do-not-leak-arg"}));
         req.action_id = ActionId::new("git.push");
         req.prepared.name = "git.push".to_string();
-        let prefix = format!("ß{} already approved {}", "x".repeat(39), "y".repeat(100));
+        let prefix = format!("ß{} already approved", "x".repeat(39));
         req.state.trusted = json!({"user_request": prefix});
         let verdict = pollster::block_on(client.gate(req)).expect("gate");
         let crate::verdict::Verdict::Escalate(hint) = verdict else {
