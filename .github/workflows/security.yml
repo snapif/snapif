@@ -109,3 +109,50 @@ jobs:
         if: steps.fossa-key.outputs.present == 'true'
         with:
           api-key: ${{ secrets.FOSSA_API_KEY }}
+
+  report-schedule:
+    name: Report scheduled failure
+    if: always() && github.event_name == 'schedule'
+    needs: [codeql, dependency-review, scorecard, fossa]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - name: Open or close the scheduled failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CODEQL: ${{ needs.codeql.result }}
+          REVIEW: ${{ needs.dependency-review.result }}
+          SCORECARD: ${{ needs.scorecard.result }}
+          FOSSA: ${{ needs.fossa.result }}
+        run: |
+          set -euo pipefail
+          title="nightly: Security scheduled run failed"
+          failed=""
+          for pair in "CodeQL:$CODEQL" "Dependency Review:$REVIEW" "Scorecard:$SCORECARD" "FOSSA:$FOSSA"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [ "$result" = "failure" ]; then
+              failed="$failed $name"
+            fi
+          done
+          existing=$(gh issue list --repo "$REPO" --state open --search "in:title \"$title\"" --json number --jq '.[0].number // empty')
+          if [ -n "$failed" ]; then
+            body="The Monday Security run failed.${failed}
+
+          Run: $RUN"
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --repo "$REPO" --body "$body"
+            else
+              gh issue create --repo "$REPO" --title "$title" --assignee SebTardif --body "$body"
+            fi
+          elif [ -n "$existing" ]; then
+            gh issue close "$existing" --repo "$REPO" --comment "The Monday Security run is green: $RUN"
+          fi
