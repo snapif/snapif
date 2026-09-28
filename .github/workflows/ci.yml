@@ -162,8 +162,12 @@ jobs:
             fuzz
           shared-key: fuzz
           save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'workflow_dispatch' }}
+      - name: Put nightly rustc first
+        run: dirname "$(rustup which --toolchain nightly cargo)" >> "$GITHUB_PATH"
       - name: Fuzz the System One reply for 10 seconds
-        run: cargo fuzz run wire_response -- -max_total_time=10
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        run: cargo fuzz run wire_response --target x86_64-unknown-linux-gnu -- -max_total_time=10
       - run: cargo deny --manifest-path fuzz/Cargo.toml check
       - run: bash scripts/forbid-deps.sh fuzz/Cargo.toml
 

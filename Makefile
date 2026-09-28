@@ -8,7 +8,9 @@ fmt: ## rustfmt check
 	cargo fmt --check
 
 fuzz: ## libFuzzer on the System One reply, 10 seconds, nightly
-	cargo fuzz run wire_response -- -max_total_time=10
+	PATH="$$(dirname $$(rustup which --toolchain nightly rustc)):$$PATH" \
+		RUSTUP_TOOLCHAIN=nightly \
+		cargo fuzz run wire_response -- -max_total_time=10
 
 test: ## cargo test --locked, including http and cli
 	RUSTFLAGS="-D warnings" cargo test --locked

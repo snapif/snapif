@@ -55,6 +55,8 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("needs: [stealth, lint, workflows, test, gitleaks, fuzz]", text)
         self.assertIn("max_total_time=10", text)
         self.assertIn("cargo-fuzz@0.13.2", text)
+        self.assertIn("RUSTUP_TOOLCHAIN: nightly", text)
+        self.assertIn("--target x86_64-unknown-linux-gnu", text)
         self.assertIn('test "$GITLEAKS" = success', text)
         self.assertIn('test "$FUZZ" = success', text)
         self.assertNotIn("tool: gitleaks@", text)
