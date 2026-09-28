@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.2](https://github.com/snapif/snapif/compare/snapif-v0.1.1...snapif-v0.1.2) (2026-09-28)
+
+
+### Bug Fixes
+
+* do not call an empty calibrate directory an io error ([#125](https://github.com/snapif/snapif/issues/125)) ([1653557](https://github.com/snapif/snapif/commit/165355764b382a502784de668cdee8321fc5d65f))
+* drop the query from a relative redirect location ([#126](https://github.com/snapif/snapif/issues/126)) ([6420589](https://github.com/snapif/snapif/commit/642058916416d7a907c73a99e3cff0f7ad790dd5))
+
 ## [0.1.1](https://github.com/snapif/snapif/compare/snapif-v0.1.0...snapif-v0.1.1) (2026-09-25)
 
 
