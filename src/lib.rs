@@ -1,4 +1,13 @@
-//! Snapif.
+//! Snapif scores one tool call and returns Auto, Review, or Escalate.
+//!
+//! The library does not execute the tool. [`Policy::shipped`]`("tool-gate")`
+//! is the tool gate. `review` and `screen` are ask-only and cannot return
+//! Auto. Build a [`Client`] with [`FakeBackend`] for tests, or use the
+//! `typesafe` or `compatible` HTTP backends. The default model on the wire
+//! is `jev-latest`.
+//!
+//! Default features are empty. The `cli` feature builds the `snapif` binary
+//! and includes HTTP.
 #![forbid(unsafe_code)]
 
 pub mod answer;
