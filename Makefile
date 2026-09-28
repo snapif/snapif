@@ -1,4 +1,4 @@
-.PHONY: help check test deny fmt stealth
+.PHONY: help check test deny fmt stealth fuzz
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -6,6 +6,11 @@ help: ## Show this help
 
 fmt: ## rustfmt check
 	cargo fmt --check
+
+fuzz: ## libFuzzer on the System One reply, 10 seconds, nightly
+	PATH="$$(dirname $$(rustup which --toolchain nightly rustc)):$$PATH" \
+		RUSTUP_TOOLCHAIN=nightly \
+		cargo fuzz run wire_response -- -max_total_time=10
 
 test: ## cargo test --locked, including http and cli
 	RUSTFLAGS="-D warnings" cargo test --locked

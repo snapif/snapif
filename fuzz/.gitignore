@@ -1,0 +1,7 @@
+target
+artifacts
+coverage
+crash-*
+leak-*
+timeout-*
+oom-*
