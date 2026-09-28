@@ -87,6 +87,15 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn('"release-type": "rust"', config)
         approve = (WORKFLOWS / "auto-approve.yml").read_text(encoding="utf-8")
         self.assertIn("startsWith(github.head_ref, 'release-please')", approve)
+        after = (WORKFLOWS / "release-please-after-merge.yml").read_text(
+            encoding="utf-8"
+        )
+        on_block = _on_block(after)
+        self.assertIn("workflow_run:", on_block)
+        self.assertIn('workflows: ["CI"]', after)
+        self.assertIn('gh workflow run "Release Please"', after)
+        self.assertIn("github-actions", after)
+        self.assertIn("release-please*)", after)
 
 
 if __name__ == "__main__":
