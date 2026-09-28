@@ -170,10 +170,8 @@ fn confidence_outside_zero_to_one_is_out_of_range() {
             r#"{{"model":"m","answers":{{"department":{{"type":"choice","choice":"billing","probabilities":{{"billing":1.0}},"confidence":{confidence}}}}},"usage":{{"input_tokens":0,"output_tokens":0}}}}"#
         );
         let response = decode_response(raw.as_bytes()).unwrap();
-        assert!(
-            check_response(&request.questions, &response).is_ok(),
-            "{confidence}"
-        );
+        check_response(&request.questions, &response)
+            .unwrap_or_else(|err| panic!("confidence {confidence}: {err}"));
     }
 
     let score_request = decode_request(FRUSTRATION.as_bytes()).unwrap();
@@ -191,7 +189,7 @@ fn confidence_outside_zero_to_one_is_out_of_range() {
         br#"{"model":"m","answers":{"is_urgent":{"type":"noul","noul":0.2,"confidence":95}},"usage":{"input_tokens":1,"output_tokens":1}}"#,
     )
     .unwrap();
-    assert!(check_response(&noul_request.questions, &noul).is_ok());
+    check_response(&noul_request.questions, &noul).expect("noul confidence is not a 0 to 1 score");
 }
 
 #[test]
