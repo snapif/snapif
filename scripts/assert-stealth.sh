@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Check that a public repo has empty discovery metadata.
+# Check that GitHub About, topics, badges, and FUNDING stay empty.
+# The README and crate keywords are the launch page.
 # Usage: assert-stealth.sh OWNER/REPO
 # Exit 0 quiet, 1 leak, 2 cannot query.
 set -euo pipefail
@@ -101,12 +102,8 @@ if [[ -n "$root" ]]; then
     if grep -Eiq 'shields.io|img.shields|badge|\[ci\]|scorecard|bestpractices.dev' "$root/README.md"; then
       echo "FAIL: README has badges or CI marketing"
       leaks=$((leaks + 1))
-    fi
-    if grep -Eiq 'agent skills|getting started|install|quickstart' "$root/README.md"; then
-      echo "FAIL: README looks like a product pitch"
-      leaks=$((leaks + 1))
     else
-      echo "OK: README has no pitch markers"
+      echo "OK: README has no badges"
     fi
   fi
 
@@ -130,17 +127,21 @@ m = re.search(r"(?m)^categories\s*=\s*\[([^\]]*)\]", t)
 print((m.group(1) if m else "").strip())
 PY
 )"
-    check_empty "Cargo.toml keywords" "$kw"
-    check_empty "Cargo.toml categories" "$catg"
+    if [[ -z "$kw" || -z "$catg" ]]; then
+      echo "FAIL: Cargo.toml keywords or categories are empty"
+      leaks=$((leaks + 1))
+    else
+      echo "OK: Cargo.toml keywords and categories are set"
+    fi
   fi
 fi
 
 if [[ "$leaks" -gt 0 ]]; then
   echo "DONE: ok=false leaks=$leaks"
-  echo "NEXT: clear the FAIL fields; do not add topics or a pitch README"
+  echo "NEXT: clear the FAIL fields; do not add topics, badges, or FUNDING"
   exit 1
 fi
 
 echo "DONE: ok=true leaks=0"
-echo "NEXT: keep factory going; do not add discovery metadata"
+echo "NEXT: keep About, topics, badges, and FUNDING empty"
 exit 0

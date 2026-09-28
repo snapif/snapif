@@ -4,10 +4,10 @@ version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
-description = "Snapif"
+description = "Snapif scores one tool call and returns Auto, Review, or Escalate."
 repository = "https://github.com/snapif/snapif"
-keywords = []
-categories = []
+keywords = ["cli", "gate", "confidence", "tools"]
+categories = ["command-line-utilities", "development-tools"]
 publish = true
 
 [features]
