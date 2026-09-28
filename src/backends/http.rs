@@ -207,7 +207,8 @@ fn host_line(text: &str) -> String {
 
 fn safe_location(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
-        return host_line(raw);
+        let cut = raw.split(['?', '#']).next().unwrap_or(raw);
+        return host_line(cut);
     };
     let _ = url.set_username("");
     let _ = url.set_password(None);
