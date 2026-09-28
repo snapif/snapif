@@ -46,6 +46,8 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", on_block)
         self.assertNotIn("branches:", on_block)
         self.assertIn("Signed-off-by:", text)
+        self.assertIn("anthropic\\.com", text)
+        self.assertIn("Claude-Session:", text)
 
     def test_gitleaks_gates_ci_and_is_not_an_install_action_tool(self) -> None:
         text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
@@ -93,6 +95,7 @@ class WorkflowTriggerTests(unittest.TestCase):
         )
         on_block = _on_block(after)
         self.assertIn("workflow_run:", on_block)
+        self.assertIn("workflow_dispatch:", on_block)
         self.assertIn('workflows: ["CI"]', after)
         self.assertIn('gh workflow run "Release Please"', after)
         self.assertIn("github-actions", after)

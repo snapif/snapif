@@ -1,6 +1,7 @@
 name: Release Please after merge
 
 on: # zizmor: ignore[dangerous-triggers] reads the CI run id only; does not checkout the pull request
+  workflow_dispatch:
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -9,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-please-after-merge-${{ github.event.workflow_run.id }}
+  group: release-please-after-merge-${{ github.event.workflow_run.id || github.run_id }}
   cancel-in-progress: false
 
 jobs:
