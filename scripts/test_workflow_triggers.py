@@ -98,6 +98,24 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("github-actions", after)
         self.assertIn("release-please*)", after)
 
+    def test_composite_action_does_not_interpolate_inputs_in_run(self) -> None:
+        text = (ROOT / ".github" / "actions" / "snapif" / "action.yml").read_text(
+            encoding="utf-8"
+        )
+        run = text.split("run:", 1)[1]
+        self.assertNotIn("${{", run)
+        for name in (
+            "SNAPIF_ACTION_PATH",
+            "SNAPIF_MODE",
+            "SNAPIF_CALL",
+            "SNAPIF_STATE",
+            "SNAPIF_POLICY",
+            "SNAPIF_QUESTION",
+            "SNAPIF_DENY_LABEL",
+        ):
+            self.assertIn(f"{name}:", text)
+            self.assertIn(f"${name}", run)
+
 
 if __name__ == "__main__":
     unittest.main()

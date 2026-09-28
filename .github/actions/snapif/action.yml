@@ -33,4 +33,10 @@ runs:
       env:
         SNAPIF_BACKEND: ${{ env.SNAPIF_BACKEND }}
         SNAPIF_POLICY: ${{ inputs.policy }}
-      run: bash "${{ github.action_path }}/../../../scripts/snapif-action.sh" "${{ inputs.mode }}" "${{ inputs.call }}" "${{ inputs.state }}" "${{ inputs.policy }}" "${{ inputs.question }}" "${{ inputs.deny_label }}"
+        SNAPIF_ACTION_PATH: ${{ github.action_path }}
+        SNAPIF_MODE: ${{ inputs.mode }}
+        SNAPIF_CALL: ${{ inputs.call }}
+        SNAPIF_STATE: ${{ inputs.state }}
+        SNAPIF_QUESTION: ${{ inputs.question }}
+        SNAPIF_DENY_LABEL: ${{ inputs.deny_label }}
+      run: bash "$SNAPIF_ACTION_PATH/../../../scripts/snapif-action.sh" "$SNAPIF_MODE" "$SNAPIF_CALL" "$SNAPIF_STATE" "$SNAPIF_POLICY" "$SNAPIF_QUESTION" "$SNAPIF_DENY_LABEL"
