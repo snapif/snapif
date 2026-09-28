@@ -85,6 +85,8 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertNotIn("cargo test", text)
         self.assertIn("cargo publish --locked", text)
         self.assertIn("CARGO_REGISTRY_TOKEN", text)
+        self.assertIn("git tag -s -f", text)
+        self.assertIn("GPG_PRIVATE_KEY", text)
         config = (ROOT / "release-please-config.json").read_text(encoding="utf-8")
         self.assertNotIn("release-as", config)
         self.assertIn('"release-type": "rust"', config)

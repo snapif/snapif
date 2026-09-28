@@ -35,6 +35,24 @@ jobs:
         with:
           ref: ${{ steps.release.outputs.tag_name }}
           persist-credentials: false
+      - name: Sign the release tag
+        if: steps.release.outputs.release_created == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.gnupg"
+          printf '%s\n' "pinentry-mode loopback" > "$HOME/.gnupg/gpg.conf"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
+          key=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+          git config user.name "Sebastien Tardif"
+          git config user.email "sebtardif@ncf.ca"
+          git config user.signingkey "$key"
+          git tag -s -f -m "$TAG" "$TAG" HEAD
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "+refs/tags/${TAG}"
       - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         if: steps.release.outputs.release_created == 'true'
         with:
