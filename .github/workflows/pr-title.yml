@@ -1,0 +1,33 @@
+name: PR title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.head.sha || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  title:
+    name: Title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - name: Conventional title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if [ -z "$TITLE" ]; then
+            echo "no pull request title on this event"
+            exit 0
+          fi
+          printf '%s\n' "$TITLE" | grep -Eq '^(feat|fix|perf|docs|chore|test|ci|refactor|style|build)(\([^)]+\))?!?: '
+          echo "title ok"
