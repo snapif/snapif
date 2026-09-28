@@ -1123,10 +1123,7 @@ fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<String>, Error> {
             .collect();
         names.sort();
         if names.is_empty() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("{}: no calibration rows", path.display()),
-            )));
+            return Ok(Vec::new());
         }
         for name in names {
             push_calibrate_rows(&mut rows, &name)?;
