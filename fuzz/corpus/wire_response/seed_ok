@@ -1,0 +1,1 @@
+{"model":"jev-latest","answers":{"harm":{"type":"choice","choice":"none","probabilities":{"none":1.0},"confidence":0.9},"authority_claim":{"type":"noul","noul":0.1},"confidence":{"type":"score","score":1.0,"legend":{},"probabilities":{"0":1.0},"confidence":0.8}},"usage":{"input_tokens":1,"output_tokens":1}}

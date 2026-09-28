@@ -52,8 +52,11 @@ class WorkflowTriggerTests(unittest.TestCase):
     def test_gitleaks_gates_ci_and_is_not_an_install_action_tool(self) -> None:
         text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Gitleaks", text)
-        self.assertIn("needs: [stealth, lint, workflows, test, gitleaks]", text)
+        self.assertIn("needs: [stealth, lint, workflows, test, gitleaks, fuzz]", text)
+        self.assertIn("max_total_time=10", text)
+        self.assertIn("cargo-fuzz@0.13.2", text)
         self.assertIn('test "$GITLEAKS" = success', text)
+        self.assertIn('test "$FUZZ" = success', text)
         self.assertNotIn("tool: gitleaks@", text)
         self.assertIn("gitleaks_8.30.1_linux_x64.tar.gz", text)
 
