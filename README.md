@@ -62,6 +62,104 @@ cargo run --example pre_tool_use
 
 The other example is in [examples/README.md](examples/README.md).
 
+## Scenarios
+
+### Same call, three scores
+
+`bash.rm` is an exec action. With `SNAPIF_BACKEND=fake`, only `script.confidence` changes the word. Harm stays `exec`.
+
+```json
+{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp/demo"},"trusted":{"user_request":"clean the temp dir"},"untrusted":null,"script":{"harm":"exec","confidence":1.0}}
+```
+
+```bash
+SNAPIF_BACKEND=fake snapif gate --call call.json
+```
+
+| `script.confidence` | Prints | Exit |
+| --- | --- | --- |
+| `1.0` | `auto` | 0 |
+| `0.95` | `review` | 10 |
+| `0.50` | `escalate` | 11 |
+
+Auto on this row needs confidence `1.0`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates.
+
+### Shadow, then enforce
+
+A hook with no script gives the fake scorer nothing to answer, so the gate fails closed. `--shadow` still allows the tool and prints the verdict on stderr. The same hook without `--shadow` denies.
+
+```bash
+printf '%s\n' '{"tool_name":"bash","tool_input":{"command":"ls"}}' | SNAPIF_BACKEND=fake snapif hook --shadow
+```
+
+Stderr prints `escalate`. Stdout still allows:
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"escalate"}}
+```
+
+Drop `--shadow` and stdout denies. The process still exits 0.
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate"}}
+```
+
+Watch with `--shadow` while you read the verdicts. Remove it when a deny should stop the tool.
+
+### The host still decides
+
+[examples/pre_tool_use.rs](examples/pre_tool_use.rs) scores `list_files` with `FakeBackend` and prints `auto`. `Review` and `Escalate` exit 1 in this example because the example stops. A host can show a person, or refuse, instead.
+
+```rust
+use serde_json::json;
+use snapif::backends::fake::FakeBackend;
+use snapif::ids::ActionId;
+use snapif::policy::Policy;
+use snapif::state::{PreparedCall, State};
+use snapif::{Client, GateRequest, Verdict};
+
+fn main() {
+    let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
+    for id in snapif::backends::cascade::battery_ids() {
+        if id.0 == "harm_class" {
+            continue;
+        }
+        backend = backend.on_noul(&id.0, 0.0);
+    }
+    let client = Client::new(backend).policy(Policy::shipped("tool-gate").expect("policy"));
+    let verdict = pollster::block_on(client.gate(GateRequest {
+        action_id: ActionId::new("tag"),
+        prepared: PreparedCall {
+            name: "list_files".to_string(),
+            args: json!({}),
+        },
+        state: State {
+            trusted: json!({"user_request": "list the workspace"}),
+            untrusted: json!(null),
+        },
+        extra_questions: vec![],
+    }))
+    .expect("gate");
+    match verdict {
+        Verdict::Auto(_) => println!("auto"),
+        Verdict::Review(_) => {
+            eprintln!("review");
+            std::process::exit(1);
+        }
+        Verdict::Escalate(_) => {
+            eprintln!("escalate");
+            std::process::exit(1);
+        }
+    }
+}
+```
+
+`Verdict::Auto` means this policy has no objection. The host still chooses whether the tool runs.
+
+```bash
+cargo run --example pre_tool_use
+```
+
 ## Commands
 
 | Command | What it does |
