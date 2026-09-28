@@ -1927,3 +1927,22 @@ fn calibrate_empty_file_names_the_path() {
     let _ = fs::remove_file(&path);
     let _ = fs::remove_file(&labeled);
 }
+
+#[test]
+fn calibrate_empty_directory_is_not_an_io_error() {
+    let path = std::env::temp_dir().join(format!("snapif-cal-dir-{}", std::process::id()));
+    fs::create_dir(&path).expect("dir");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert_eq!(
+        err.trim(),
+        format!("{}: no calibration rows", path.display())
+    );
+    let _ = fs::remove_dir(&path);
+}
