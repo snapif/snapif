@@ -45,9 +45,19 @@ home="$(printf '%s' "$repo_json" | python3 -c 'import json,sys; print(json.load(
 topics="$(printf '%s' "$repo_json" | python3 -c 'import json,sys; t=json.load(sys.stdin).get("repositoryTopics") or []; print(",".join(x.get("name","") if isinstance(x,dict) else str(x) for x in t))')"
 private="$(printf '%s' "$repo_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("isPrivate"))')"
 
-check_empty "description" "$desc"
 check_empty "homepage" "$home"
-check_empty "topics" "$topics"
+if [[ -z "$desc" ]]; then
+  echo "FAIL: description is empty"
+  leaks=$((leaks + 1))
+else
+  echo "OK: description is set"
+fi
+if [[ -z "$topics" ]]; then
+  echo "FAIL: topics are empty"
+  leaks=$((leaks + 1))
+else
+  echo "OK: topics are set"
+fi
 
 if [[ "$private" == "True" || "$private" == "true" ]]; then
   echo "FAIL: repo is private (no free public Actions)"
@@ -138,10 +148,10 @@ fi
 
 if [[ "$leaks" -gt 0 ]]; then
   echo "DONE: ok=false leaks=$leaks"
-  echo "NEXT: clear the FAIL fields; do not add topics, badges, or FUNDING"
+  echo "NEXT: clear the FAIL fields; do not add a homepage or FUNDING"
   exit 1
 fi
 
 echo "DONE: ok=true leaks=0"
-echo "NEXT: keep About, topics, and FUNDING empty"
+echo "NEXT: keep homepage and FUNDING empty"
 exit 0

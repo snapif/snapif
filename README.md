@@ -57,6 +57,8 @@ This run uses a scripted fake scorer and prints `auto`:
 cargo run --example pre_tool_use
 ```
 
+The other example is in [examples/README.md](examples/README.md).
+
 ## Live score
 
 - `SNAPIF_BACKEND` is `typesafe` or `compatible`.

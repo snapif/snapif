@@ -55,7 +55,7 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertNotIn("tool: gitleaks@", text)
         self.assertIn("gitleaks_8.30.1_linux_x64.tar.gz", text)
 
-    def test_public_scanners_stay_commented(self) -> None:
+    def test_public_scanners_are_live(self) -> None:
         text = (WORKFLOWS / "security.yml").read_text(encoding="utf-8")
         live = "\n".join(
             line for line in text.splitlines() if not line.lstrip().startswith("#")
@@ -67,10 +67,11 @@ class WorkflowTriggerTests(unittest.TestCase):
             "fossa-action",
             "FOSSA_API_KEY",
         ):
-            self.assertNotIn(needle, live)
-            self.assertIn(needle, text)
-        self.assertNotIn("pull_request:", _on_block(text))
-        self.assertNotIn("push:", _on_block(text))
+            self.assertIn(needle, live)
+        on_block = _on_block(text)
+        self.assertIn("pull_request:", on_block)
+        self.assertIn("workflow_dispatch:", on_block)
+        self.assertNotIn("push:", on_block)
 
     def test_release_please_runs_on_main_and_does_not_test(self) -> None:
         text = (WORKFLOWS / "release-please.yml").read_text(encoding="utf-8")
