@@ -1,0 +1,77 @@
+name: Release Please after merge
+
+on: # zizmor: ignore[dangerous-triggers] reads the CI run id only; does not checkout the pull request
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-please-after-merge-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch Release Please
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - name: Start Release Please after an Actions merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          pr=$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '.pull_requests[0].number // empty')
+          if [ -z "$pr" ]; then
+            echo "CI run has no pull request"
+            exit 0
+          fi
+          head=$(gh pr view "$pr" --repo "$REPO" --json headRefName --jq .headRefName)
+          case "$head" in
+            release-please*)
+              echo "release pull request ${pr} stays for a person to merge"
+              exit 0
+              ;;
+          esac
+          for _ in $(seq 1 30); do
+            state=$(gh pr view "$pr" --repo "$REPO" --json state,autoMergeRequest,mergedBy \
+              --jq '[.state, (.autoMergeRequest != null), (.mergedBy.login // "")] | @tsv')
+            merged=${state%%$'\t'*}
+            rest=${state#*$'\t'}
+            auto=${rest%%$'\t'*}
+            who=${rest#*$'\t'}
+            if [ "$merged" = "MERGED" ]; then
+              case "$who" in
+                github-actions\[bot\]|app/github-actions)
+                  gh workflow run "Release Please" --ref main --repo "$REPO"
+                  echo "started Release Please after Actions merged ${pr}"
+                  exit 0
+                  ;;
+                *)
+                  echo "merged by ${who}; the push starts Release Please"
+                  exit 0
+                  ;;
+              esac
+            fi
+            if [ "$auto" != "true" ]; then
+              echo "pull request ${pr} is not waiting on auto-merge"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "auto-merge for ${pr} did not finish" >&2
+          exit 1
