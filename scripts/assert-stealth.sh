@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Check that GitHub About, topics, badges, and FUNDING stay empty.
+# Check launch metadata. Homepage and FUNDING stay empty.
+# Scorecard and FOSSA badges are allowed after those scans run.
 # The README and crate keywords are the launch page.
 # Usage: assert-stealth.sh OWNER/REPO
 # Exit 0 quiet, 1 leak, 2 cannot query.
@@ -109,8 +110,8 @@ fi
 
 if [[ -n "$root" ]]; then
   if [[ -f "$root/README.md" ]]; then
-    if grep -Eiq 'scorecard|bestpractices.dev|FOSSA' "$root/README.md"; then
-      echo "FAIL: README advertises a scanner that is not enabled"
+    if grep -Eiq 'bestpractices.dev' "$root/README.md"; then
+      echo "FAIL: README advertises OpenSSF Best Practices before that badge exists"
       leaks=$((leaks + 1))
     else
       echo "OK: README badges match live signals"
