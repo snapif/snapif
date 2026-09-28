@@ -6,7 +6,7 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "Snapif scores one tool call and returns Auto, Review, or Escalate."
 repository = "https://github.com/snapif/snapif"
-keywords = ["cli", "gate", "confidence", "tools"]
+keywords = ["cli", "jev", "typesafe", "agent", "hook"]
 categories = ["command-line-utilities", "development-tools"]
 publish = true
 
