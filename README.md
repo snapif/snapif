@@ -1,5 +1,12 @@
 # Snapif
 
+[![Snapif](docs/brand/readme-banner.svg)](https://github.com/snapif/snapif)
+
+[![CI](https://github.com/snapif/snapif/actions/workflows/ci.yml/badge.svg?event=pull_request)](https://github.com/snapif/snapif/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/snapif?logo=rust)](https://crates.io/crates/snapif)
+[![docs.rs](https://img.shields.io/docsrs/snapif?logo=docs.rs)](https://docs.rs/snapif)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](./LICENSE)
+
 Snapif scores one tool call. The score is Auto, Review, or Escalate.
 
 ## Getting started

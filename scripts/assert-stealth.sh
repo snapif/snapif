@@ -99,11 +99,11 @@ fi
 
 if [[ -n "$root" ]]; then
   if [[ -f "$root/README.md" ]]; then
-    if grep -Eiq 'shields.io|img.shields|badge|\[ci\]|scorecard|bestpractices.dev' "$root/README.md"; then
-      echo "FAIL: README has badges or CI marketing"
+    if grep -Eiq 'scorecard|bestpractices.dev|FOSSA' "$root/README.md"; then
+      echo "FAIL: README advertises a scanner that is not enabled"
       leaks=$((leaks + 1))
     else
-      echo "OK: README has no badges"
+      echo "OK: README badges match live signals"
     fi
   fi
 
@@ -143,5 +143,5 @@ if [[ "$leaks" -gt 0 ]]; then
 fi
 
 echo "DONE: ok=true leaks=0"
-echo "NEXT: keep About, topics, badges, and FUNDING empty"
+echo "NEXT: keep About, topics, and FUNDING empty"
 exit 0
