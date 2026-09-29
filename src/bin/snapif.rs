@@ -28,7 +28,7 @@ enum Command {
     ///
     /// An optional `script` object on the call file is used only when `SNAPIF_BACKEND=fake`.
     ///
-    /// `SNAPIF_LOG` appends one replay row per gate. `SNAPIF_CACHE` is an integer capacity; unset leaves the cache off.
+    /// `SNAPIF_LOG` appends one replay row per gate. `SNAPIF_CACHE` is an integer capacity for a process that evaluates more than one call. One `snapif gate` or `snapif hook` invocation builds an empty cache and does not reuse it. Unset leaves the cache off.
     Gate {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
