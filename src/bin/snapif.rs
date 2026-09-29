@@ -72,7 +72,7 @@ enum Command {
     },
     /// Score labeled rows. Prints Brier for nouls and accuracy for choices.
     Calibrate {
-        /// A JSONL file, or a directory of `.json` and `.jsonl` files.
+        /// A `.json` or `.jsonl` file, or a directory of those files.
         path: PathBuf,
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]

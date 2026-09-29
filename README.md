@@ -189,7 +189,13 @@ snapif explain --action git.push
 
 `calibrate` reads a JSON or JSONL file, or a directory of those files. Each row needs `trusted`, `untrusted`, and `labels`. A label key must be a question that policy asks. A boolean label is a yes/no. A string label is the expected choice.
 
-`test` checks the files in a directory. This repo keeps samples in `tests/conformance`. With the `http` feature, `--base-url` posts each valid vector.
+`test` checks the files in a directory. The sample directory in this repo is `tests/conformance`:
+
+```bash
+snapif test --vectors tests/conformance
+```
+
+With the `http` feature, `--base-url` posts each valid vector.
 
 `replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`.
 
