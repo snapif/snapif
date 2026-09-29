@@ -97,6 +97,9 @@ enum Command {
         /// Score each row and still compare `expected`.
         #[arg(long)]
         shadow: bool,
+        /// Print auto, review, and escalate counts per action on stderr. Stdout stays one JSON object per row.
+        #[arg(long)]
+        summary: bool,
     },
 }
 
@@ -126,7 +129,8 @@ fn main() -> ExitCode {
             path,
             policy,
             shadow,
-        } => ExitCode::from(replay_cmd(&path, policy.as_deref(), shadow)),
+            summary,
+        } => ExitCode::from(replay_cmd(&path, policy.as_deref(), shadow, summary)),
     }
 }
 
@@ -449,7 +453,7 @@ fn finish_checked(count: usize, what: &str) -> u8 {
     0
 }
 
-fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool) -> u8 {
+fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool) -> u8 {
     let policy = match load_policy(policy) {
         Ok(policy) => policy,
         Err(err) => {
@@ -470,6 +474,10 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool) -> u8 {
     };
     let mut checked = 0usize;
     let mut failed = false;
+    let mut counts: std::collections::BTreeMap<(String, String), [usize; 3]> =
+        std::collections::BTreeMap::new();
+    let mut reason_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     for (line_no, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
@@ -543,6 +551,39 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool) -> u8 {
         );
         if !got.eq_ignore_ascii_case(&row.expected) {
             failed = true;
+        }
+        if summary {
+            let slot = counts
+                .entry((row.gate_request.action_id.clone(), row.policy.clone()))
+                .or_insert([0, 0, 0]);
+            match got {
+                "auto" => slot[0] += 1,
+                "review" => slot[1] += 1,
+                _ => slot[2] += 1,
+            }
+            for reason in &row.reasons {
+                *reason_counts.entry(reason.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    if summary {
+        for ((action, pack), slot) in &counts {
+            if pack.is_empty() {
+                eprintln!(
+                    "{action} auto {} review {} escalate {}",
+                    slot[0], slot[1], slot[2]
+                );
+            } else {
+                eprintln!(
+                    "{action} {pack} auto {} review {} escalate {}",
+                    slot[0], slot[1], slot[2]
+                );
+            }
+        }
+        let mut reasons: Vec<_> = reason_counts.into_iter().collect();
+        reasons.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        for (tag, count) in reasons.into_iter().take(5) {
+            eprintln!("reason {tag} {count}");
         }
     }
     if checked == 0 {
@@ -1407,6 +1448,10 @@ struct ReplayRow {
     gate_request: ReplayRequest,
     script: ReplayScript,
     expected: String,
+    #[serde(default)]
+    reasons: Vec<String>,
+    #[serde(default)]
+    policy: String,
 }
 
 #[derive(Debug, Deserialize)]
