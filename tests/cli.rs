@@ -2204,3 +2204,43 @@ block_on = [
     assert!(closed_out.contains("\"got\":\"escalate\""), "{closed_out}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn replay_summary_counts_actions_and_logged_reasons() {
+    let dir = std::env::temp_dir().join(format!("snapif-summary-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let row = dir.join("rows.jsonl");
+    fs::write(
+        &row,
+        concat!(
+            r#"{"id":"tag-auto","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"read","confidence":0.85},"expected":"Auto","reasons":["review_floor"],"policy":"tool-gate"}"#,
+            "\n",
+            r#"{"id":"bash-hold","gate_request":{"action_id":"bash.rm","prepared":{"name":"bash.rm","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"exec","confidence":1.0,"nouls":{"destructive":0.95}},"expected":"Escalate","reasons":["below_floor","authority_claim"],"policy":"tool-gate"}"#,
+            "\n",
+        ),
+    )
+    .expect("write");
+    let scored = bin()
+        .args(["replay", "--summary"])
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let stdout = String::from_utf8_lossy(&scored.stdout);
+    let stderr = String::from_utf8_lossy(&scored.stderr);
+    assert_eq!(scored.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(stdout.contains("\"id\":\"tag-auto\""), "{stdout}");
+    assert!(stdout.contains("\"got\":\"escalate\""), "{stdout}");
+    assert!(
+        stderr.contains("tag tool-gate auto 1 review 0 escalate 0"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("bash.rm tool-gate auto 0 review 0 escalate 1"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("reason authority_claim 1"), "{stderr}");
+    assert!(stderr.contains("reason below_floor 1"), "{stderr}");
+    assert!(stderr.contains("reason review_floor 1"), "{stderr}");
+    let _ = fs::remove_dir_all(dir);
+}

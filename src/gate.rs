@@ -479,6 +479,24 @@ fn gate_cache_key<B: Backend>(
     Some(hasher.finish())
 }
 
+fn reason_tag(reason: &crate::verdict::UnsureReason) -> &'static str {
+    use crate::verdict::UnsureReason;
+    match reason {
+        UnsureReason::BelowFloor { .. } => "below_floor",
+        UnsureReason::BelowAuto { .. } => "below_auto",
+        UnsureReason::ReviewFloor { .. } => "review_floor",
+        UnsureReason::NoulBand { .. } => "noul_band",
+        UnsureReason::Battery { .. } => "battery",
+        UnsureReason::AuthorityClaim { .. } => "authority_claim",
+        UnsureReason::Decode(_) => "decode",
+        UnsureReason::Wire => "wire",
+        UnsureReason::Backend { .. } => "backend",
+        UnsureReason::CascadeStillUnsure => "cascade_still_unsure",
+        UnsureReason::HarmClassBump { .. } => "harm_class_bump",
+        UnsureReason::Truncated => "truncated",
+    }
+}
+
 fn verdict_word(verdict: &Verdict) -> &'static str {
     match verdict {
         Verdict::Auto(_) => "auto",
@@ -510,6 +528,7 @@ fn append_gate_log(
         extras.insert(id, value);
     }
     let word = verdict_word(verdict);
+    let reasons: Vec<&str> = hint.reasons.iter().map(reason_tag).collect();
     let confidence = match hint.facts.signal {
         Some(signal) => signal,
         None if word == "review"
@@ -540,6 +559,8 @@ fn append_gate_log(
             "timeout": hint.facts.signal.is_none() && word == "escalate",
         },
         "expected": word,
+        "reasons": reasons,
+        "policy": hint.pack,
     });
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1344,6 +1365,8 @@ mod tests {
         assert!(matches!(verdict, crate::verdict::Verdict::Auto(_)));
         let text = std::fs::read_to_string(&path).expect("log");
         assert!(text.contains("\"expected\":\"auto\""));
+        assert!(text.contains("\"policy\":\"tool-gate\""), "{text}");
+        assert!(text.contains("\"reasons\":"), "{text}");
         assert!(!text.contains("secret-value"));
         assert!(!text.contains("hidden"));
         let _ = std::fs::remove_file(&path);

@@ -197,7 +197,7 @@ snapif test --vectors tests/conformance
 
 With the `http` feature, `--base-url` posts each valid vector.
 
-`replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`.
+`replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. A `SNAPIF_LOG` row records those reasons and the policy id.
 
 ## Call JSON
 
