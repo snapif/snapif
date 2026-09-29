@@ -210,7 +210,7 @@ With the `http` feature, `--base-url` posts each valid vector.
 | `args` | The tool arguments. |
 | `trusted` | Text the host wrote, such as `user_request`. |
 | `untrusted` | Text from outside the host. `null` when there is none. |
-| `script` | Only for `SNAPIF_BACKEND=fake`. Sets `harm` and `confidence`. |
+| `script` | Only for `SNAPIF_BACKEND=fake`. Sets `harm` and `confidence`. A one-label choice keeps probability 1.0, so `top_prob` and `margin` stay 1.0. With more labels, the chosen label's probability is `confidence` and the others share the rest. |
 
 `prepared` is `{ "name", "args" }`. `state` is `{ "trusted", "untrusted" }`.
 
