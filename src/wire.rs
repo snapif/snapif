@@ -186,6 +186,19 @@ fn unit_confidence(key: &str, confidence: f64) -> Result<(), DecodeError> {
     }
 }
 
+fn probability_values(key: &str, probabilities: &IndexMap<String, f64>) -> Result<(), DecodeError> {
+    if probabilities
+        .values()
+        .all(|value| value.is_finite() && *value >= 0.0)
+    {
+        Ok(())
+    } else {
+        Err(DecodeError::OutOfRange {
+            key: QuestionId::new(key),
+        })
+    }
+}
+
 pub fn check_response(
     questions: &IndexMap<String, WireQuestion>,
     response: &WireResponse,
@@ -200,7 +213,9 @@ pub fn check_response(
             (
                 WireQuestion::Choice { criteria, .. },
                 WireAnswer::Choice {
-                    choice, confidence, ..
+                    choice,
+                    probabilities,
+                    confidence,
                 },
             ) => {
                 if !criteria.contains_key(choice) {
@@ -210,6 +225,7 @@ pub fn check_response(
                     });
                 }
                 unit_confidence(key, *confidence)?;
+                probability_values(key, probabilities)?;
             }
             (WireQuestion::Noul { .. }, WireAnswer::Noul { noul }) => {
                 if !(0.0..=1.0).contains(noul) {
@@ -221,7 +237,10 @@ pub fn check_response(
             (
                 WireQuestion::Score { criteria, .. },
                 WireAnswer::Score {
-                    score, confidence, ..
+                    score,
+                    probabilities,
+                    confidence,
+                    ..
                 },
             ) => {
                 let max = (criteria.len() as f64) - 1.0;
@@ -231,6 +250,7 @@ pub fn check_response(
                     });
                 }
                 unit_confidence(key, *confidence)?;
+                probability_values(key, probabilities)?;
             }
             _ => {
                 return Err(DecodeError::TypeMismatch {

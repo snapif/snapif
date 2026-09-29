@@ -263,6 +263,22 @@ fn check_response_ranges() {
 }
 
 #[test]
+fn negative_probability_is_out_of_range() {
+    let request = decode_request(DEPARTMENT.as_bytes()).unwrap();
+    let response = decode_response(
+        br#"{"model":"m","answers":{"department":{"type":"choice","choice":"billing","probabilities":{"billing":-0.2,"technical":1.2},"confidence":0.5}},"usage":{"input_tokens":0,"output_tokens":0}}"#,
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            check_response(&request.questions, &response),
+            Err(snapif::error::DecodeError::OutOfRange { key }) if key == QuestionId::new("department")
+        ),
+        "{response:?}"
+    );
+}
+
+#[test]
 fn renormalize_returns_original_sum() {
     let mut probabilities = IndexMap::new();
     probabilities.insert("a".to_string(), 0.2);
