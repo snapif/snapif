@@ -263,7 +263,7 @@ fn ask_cmd(path: &PathBuf, policy: Option<&str>, decisions: bool) -> u8 {
         Ok(value) => value,
         Err(err) => {
             eprintln!("{err}");
-            return 1;
+            return ask_code(&err);
         }
     };
     let pack = client.battery_id();

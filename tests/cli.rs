@@ -124,6 +124,32 @@ fn ask_array_is_not_ok() {
     assert!(err.contains("state must be an object"), "{err}");
 }
 
+#[test]
+fn ask_invalid_json_exits_2_and_missing_file_exits_1() {
+    let path = std::env::temp_dir().join(format!("snapif-ask-badjson-{}.json", std::process::id()));
+    fs::write(&path, "not-json").expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("invalid json"), "{err}");
+    let missing =
+        std::env::temp_dir().join(format!("snapif-ask-missing-{}.json", std::process::id()));
+    let gone = bin()
+        .args(["ask", "--state"])
+        .arg(&missing)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let gone_err = String::from_utf8_lossy(&gone.stderr);
+    assert_eq!(gone.status.code(), Some(1), "{gone_err}");
+}
+
 #[cfg(feature = "http")]
 #[test]
 fn origin_userinfo_is_not_a_threshold() {
