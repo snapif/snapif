@@ -75,6 +75,9 @@ enum Command {
         /// Print the verdict on stderr and allow the tool.
         #[arg(long)]
         shadow: bool,
+        /// Print a Claude Code PreToolUse block and do not read stdin.
+        #[arg(long)]
+        print_settings: bool,
     },
     /// Score labeled rows. Prints Brier for nouls and accuracy for choices.
     Calibrate {
@@ -130,7 +133,11 @@ fn main() -> ExitCode {
             command,
             policy,
         } => ExitCode::from(explain_cmd(&action, command.as_deref(), policy.as_deref())),
-        Command::Hook { policy, shadow } => ExitCode::from(hook_cmd(policy.as_deref(), shadow)),
+        Command::Hook {
+            policy,
+            shadow,
+            print_settings,
+        } => ExitCode::from(hook_cmd(policy.as_deref(), shadow, print_settings)),
         Command::Calibrate { path, policy, gate } => {
             ExitCode::from(calibrate_cmd(&path, policy.as_deref(), gate))
         }
@@ -894,7 +901,30 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
     0
 }
 
-fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
+fn hook_settings_block() -> String {
+    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let log = dir.join("snapif-hook.jsonl");
+    let quoted = log.display().to_string().replace('\'', "'\\''");
+    let command = format!("SNAPIF_LOG='{quoted}' snapif hook --shadow");
+    serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": command
+                }]
+            }]
+        }
+    }))
+    .unwrap_or(command)
+}
+
+fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
+    if print_settings {
+        println!("{}", hook_settings_block());
+        return 0;
+    }
     use std::io::Read;
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
