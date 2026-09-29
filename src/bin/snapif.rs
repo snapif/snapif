@@ -1417,11 +1417,14 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 missed += 1;
             }
         }
-        let via_guess = !hint.reasons.is_empty();
+        let harm_guess = match hint.facts.signal {
+            Some(signal) => signal < hint.facts.escalate_below,
+            None => true,
+        };
         for (id, label) in &row.labels {
             if id == "harm_class" && label.is_string() {
                 let guess = hint.guess.as_deref().unwrap_or("");
-                card.add_choice_compared(label.as_str() == Some(guess), via_guess);
+                card.add_choice_compared(label.as_str() == Some(guess), harm_guess);
                 continue;
             }
             let Some(score) = hint.facts.scores.get(id) else {

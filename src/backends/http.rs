@@ -224,7 +224,7 @@ fn host_line(text: &str) -> String {
 fn safe_location(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
         let cut = raw.split(['?', '#']).next().unwrap_or(raw);
-        return host_line(&strip_protocol_relative_userinfo(cut));
+        return host_line(&strip_userinfo(cut));
     };
     let _ = url.set_username("");
     let _ = url.set_password(None);
@@ -233,8 +233,14 @@ fn safe_location(raw: &str) -> String {
     host_line(url.as_str())
 }
 
-fn strip_protocol_relative_userinfo(cut: &str) -> String {
-    let Some(rest) = cut.strip_prefix("//") else {
+/// Drop `user:password@` from an authority `Url::parse` rejected.
+/// `//user:pw@host/path` becomes `//host/path`. An empty host keeps the path.
+fn strip_userinfo(cut: &str) -> String {
+    let (prefix, rest) = if let Some(rest) = cut.strip_prefix("//") {
+        ("//", rest)
+    } else if let Some(index) = scheme_slashes(cut) {
+        (&cut[..index], &cut[index..])
+    } else {
         return cut.to_string();
     };
     let split = rest.find('/').unwrap_or(rest.len());
@@ -246,7 +252,20 @@ fn strip_protocol_relative_userinfo(cut: &str) -> String {
     if host.is_empty() {
         return rest[split..].to_string();
     }
-    format!("//{host}{}", &rest[split..])
+    format!("{prefix}{host}{}", &rest[split..])
+}
+
+fn scheme_slashes(cut: &str) -> Option<usize> {
+    let index = cut.find("://")?;
+    let scheme = &cut[..index];
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
+    {
+        return None;
+    }
+    Some(index + 3)
 }
 
 fn status_error(status: u16, body: &[u8]) -> BackendError {
@@ -511,5 +530,25 @@ mod tests {
 
     fn url(text: &str) -> Url {
         Url::parse(text).expect("url")
+    }
+
+    #[test]
+    fn unparsed_absolute_location_drops_userinfo() {
+        let spaced = safe_location("https://user:secret@exa mple.com/path?access_token=secret");
+        assert!(spaced.contains("exa mple.com"), "{spaced}");
+        assert!(!spaced.contains("secret"), "{spaced}");
+        assert!(!spaced.contains("user:"), "{spaced}");
+        let port = safe_location("https://user:secret@host:99999/path?access_token=secret");
+        assert!(port.contains("host:99999"), "{port}");
+        assert!(!port.contains("secret"), "{port}");
+        assert!(!port.contains('@'), "{port}");
+        let relative = safe_location("//user:pw@example.test/path?access_token=secret");
+        assert!(relative.contains("example.test/path"), "{relative}");
+        assert!(!relative.contains("user:pw"), "{relative}");
+        assert!(!relative.contains('@'), "{relative}");
+        assert_eq!(
+            safe_location("//user:pw@/path?access_token=secret"),
+            "/path"
+        );
     }
 }

@@ -344,9 +344,15 @@ fn check_action(
     Ok(())
 }
 
-/// Exact action id wins. Otherwise the first action whose `tool` matches
-/// `tool_name` and whose non-empty `prefixes` match `command`. An empty
+/// Exact action id wins. Otherwise the first simple command whose `tool`
+/// matches `tool_name` and whose non-empty `prefixes` match. An empty
 /// prefix list does not match, so that row cannot replace `default_action`.
+///
+/// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `FOO=1 rm`, `env rm`,
+/// `cd x && rm`, and `bash -c 'rm ...'`. `git push` matches `git push`,
+/// `git\tpush`, `/usr/bin/git push`, and `git -C repo push`.
+/// A later command does not replace an earlier hit: `git push && rm` stays
+/// `git.push`. `rmdir`, `git push-all`, `echo rm`, and `find -delete` do not match.
 pub fn matched_action<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -360,57 +366,311 @@ pub fn matched_action<'a>(
         return Some(id);
     }
     let command = command.unwrap_or("").trim_start();
-    for (id, row) in &policy.actions {
-        let Some(tool) = row.tool.as_deref() else {
-            continue;
-        };
-        if !tool.eq_ignore_ascii_case(tool_name) {
+    matched_in(policy, tool_name, command, 0)
+}
+
+const MAX_SHELL_DEPTH: u32 = 8;
+
+fn matched_in<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    command: &str,
+    depth: u32,
+) -> Option<&'a ActionId> {
+    if depth > MAX_SHELL_DEPTH {
+        return None;
+    }
+    for segment in tokenize_segments(command) {
+        let argv = skip_wrappers(&segment);
+        if let Some(script) = shell_script(&argv) {
+            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+                return Some(id);
+            }
             continue;
         }
-        let hit = row
-            .prefixes
-            .iter()
-            .any(|prefix| prefix_matches(command, prefix));
-        if hit {
-            return Some(id);
+        for (id, row) in &policy.actions {
+            let Some(tool) = row.tool.as_deref() else {
+                continue;
+            };
+            if !tool.eq_ignore_ascii_case(tool_name) {
+                continue;
+            }
+            let hit = row.prefixes.iter().any(|prefix| {
+                let words: Vec<String> = prefix.split_whitespace().map(str::to_string).collect();
+                !words.is_empty() && argv_matches(&argv, &words)
+            });
+            if hit {
+                return Some(id);
+            }
         }
     }
     None
 }
 
-/// `rm ` matches `rm`, `/bin/rm -rf`, and `RM`. `git push` matches
-/// `git push origin` and `git\tpush origin`. It does not match `git push-all`.
-fn prefix_matches(command: &str, prefix: &str) -> bool {
-    let command = command_words(command);
-    let prefix = command_words(prefix);
-    if prefix.is_empty() {
+fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
+    if argv.is_empty() || prefix.is_empty() {
         return false;
     }
-    if command.eq_ignore_ascii_case(&prefix) {
+    if !same_word(command_basename(&argv[0]), command_basename(&prefix[0])) {
+        return false;
+    }
+    if prefix.len() == 1 {
         return true;
     }
-    let command = command.to_ascii_lowercase();
-    let prefix = prefix.to_ascii_lowercase();
-    command.starts_with(&prefix)
-        && command[prefix.len()..].starts_with(|ch: char| ch.is_whitespace())
+    let mut index = 1;
+    for word in &prefix[1..] {
+        index = skip_options(argv, index);
+        if index >= argv.len() || !same_word(&argv[index], word) {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
-/// First token's file name, then the remaining words separated by one space.
-fn command_words(text: &str) -> String {
-    let mut words = text.split_whitespace();
-    let Some(first) = words.next() else {
-        return String::new();
+fn skip_wrappers(tokens: &[String]) -> Vec<String> {
+    let mut index = 0;
+    while index < tokens.len() {
+        if is_assignment(&tokens[index]) {
+            index += 1;
+            continue;
+        }
+        let base = command_basename(&tokens[index]).to_ascii_lowercase();
+        if !is_wrapper(&base) {
+            break;
+        }
+        index += 1;
+        index = skip_wrapper_flags(&base, tokens, index);
+    }
+    tokens[index..].to_vec()
+}
+
+fn skip_wrapper_flags(wrapper: &str, tokens: &[String], mut index: usize) -> usize {
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if is_assignment(token) {
+            index += 1;
+            continue;
+        }
+        if token == "--" {
+            return index + 1;
+        }
+        if !token.starts_with('-') {
+            break;
+        }
+        let takes_value = !token.contains('=') && flag_takes_value(wrapper, token);
+        index += 1;
+        if takes_value && index < tokens.len() {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn skip_options(argv: &[String], mut index: usize) -> usize {
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            return index + 1;
+        }
+        if !token.starts_with('-') {
+            return index;
+        }
+        let takes_value = !token.contains('=') && option_takes_value(token);
+        index += 1;
+        if takes_value && index < argv.len() {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn is_wrapper(name: &str) -> bool {
+    const WRAPPERS: &[&str] = &[
+        "sudo", "doas", "pkexec", "env", "command", "nice", "nohup", "time", "busybox", "ionice",
+        "stdbuf", "setsid",
+    ];
+    WRAPPERS
+        .iter()
+        .any(|wrapper| name.eq_ignore_ascii_case(wrapper))
+}
+
+fn flag_takes_value(wrapper: &str, flag: &str) -> bool {
+    let name = flag.strip_prefix("--").unwrap_or(flag);
+    match wrapper {
+        "sudo" | "doas" => matches!(
+            name,
+            "-u" | "-g"
+                | "-h"
+                | "-p"
+                | "-C"
+                | "-T"
+                | "-R"
+                | "-D"
+                | "-U"
+                | "-a"
+                | "user"
+                | "group"
+                | "host"
+                | "prompt"
+                | "chdir"
+                | "role"
+                | "type"
+                | "command-timeout"
+                | "close-from"
+        ),
+        "env" => matches!(
+            name,
+            "-u" | "-S" | "-C" | "unset" | "chdir" | "split-string" | "argv0"
+        ),
+        "nice" | "ionice" => matches!(name, "-n" | "-c" | "-p" | "adjustment"),
+        "time" => matches!(name, "-f" | "-o" | "format" | "output"),
+        "stdbuf" => matches!(name, "-i" | "-o" | "-e" | "input" | "output" | "error"),
+        "pkexec" => name == "user",
+        _ => false,
+    }
+}
+
+fn option_takes_value(flag: &str) -> bool {
+    let name = flag.strip_prefix("--").unwrap_or(flag);
+    matches!(
+        name,
+        "-C" | "-c"
+            | "git-dir"
+            | "work-tree"
+            | "namespace"
+            | "super-prefix"
+            | "config-env"
+            | "exec-path"
+    )
+}
+
+fn shell_script(tokens: &[String]) -> Option<String> {
+    let base = command_basename(tokens.first()?);
+    const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "fish"];
+    if !SHELLS.iter().any(|shell| base.eq_ignore_ascii_case(shell)) {
+        return None;
+    }
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = &tokens[index];
+        if token == "--" {
+            return None;
+        }
+        if let Some(script) = c_argument(token, tokens.get(index + 1)) {
+            return Some(script);
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
+    if token == "-c" || token == "--command" {
+        return next.cloned();
+    }
+    let flags = token.strip_prefix('-')?;
+    if flags.is_empty() || flags.starts_with('-') || !flags.contains('c') {
+        return None;
+    }
+    let rest = flags.split_once('c')?.1;
+    if rest.is_empty() {
+        next.cloned()
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+fn is_assignment(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
     };
-    let base = first
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    for ch in chars {
+        if ch == '=' {
+            return true;
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '_') {
+            return false;
+        }
+    }
+    false
+}
+
+fn command_basename(token: &str) -> &str {
+    token
         .rsplit(['/', '\\'])
         .find(|part| !part.is_empty())
-        .unwrap_or(first);
-    let mut out = String::from(base);
-    for word in words {
-        out.push(' ');
-        out.push_str(word);
+        .unwrap_or(token)
+}
+
+fn same_word(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
+}
+
+fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
+    let mut segments = Vec::new();
+    let mut current = Vec::new();
+    let mut token = String::new();
+    let mut chars = command.chars().peekable();
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        if let Some(open) = quote {
+            if ch == open {
+                quote = None;
+                continue;
+            }
+            if open == '"' && ch == '\\' {
+                if let Some(next) = chars.next() {
+                    token.push(next);
+                }
+                continue;
+            }
+            token.push(ch);
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '\\' => {
+                if let Some(next) = chars.next()
+                    && next != '\n'
+                {
+                    token.push(next);
+                }
+            }
+            ' ' | '\t' | '\r' => push_token(&mut token, &mut current),
+            '\n' | '&' | '|' | ';' => {
+                if matches!(ch, '&' | '|') && chars.peek() == Some(&ch) {
+                    chars.next();
+                }
+                push_token(&mut token, &mut current);
+                push_segment(&mut current, &mut segments);
+            }
+            _ => token.push(ch),
+        }
     }
-    out
+    push_token(&mut token, &mut current);
+    push_segment(&mut current, &mut segments);
+    segments
+}
+
+fn push_token(token: &mut String, current: &mut Vec<String>) {
+    if !token.is_empty() {
+        current.push(std::mem::take(token));
+    }
+}
+
+fn push_segment(current: &mut Vec<String>, segments: &mut Vec<Vec<String>>) {
+    if !current.is_empty() {
+        segments.push(std::mem::take(current));
+    }
 }
 
 pub fn effective_gates(
@@ -585,5 +845,67 @@ mod tests {
                 .as_str(),
             "git.push"
         );
+    }
+
+    #[test]
+    fn bash_prefixes_match_wrappers_separators_and_git_options() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "sudo rm -rf /",
+            "sudo -n rm -rf /",
+            "sudo -u root rm -rf /",
+            "sudo -- rm -rf /",
+            "cd x && rm -rf ~",
+            "FOO=1 rm -rf /",
+            "env rm -rf /",
+            "env FOO=1 rm -rf /",
+            "bash -c 'rm -rf /'",
+            "bash -lc \"rm -rf /tmp\"",
+            "sudo bash -c 'rm -rf /'",
+            "rm -rf / && git push",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command}"
+            );
+        }
+        let push = [
+            "git -C repo push",
+            "git -C repo push origin",
+            "sudo git push",
+            "cd repo && git push",
+            "git\t-C\trepo\tpush",
+            "/usr/bin/git --no-pager push",
+            "git --git-dir=/repo push",
+            "git push && rm -rf /",
+            "cd x && git push && rm -rf /",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command}"
+            );
+        }
+        let neither = [
+            "rmdir /tmp",
+            "git push-all",
+            "echo rm -rf /",
+            "echo 'rm -rf /'",
+            "bash -c 'echo rm'",
+            "find . -delete",
+            "git status",
+            "git -C repo status",
+            "git -C push status",
+            "ls",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command}"
+            );
+        }
     }
 }

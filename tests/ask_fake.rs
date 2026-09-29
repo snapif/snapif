@@ -26,6 +26,16 @@ snapif::score! {
     }
 }
 
+snapif::score! {
+    enum Severity {
+        None = "none",
+        Low = "low",
+        Mid = "mid",
+        High = "high",
+        Max = "max",
+    }
+}
+
 fn policy() -> Policy {
     Policy::shipped("tool-gate").expect("shipped tool-gate")
 }
@@ -54,6 +64,17 @@ fn frustration() -> Question {
         id: QuestionId::new("frustration"),
         instructions: json!("How frustrated is the customer?"),
         criteria: Frustration::criteria()
+            .iter()
+            .map(|text| Value::String((*text).to_string()))
+            .collect(),
+    })
+}
+
+fn severity() -> Question {
+    Question::Score(ScoreQ {
+        id: QuestionId::new("severity"),
+        instructions: json!("How bad is this call?"),
+        criteria: Severity::criteria()
             .iter()
             .map(|text| Value::String((*text).to_string()))
             .collect(),
@@ -177,6 +198,33 @@ fn score_maps_to_level() {
         out.score::<Frustration>(&QuestionId::new("frustration"))
             .expect("score"),
         Decision::Known(Frustration::Annoyed)
+    ));
+}
+
+#[test]
+fn score_zero_and_two_stay_known() {
+    let calm = Client::new(FakeBackend::new().on_score("frustration", 0.0)).policy(policy());
+    let calm = pollster::block_on(calm.ask(state(), vec![frustration()])).expect("ask");
+    assert!(matches!(
+        calm.score::<Frustration>(&QuestionId::new("frustration"))
+            .expect("score"),
+        Decision::Known(Frustration::Calm)
+    ));
+    let mid = Client::new(FakeBackend::new().on_score("severity", 2.0)).policy(policy());
+    let mid = pollster::block_on(mid.ask(state(), vec![severity()])).expect("ask");
+    assert!(matches!(
+        mid.score::<Severity>(&QuestionId::new("severity"))
+            .expect("score"),
+        Decision::Known(Severity::Mid)
+    ));
+    let unsure = Client::new(FakeBackend::new().on_score_with_confidence("frustration", 0.0, 0.0))
+        .policy(policy());
+    let unsure = pollster::block_on(unsure.ask(state(), vec![frustration()])).expect("ask");
+    assert!(matches!(
+        unsure
+            .score::<Frustration>(&QuestionId::new("frustration"))
+            .expect("score"),
+        Decision::Unsure { .. }
     ));
 }
 

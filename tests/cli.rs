@@ -1994,6 +1994,34 @@ fn snapif_log_row_replays_offline() {
 }
 
 #[test]
+fn replay_of_score_zero_stays_auto() {
+    let dir = std::env::temp_dir().join(format!("snapif-replay-score-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let row = dir.join("replay.jsonl");
+    fs::write(
+        &row,
+        concat!(
+            r#"{"id":"score-zero","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null},"extra_questions":{"severity":{"type":"score","instructions":"how bad","criteria":["none","low","mid","high","max"]}}},"script":{"harm":"read","confidence":0.95,"nouls":{"severity":0}},"expected":"auto"}"#,
+            "\n",
+        ),
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&row)
+        .env("SNAPIF_BACKEND", "typesafe")
+        .env("SNAPIF_CASCADE_BASE_URL", "http://127.0.0.1:9")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let stdout = String::from_utf8_lossy(&replayed.stdout);
+    let stderr = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(stdout.contains("\"got\":\"auto\""), "{stdout}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_empty_file_names_the_path() {
     let path = std::env::temp_dir().join(format!("snapif-cal-{}.jsonl", std::process::id()));
     fs::write(&path, "\n").expect("write");
@@ -2353,6 +2381,8 @@ fn calibrate_gate_counts_verdicts_and_scores_labels() {
             "\n",
             r#"{"gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"read","confidence":0.85},"expected":"Auto"}"#,
             "\n",
+            r#"{"gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"read","confidence":0.50},"expected":"review","labels":{"harm_class":"read"}}"#,
+            "\n",
         ),
     )
     .expect("write");
@@ -2374,10 +2404,18 @@ fn calibrate_gate_counts_verdicts_and_scores_labels() {
         stdout.contains("expected auto predicted auto 1"),
         "{stdout}"
     );
-    assert!(stdout.contains("gate_matched 2"), "{stdout}");
+    assert!(
+        stdout.contains("expected review predicted review 1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("gate_matched 3"), "{stdout}");
     assert!(stdout.contains("gate_missed 0"), "{stdout}");
     assert!(stdout.contains("brier "), "{stdout}");
     assert!(stdout.contains("choice_accuracy "), "{stdout}");
+    assert!(
+        stdout.contains("choice_compared known 1 guess 1"),
+        "{stdout}"
+    );
 
     fs::write(
         &row,

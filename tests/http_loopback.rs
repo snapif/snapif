@@ -426,6 +426,25 @@ fn redirect_protocol_relative_empty_host_drops_userinfo() {
 }
 
 #[test]
+fn redirect_unparsed_absolute_location_drops_userinfo() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response(
+            "302 Found",
+            "Location: https://user:secret@host:99999/path?access_token=secret\r\n",
+            "",
+        )],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(text.contains("host:99999"), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(!text.contains("user:"), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    assert!(text.len() < 160, "{text}");
+}
+
+#[test]
 fn redirect_protocol_relative_bare_userinfo_drops_userinfo() {
     let (err, hits, _) = expect_backend_err(
         vec![http_response("302 Found", "Location: //user:pw@\r\n", "")],
