@@ -2340,3 +2340,58 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
     assert!(escalate_body["scores"].is_object(), "{escalate_body}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn calibrate_gate_counts_verdicts_and_scores_labels() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-gate-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let row = dir.join("rows.jsonl");
+    fs::write(
+        &row,
+        concat!(
+            r#"{"gate_request":{"action_id":"bash.rm","prepared":{"name":"bash.rm","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"exec","confidence":1.0,"nouls":{"destructive":0.95}},"expected":"Escalate","labels":{"destructive":true,"harm_class":"exec"}}"#,
+            "\n",
+            r#"{"gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"read","confidence":0.85},"expected":"Auto"}"#,
+            "\n",
+        ),
+    )
+    .expect("write");
+    let scored = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&row)
+        .env("SNAPIF_BACKEND", "typesafe")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let stdout = String::from_utf8_lossy(&scored.stdout);
+    let stderr = String::from_utf8_lossy(&scored.stderr);
+    assert_eq!(scored.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("expected escalate predicted escalate 1"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("expected auto predicted auto 1"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("gate_matched 2"), "{stdout}");
+    assert!(stdout.contains("gate_missed 0"), "{stdout}");
+    assert!(stdout.contains("brier "), "{stdout}");
+    assert!(stdout.contains("choice_accuracy "), "{stdout}");
+
+    fs::write(
+        &row,
+        r#"{"gate_request":{"action_id":"bash.rm","prepared":{"name":"bash.rm","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"exec","confidence":1.0,"nouls":{"destructive":0.95}},"expected":"Auto"}"#,
+    )
+    .expect("miss");
+    let missed = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("miss");
+    let missed_out = String::from_utf8_lossy(&missed.stdout);
+    assert_eq!(missed.status.code(), Some(1), "{missed_out}");
+    assert!(missed_out.contains("gate_missed 1"), "{missed_out}");
+    let _ = fs::remove_dir_all(dir);
+}

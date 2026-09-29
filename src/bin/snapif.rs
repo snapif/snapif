@@ -83,6 +83,9 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
+        /// Score gate verdicts from log or replay rows. Ask calibration stays the default.
+        #[arg(long)]
+        gate: bool,
     },
     /// Check conformance JSON. With the http feature, `--base-url` posts each valid vector.
     Test {
@@ -128,8 +131,8 @@ fn main() -> ExitCode {
             policy,
         } => ExitCode::from(explain_cmd(&action, command.as_deref(), policy.as_deref())),
         Command::Hook { policy, shadow } => ExitCode::from(hook_cmd(policy.as_deref(), shadow)),
-        Command::Calibrate { path, policy } => {
-            ExitCode::from(calibrate_cmd(&path, policy.as_deref()))
+        Command::Calibrate { path, policy, gate } => {
+            ExitCode::from(calibrate_cmd(&path, policy.as_deref(), gate))
         }
         Command::Test { vectors, base_url } => {
             ExitCode::from(test_cmd(&vectors, base_url.as_deref()))
@@ -1279,7 +1282,148 @@ fn finish_calibration(
     if unused.is_empty() { 0 } else { 1 }
 }
 
-fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
+#[derive(Debug, Deserialize)]
+struct GateCalRow {
+    gate_request: ReplayRequest,
+    script: ReplayScript,
+    #[serde(default)]
+    expected: Option<String>,
+    #[serde(default)]
+    labels: serde_json::Map<String, Value>,
+}
+
+fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
+    let policy = match load_policy(policy) {
+        Ok(policy) => policy,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let rows = match read_calibrate_rows(path) {
+        Ok(rows) => rows,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    if rows.is_empty() {
+        eprintln!("{}: no calibration rows", path.display());
+        return 1;
+    }
+    let mut card = snapif::scorecard::Scorecard::default();
+    let mut pairs: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    let mut matched = 0usize;
+    let mut missed = 0usize;
+    for (line_no, line) in rows.iter().enumerate() {
+        let row: GateCalRow = match serde_json::from_str(line) {
+            Ok(row) => row,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                eprintln!("a gate calibration row needs gate_request and script");
+                return 1;
+            }
+        };
+        if row.expected.is_none() && row.labels.is_empty() {
+            eprintln!("line {}: needs expected or labels", line_no + 1);
+            return 1;
+        }
+        let extras = match wire_questions(&row.gate_request.extra_questions) {
+            Ok(extras) => extras,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                return 1;
+            }
+        };
+        let name = if row.gate_request.prepared.name.is_empty() {
+            row.gate_request.action_id.clone()
+        } else {
+            row.gate_request.prepared.name.clone()
+        };
+        let backend = match scripted(
+            &row.script.harm,
+            row.script.confidence,
+            &row.script.nouls,
+            row.script.timeout,
+            &extras,
+        ) {
+            Ok(backend) => backend,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                return 1;
+            }
+        };
+        let client = Client::new(backend).policy(policy.clone());
+        let verdict = match block_on(client.gate(GateRequest {
+            action_id: ActionId::new(&row.gate_request.action_id),
+            prepared: PreparedCall {
+                name,
+                args: row.gate_request.prepared.args,
+            },
+            state: State {
+                trusted: row.gate_request.state.trusted,
+                untrusted: row.gate_request.state.untrusted,
+            },
+            extra_questions: extras,
+        })) {
+            Ok(verdict) => verdict,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                return 1;
+            }
+        };
+        let hint = match &verdict {
+            Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => hint,
+        };
+        if let Some(expected) = row.expected.as_deref() {
+            let got = verdict_name(&verdict);
+            *pairs
+                .entry((expected.to_ascii_lowercase(), got.to_string()))
+                .or_insert(0) += 1;
+            if got.eq_ignore_ascii_case(expected) {
+                matched += 1;
+            } else {
+                missed += 1;
+            }
+        }
+        let via_guess = !hint.reasons.is_empty();
+        for (id, label) in &row.labels {
+            if id == "harm_class" && label.is_string() {
+                let guess = hint.guess.as_deref().unwrap_or("");
+                card.add_choice_compared(label.as_str() == Some(guess), via_guess);
+                continue;
+            }
+            let Some(score) = hint.facts.scores.get(id) else {
+                eprintln!("line {}: label {id} was not scored", line_no + 1);
+                return 1;
+            };
+            let Some(truth) = label.as_bool() else {
+                eprintln!("line {}: label {id} must be a bool", line_no + 1);
+                return 1;
+            };
+            card.add_noul(*score, truth);
+        }
+    }
+    for ((expected, predicted), count) in &pairs {
+        println!("expected {expected} predicted {predicted} {count}");
+    }
+    if matched + missed > 0 {
+        println!("gate_matched {matched}");
+        println!("gate_missed {missed}");
+    }
+    let code = if card.is_empty() {
+        0
+    } else {
+        finish_calibration(&card, &[], path)
+    };
+    if missed > 0 || code != 0 { 1 } else { 0 }
+}
+
+fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
+    if gate {
+        return calibrate_gate_cmd(path, policy);
+    }
     let rows = match read_calibrate_rows(path) {
         Ok(rows) => rows,
         Err(err) => {
