@@ -167,6 +167,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             script.confidence,
             &script.nouls,
             script.timeout,
+            &[],
         ) {
             Ok(backend) => backend,
             Err(err) => {
@@ -501,6 +502,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool) -> u8 {
             row.script.confidence,
             &row.script.nouls,
             row.script.timeout,
+            &extras,
         ) {
             Ok(backend) => backend,
             Err(err) => {
@@ -562,6 +564,7 @@ fn scripted(
     confidence: f64,
     nouls: &serde_json::Map<String, Value>,
     timeout: bool,
+    extras: &[Question],
 ) -> Result<FakeBackend, Error> {
     if timeout {
         return Ok(FakeBackend::new().on_timeout("harm_class"));
@@ -571,13 +574,34 @@ fn scripted(
             "script confidence must be from 0 to 1, got {confidence}"
         ))));
     }
+    let battery = snapif::backends::cascade::battery_ids();
     let mut backend = FakeBackend::new().on_choice("harm_class", harm, confidence);
-    for id in snapif::backends::cascade::battery_ids() {
+    for id in &battery {
         if id.0 == "harm_class" {
             continue;
         }
         let value = nouls.get(&id.0).and_then(Value::as_f64).unwrap_or(0.0);
         backend = backend.on_noul(&id.0, value);
+    }
+    for question in extras {
+        let id = question.id().0.as_str();
+        if battery.iter().any(|battery_id| battery_id.0 == id) {
+            continue;
+        }
+        let logged = nouls.get(id).and_then(Value::as_f64);
+        backend = match question {
+            Question::Noul(_) => backend.on_noul(id, logged.unwrap_or(1.0)),
+            Question::Choice(choice) => {
+                let label = choice
+                    .criteria
+                    .keys()
+                    .next()
+                    .cloned()
+                    .unwrap_or_else(|| "no".to_string());
+                backend.on_choice(id, &label, logged.unwrap_or(0.0))
+            }
+            Question::Score(_) => backend.on_score(id, logged.unwrap_or(0.0)),
+        };
     }
     Ok(backend)
 }

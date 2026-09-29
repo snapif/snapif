@@ -2126,3 +2126,64 @@ fn test_base_url_honors_private_http_and_timeout() {
     assert_ne!(allowed.status.code(), Some(1), "{allowed_err}");
     assert!(!allowed_err.contains("loopback"), "{allowed_err}");
 }
+
+#[test]
+fn replay_scripts_an_extra_question_from_the_log() {
+    let dir = std::env::temp_dir().join(format!("snapif-extra-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let policy = dir.join("policy.toml");
+    fs::write(
+        &policy,
+        r#"
+schema_version = 1
+fail = "closed"
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+signal = "confidence"
+[default_action]
+auto = 0.6
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+block_on = [
+  { id = "custom_check", when = "yes" },
+]
+"#,
+    )
+    .expect("policy");
+    let row = dir.join("rows.jsonl");
+    let body = |noul: &str| {
+        format!(
+            "{{\"id\":\"extra\",\"gate_request\":{{\"action_id\":\"tag\",\"prepared\":{{\"name\":\"tag\",\"args\":{{}}}},\"state\":{{\"trusted\":{{}},\"untrusted\":null}},\"extra_questions\":{{\"custom_check\":{{\"type\":\"noul\",\"instructions\":\"custom\"}}}}}},\"script\":{{\"harm\":\"read\",\"confidence\":0.91,\"nouls\":{{{noul}}}}},\"expected\":\"Auto\"}}\n"
+        )
+    };
+    fs::write(&row, body("\"custom_check\":0.0")).expect("row");
+    let scored = bin()
+        .args(["replay", "--policy"])
+        .arg(&policy)
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let out = String::from_utf8_lossy(&scored.stdout);
+    assert_eq!(
+        scored.status.code(),
+        Some(0),
+        "{out} {}",
+        String::from_utf8_lossy(&scored.stderr)
+    );
+    fs::write(&row, body("")).expect("missing");
+    let closed = bin()
+        .args(["replay", "--policy"])
+        .arg(&policy)
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("closed");
+    let closed_out = String::from_utf8_lossy(&closed.stdout);
+    assert_eq!(closed.status.code(), Some(1), "{closed_out}");
+    assert!(closed_out.contains("\"got\":\"escalate\""), "{closed_out}");
+    let _ = fs::remove_dir_all(dir);
+}
