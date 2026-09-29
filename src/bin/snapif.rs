@@ -1001,6 +1001,59 @@ fn hook_decision(decision: &str, reason: &str) {
     );
 }
 
+fn apply_asked_label(
+    card: &mut snapif::scorecard::Scorecard,
+    id: &str,
+    score: f64,
+    label: &serde_json::Value,
+    decisions: &indexmap::IndexMap<snapif::ids::QuestionId, snapif::verdict::UntypedDecision>,
+) -> bool {
+    if let Some(truth) = label.as_bool() {
+        card.add_noul(score, truth);
+        true
+    } else if let Some(expected) = label.as_str() {
+        let matched = decisions
+            .iter()
+            .any(|(key, decision)| key.0 == id && choice_known(decision) == Some(expected));
+        card.add_choice(matched);
+        true
+    } else {
+        false
+    }
+}
+
+fn finish_calibration(
+    card: &snapif::scorecard::Scorecard,
+    unused: &[String],
+    path: &std::path::Path,
+) -> u8 {
+    if card.is_empty() {
+        if unused.is_empty() {
+            eprintln!("{}: no labeled scores", path.display());
+        } else {
+            eprintln!(
+                "{}: no labeled scores; not asked: {}",
+                path.display(),
+                unused.join(",")
+            );
+        }
+        return 1;
+    }
+    if !unused.is_empty() {
+        eprintln!("{}: not asked: {}", path.display(), unused.join(","));
+    }
+    if let Some(brier) = card.brier() {
+        println!("brier {brier}");
+        for (index, count, fraction) in card.bins() {
+            println!("bin {index} count {count} true_fraction {fraction}");
+        }
+    }
+    if let Some(accuracy) = card.choice_accuracy() {
+        println!("choice_accuracy {accuracy}");
+    }
+    if unused.is_empty() { 0 } else { 1 }
+}
+
 fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
     let rows = match read_calibrate_rows(path) {
         Ok(rows) => rows,
@@ -1054,13 +1107,12 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             let Some(label) = labels.get(id) else {
                 continue;
             };
-            if let Some(truth) = label.as_bool() {
-                card.add_noul(*score, truth);
-            } else if let Some(expected) = label.as_str() {
-                let matched = out.decisions.iter().any(|(key, decision)| {
-                    key.0 == *id && choice_known(decision) == Some(expected)
-                });
-                card.add_choice(matched);
+            if !apply_asked_label(&mut card, id, *score, label, &out.decisions) {
+                eprintln!(
+                    "line {}: label {id} must be a bool or a string",
+                    line_no + 1
+                );
+                return 1;
             }
         }
         for id in labels.keys() {
@@ -1069,28 +1121,7 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             }
         }
     }
-    if card.is_empty() {
-        if unused_labels.is_empty() {
-            eprintln!("{}: no labeled scores", path.display());
-        } else {
-            eprintln!(
-                "{}: no labeled scores; not asked: {}",
-                path.display(),
-                unused_labels.join(",")
-            );
-        }
-        return 1;
-    }
-    if let Some(brier) = card.brier() {
-        println!("brier {brier}");
-        for (index, count, fraction) in card.bins() {
-            println!("bin {index} count {count} true_fraction {fraction}");
-        }
-    }
-    if let Some(accuracy) = card.choice_accuracy() {
-        println!("choice_accuracy {accuracy}");
-    }
-    0
+    finish_calibration(&card, &unused_labels, path)
 }
 
 fn choice_known(decision: &snapif::verdict::UntypedDecision) -> Option<&str> {
@@ -1379,4 +1410,46 @@ fn default_name() -> String {
 
 fn default_harm() -> String {
     "read".to_string()
+}
+
+#[cfg(test)]
+mod calibrate_labels {
+    use super::{apply_asked_label, finish_calibration};
+
+    #[test]
+    fn finish_calibration_names_unasked_labels() {
+        let mut card = snapif::scorecard::Scorecard::default();
+        card.add_noul(0.25, false);
+        let path = std::path::PathBuf::from("rows.json");
+        let code = finish_calibration(&card, &["typo".to_string()], &path);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn a_numeric_label_is_not_scored() {
+        let mut card = snapif::scorecard::Scorecard::default();
+        let scored = apply_asked_label(
+            &mut card,
+            "sensitive",
+            0.25,
+            &serde_json::json!(1),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(!scored);
+        assert!(card.is_empty());
+    }
+
+    #[test]
+    fn a_bool_label_is_scored() {
+        let mut card = snapif::scorecard::Scorecard::default();
+        let scored = apply_asked_label(
+            &mut card,
+            "sensitive",
+            0.25,
+            &serde_json::json!(false),
+            &indexmap::IndexMap::new(),
+        );
+        assert!(scored);
+        assert!(card.brier().is_some());
+    }
 }
