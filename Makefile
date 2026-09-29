@@ -11,6 +11,8 @@ fuzz: ## libFuzzer on the System One reply, 10 seconds, nightly
 	PATH="$$(dirname $$(rustup which --toolchain nightly rustc)):$$PATH" \
 		RUSTUP_TOOLCHAIN=nightly \
 		cargo fuzz run wire_response -- -max_total_time=10
+	cargo deny --manifest-path fuzz/Cargo.toml check
+	bash scripts/forbid-deps.sh fuzz/Cargo.toml
 
 test: ## cargo test --locked, including http and cli
 	RUSTFLAGS="-D warnings" cargo test --locked
@@ -21,6 +23,8 @@ test: ## cargo test --locked, including http and cli
 deny: ## cargo deny plus forbidden crates
 	cargo deny check
 	bash scripts/forbid-deps.sh
+	cargo deny --manifest-path fuzz/Cargo.toml check
+	bash scripts/forbid-deps.sh fuzz/Cargo.toml
 
 stealth: ## empty About, no topics, no README pitch
 	bash scripts/assert-stealth.sh snapif/snapif
@@ -42,6 +46,8 @@ check: ## fmt, clippy, test, deny, workflow trigger lock
 	RUSTFLAGS="-D warnings" cargo test --locked --features http,cli
 	cargo deny check
 	bash scripts/forbid-deps.sh
+	cargo deny --manifest-path fuzz/Cargo.toml check
+	bash scripts/forbid-deps.sh fuzz/Cargo.toml
 	python3 scripts/test_workflow_triggers.py
 	python3 scripts/test_forbid_deps.py
 	$(MAKE) workflows

@@ -144,6 +144,13 @@ class WorkflowTriggerTests(unittest.TestCase):
             3,
         )
 
+    def test_make_scans_fuzz_manifest(self) -> None:
+        text = (ROOT / "Makefile").read_text(encoding="utf-8")
+        deny = "cargo deny --manifest-path fuzz/Cargo.toml check"
+        forbid = "bash scripts/forbid-deps.sh fuzz/Cargo.toml"
+        self.assertEqual(text.count(deny), 3)
+        self.assertEqual(text.count(forbid), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
