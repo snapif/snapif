@@ -1435,6 +1435,58 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
 }
 
 #[test]
+fn hook_asks_on_review_and_explain_names_the_bash_rule() {
+    let asked = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"exec","confidence":0.95}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(asked.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("review:"), "{stdout}");
+    let listed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#,
+        false,
+    );
+    let listed_out = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed_out.contains("\"permissionDecision\":\"deny\""),
+        "{listed_out}"
+    );
+    assert!(
+        !listed_out.contains("\"permissionDecision\":\"ask\""),
+        "{listed_out}"
+    );
+    let matched = bin()
+        .args(["explain", "--action", "Bash", "--command", "rm -rf /tmp"])
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let matched_out = String::from_utf8_lossy(&matched.stdout);
+    assert_eq!(matched.status.code(), Some(0), "{matched_out}");
+    assert!(matched_out.contains("matched bash.rm"), "{matched_out}");
+    assert!(
+        !matched_out.contains("source default_action"),
+        "{matched_out}"
+    );
+    let fallback = bin()
+        .args(["explain", "--action", "Bash", "--command", "ls"])
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let fallback_out = String::from_utf8_lossy(&fallback.stdout);
+    assert_eq!(fallback.status.code(), Some(0), "{fallback_out}");
+    assert!(
+        fallback_out.contains("source default_action"),
+        "{fallback_out}"
+    );
+    assert!(!fallback_out.contains("matched "), "{fallback_out}");
+}
+
+#[test]
 fn hook_keeps_the_prompt_and_drops_the_session_id() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-turn-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
@@ -1838,9 +1890,10 @@ fn hook_sends_a_large_tool_input_once() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
     assert!(
-        stdout.contains("\"permissionDecisionReason\":\"escalate\""),
+        stdout.contains("\"permissionDecision\":\"deny\""),
         "{stdout}"
     );
+    assert!(stdout.contains("escalate"), "{stdout}");
     let row = fs::read_to_string(&log).expect("log");
     assert!(row.contains("SNAPIF-LARGE-"), "{row}");
     assert!(row.contains("\"untrusted\":null"), "{row}");

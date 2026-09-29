@@ -98,10 +98,16 @@ Stderr prints `escalate`. Stdout still allows:
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"escalate"}}
 ```
 
-Drop `--shadow` and stdout denies. The process still exits 0.
+Drop `--shadow` and stdout denies. The process still exits 0. The reason names the verdict and the short cause.
 
 ```json
-{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate"}}
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate: decode"}}
+```
+
+A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks:
+
+```json
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"review: review_floor"}}
 ```
 
 Watch with `--shadow` while you read the verdicts. Remove it when a deny should stop the tool.
@@ -224,7 +230,7 @@ Allow:
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow","permissionDecisionReason":"auto"}}
 ```
 
-Deny uses `permissionDecision` `deny`. The reason is `review`, `escalate`, or the error text, such as `invalid json`.
+Review uses `permissionDecision` `ask`. The reason names the verdict and its short cause, such as `review: review_floor`. Escalate uses `deny`. The reason is `escalate` plus that cause, or the error text, such as `invalid json`. Auto uses `allow`.
 
 `--shadow` prints the verdict on stderr and allows the tool. On `gate`, `--shadow` prints the verdict and keeps the same exit code.
 

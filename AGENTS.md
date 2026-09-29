@@ -15,3 +15,8 @@ A rule in this file changes in the same commit as the code that breaks
 it. The commit message says which rule changed and why. Do not leave
 the code and this file disagreeing. Do not keep a rule that blocks a
 useful product change; update the rule in that commit.
+
+`snapif hook` sends Claude Code `permissionDecision` `ask` for Review
+and `deny` for Escalate. Review means a person should look first.
+Deny on that verdict blocks the host. Auto still allows. `--shadow`
+still allows. Invalid JSON still denies.

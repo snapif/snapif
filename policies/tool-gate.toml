@@ -41,6 +41,8 @@ block_on = [
 ]
 
 [actions."bash.rm"]
+tool = "Bash"
+prefixes = ["rm ", "rm\t"]
 auto = 0.99
 review = 0.90
 when_unsure = "escalate"
@@ -53,6 +55,8 @@ block_on = [
 ]
 
 [actions."git.push"]
+tool = "Bash"
+prefixes = ["git push"]
 review = 0.85
 when_unsure = "escalate"
 class = "network"
