@@ -11,7 +11,7 @@ use crate::wire::{Usage, WireAnswer, WireQuestion, WireRequest, WireResponse};
 enum Script {
     Choice { label: String, confidence: f64 },
     Noul(f64),
-    Score(f64),
+    Score { score: f64, confidence: f64 },
     Timeout,
 }
 
@@ -58,8 +58,23 @@ impl FakeBackend {
         self
     }
 
-    pub fn on_score(mut self, id: &str, score: f64) -> Self {
-        self.scripts.insert(id.to_string(), Script::Score(score));
+    /// Script the scale point `score`. Confidence stays 1, including for 0 and 1.
+    pub fn on_score(self, id: &str, score: f64) -> Self {
+        self.on_score_with_confidence(id, score, 1.0)
+    }
+
+    /// Script `score` and the confidence a `confidence` signal reads.
+    ///
+    /// [`Self::on_score`] uses confidence 1. Pass a lower confidence when the
+    /// script should miss the floor.
+    pub fn on_score_with_confidence(mut self, id: &str, score: f64, confidence: f64) -> Self {
+        let confidence = if confidence.is_finite() {
+            confidence
+        } else {
+            0.0
+        };
+        self.scripts
+            .insert(id.to_string(), Script::Score { score, confidence });
         self
     }
 
@@ -153,7 +168,7 @@ fn scripted(script: &Script, question: &WireQuestion) -> Option<WireAnswer> {
             })
         }
         Script::Noul(p) => Some(WireAnswer::Noul { noul: *p }),
-        Script::Score(score) => {
+        Script::Score { score, confidence } => {
             let (legend, width) = match question {
                 WireQuestion::Score { criteria, .. } => {
                     let legend = criteria
@@ -169,16 +184,11 @@ fn scripted(script: &Script, question: &WireQuestion) -> Option<WireAnswer> {
                 }
                 _ => (IndexMap::new(), 0),
             };
-            let mut probabilities = IndexMap::new();
-            if score.is_finite() && *score >= 0.0 {
-                let index = score.round() as usize;
-                probabilities.insert(index.to_string(), 1.0);
-            }
             Some(WireAnswer::Score {
                 score: *score,
                 legend,
-                probabilities,
-                confidence: score_confidence(*score, width),
+                probabilities: score_probabilities(*score, *confidence, width),
+                confidence: *confidence,
             })
         }
     }
@@ -203,20 +213,27 @@ fn choice_probabilities(label: &str, confidence: f64, labels: &[String]) -> Inde
     probabilities
 }
 
-fn score_confidence(score: f64, width: usize) -> f64 {
-    if !score.is_finite() {
-        return 0.0;
+fn score_probabilities(score: f64, confidence: f64, width: usize) -> IndexMap<String, f64> {
+    let mut probabilities = IndexMap::new();
+    if !(score.is_finite() && score >= 0.0) {
+        return probabilities;
     }
-    if (0.0..=1.0).contains(&score) {
-        return score;
+    let index = score.round() as usize;
+    if width >= 2 && confidence < 1.0 && index < width {
+        let each = (1.0 - confidence) / (width - 1) as f64;
+        for slot in 0..width {
+            let mass = if slot == index { confidence } else { each };
+            probabilities.insert(slot.to_string(), mass);
+        }
+        return probabilities;
     }
-    let max = (width.saturating_sub(1) as f64).max(1.0);
-    (score / max).clamp(0.0, 1.0)
+    probabilities.insert(index.to_string(), 1.0);
+    probabilities
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{choice_probabilities, score_confidence};
+    use super::{choice_probabilities, score_probabilities};
     use crate::Client;
     use crate::backends::cascade::battery_ids;
     use crate::gate::GateRequest;
@@ -236,8 +253,11 @@ mod tests {
         let spread = choice_probabilities("read", 0.5, &labels);
         assert_eq!(spread.get("read"), Some(&0.5));
         assert_eq!(spread.values().filter(|value| **value > 0.5).count(), 0);
-        assert_eq!(score_confidence(0.25, 10), 0.25);
-        assert_eq!(score_confidence(1.0, 2), 1.0);
+        let known = score_probabilities(0.0, 1.0, 5);
+        assert_eq!(known.get("0"), Some(&1.0));
+        let low = score_probabilities(2.0, 0.5, 5);
+        assert_eq!(low.get("2"), Some(&0.5));
+        assert_eq!(low.values().filter(|value| **value > 0.5).count(), 0);
     }
 
     #[test]
@@ -281,5 +301,55 @@ class = "read"
         }))
         .expect("gate");
         assert!(!matches!(verdict, Verdict::Auto(_)), "{verdict:?}");
+    }
+
+    #[test]
+    fn a_scripted_score_of_zero_does_not_drop_auto() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let mut kept = super::FakeBackend::new()
+            .on_choice("harm_class", "read", 0.95)
+            .on_score("severity", 0.0);
+        for id in battery_ids() {
+            if id.0 != "harm_class" {
+                kept = kept.on_noul(&id.0, 0.0);
+            }
+        }
+        let auto = gate_with(&policy, kept, "tag");
+        assert!(matches!(auto, Verdict::Auto(_)), "{auto:?}");
+
+        let mut dropped = super::FakeBackend::new()
+            .on_choice("harm_class", "exec", 1.0)
+            .on_score_with_confidence("severity", 0.0, 0.0);
+        for id in battery_ids() {
+            if id.0 != "harm_class" {
+                dropped = dropped.on_noul(&id.0, 0.0);
+            }
+        }
+        let escalated = gate_with(&policy, dropped, "bash.rm");
+        assert!(matches!(escalated, Verdict::Escalate(_)), "{escalated:?}");
+    }
+
+    fn gate_with(policy: &Policy, backend: super::FakeBackend, action: &str) -> Verdict {
+        let client = Client::new(backend).policy(policy.clone());
+        pollster::block_on(client.gate(GateRequest {
+            action_id: ActionId::new(action),
+            prepared: PreparedCall {
+                name: action.to_string(),
+                args: json!({}),
+            },
+            state: State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            extra_questions: vec![crate::question::Question::Score(crate::question::ScoreQ {
+                id: crate::ids::QuestionId::new("severity"),
+                instructions: json!("how bad"),
+                criteria: ["none", "low", "mid", "high", "max"]
+                    .into_iter()
+                    .map(|text| json!(text))
+                    .collect(),
+            })],
+        }))
+        .expect("gate")
     }
 }
