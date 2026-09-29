@@ -1342,6 +1342,7 @@ fn log_failure_names_the_path_and_cache_rejects_words() {
     let help_out = String::from_utf8_lossy(&help.stdout);
     assert!(help_out.contains("SNAPIF_LOG"), "{help_out}");
     assert!(help_out.contains("SNAPIF_CACHE"), "{help_out}");
+    assert!(help_out.contains("does not reuse it"), "{help_out}");
     assert!(
         help_out.contains("optional `script` sets harm and confidence"),
         "{help_out}"
