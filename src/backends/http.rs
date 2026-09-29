@@ -223,8 +223,9 @@ fn host_line(text: &str) -> String {
 
 fn safe_location(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
-        let cut = raw.split(['?', '#']).next().unwrap_or(raw);
-        return host_line(&strip_userinfo(cut));
+        let stripped = strip_userinfo(raw);
+        let cut = stripped.split(['?', '#']).next().unwrap_or(&stripped);
+        return host_line(cut);
     };
     let _ = url.set_username("");
     let _ = url.set_password(None);
@@ -234,25 +235,32 @@ fn safe_location(raw: &str) -> String {
 }
 
 /// Drop `user:password@` from an authority `Url::parse` rejected.
-/// `//user:pw@host/path` becomes `//host/path`. An empty host keeps the path.
-fn strip_userinfo(cut: &str) -> String {
-    let (prefix, rest) = if let Some(rest) = cut.strip_prefix("//") {
+/// The last `@` is the separator, so a `/`, `?`, or `#` inside the password
+/// still drops. `//user:pw@host/path` becomes `//host/path`. An empty host
+/// keeps the path.
+fn strip_userinfo(raw: &str) -> String {
+    let (prefix, rest) = if let Some(rest) = raw.strip_prefix("//") {
         ("//", rest)
-    } else if let Some(index) = scheme_slashes(cut) {
-        (&cut[..index], &cut[index..])
+    } else if let Some(index) = scheme_slashes(raw) {
+        (&raw[..index], &raw[index..])
     } else {
-        return cut.to_string();
+        return raw.to_string();
     };
-    let split = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..split];
-    let Some(at) = authority.rfind('@') else {
-        return cut.to_string();
+    let Some(at) = rest.rfind('@') else {
+        return raw.to_string();
     };
-    let host = &authority[at + 1..];
-    if host.is_empty() {
-        return rest[split..].to_string();
+    let userinfo = &rest[..at];
+    if !userinfo.contains(':') && userinfo.contains('/') {
+        return raw.to_string();
     }
-    format!("{prefix}{host}{}", &rest[split..])
+    let host = &rest[at + 1..];
+    if host.is_empty() {
+        return String::new();
+    }
+    if let Some(path) = host.strip_prefix('/') {
+        return format!("/{path}");
+    }
+    format!("{prefix}{host}")
 }
 
 fn scheme_slashes(cut: &str) -> Option<usize> {
@@ -550,5 +558,16 @@ mod tests {
             safe_location("//user:pw@/path?access_token=secret"),
             "/path"
         );
+        for raw in [
+            "https://user:secret?x=@host:99999/path",
+            "https://user:secret#@host:99999/path",
+            "https://user:sec/ret@host:99999/path",
+        ] {
+            let text = safe_location(raw);
+            assert!(text.contains("host:99999"), "{raw} -> {text}");
+            assert!(!text.contains("secret"), "{raw} -> {text}");
+            assert!(!text.contains("sec/ret"), "{raw} -> {text}");
+            assert!(!text.contains("user:"), "{raw} -> {text}");
+        }
     }
 }

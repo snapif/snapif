@@ -352,7 +352,8 @@ fn check_action(
 /// `cd x && rm`, and `bash -c 'rm ...'`. `git push` matches `git push`,
 /// `git\tpush`, `/usr/bin/git push`, and `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
-/// `git.push`. `rmdir`, `git push-all`, `echo rm`, and `find -delete` do not match.
+/// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
+/// `command -v rm`, `sudo -l`, an empty word, and a heredoc body do not match.
 pub fn matched_action<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -381,7 +382,9 @@ fn matched_in<'a>(
         return None;
     }
     for segment in tokenize_segments(command) {
-        let argv = skip_wrappers(&segment);
+        let Some(argv) = executed_argv(&segment) else {
+            continue;
+        };
         if let Some(script) = shell_script(&argv) {
             if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
                 return Some(id);
@@ -428,7 +431,7 @@ fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
     true
 }
 
-fn skip_wrappers(tokens: &[String]) -> Vec<String> {
+fn executed_argv(tokens: &[String]) -> Option<Vec<String>> {
     let mut index = 0;
     while index < tokens.len() {
         if is_assignment(&tokens[index]) {
@@ -440,12 +443,12 @@ fn skip_wrappers(tokens: &[String]) -> Vec<String> {
             break;
         }
         index += 1;
-        index = skip_wrapper_flags(&base, tokens, index);
+        index = skip_wrapper_flags(&base, tokens, index)?;
     }
-    tokens[index..].to_vec()
+    Some(tokens[index..].to_vec())
 }
 
-fn skip_wrapper_flags(wrapper: &str, tokens: &[String], mut index: usize) -> usize {
+fn skip_wrapper_flags(wrapper: &str, tokens: &[String], mut index: usize) -> Option<usize> {
     while index < tokens.len() {
         let token = &tokens[index];
         if is_assignment(token) {
@@ -453,10 +456,13 @@ fn skip_wrapper_flags(wrapper: &str, tokens: &[String], mut index: usize) -> usi
             continue;
         }
         if token == "--" {
-            return index + 1;
+            return Some(index + 1);
         }
         if !token.starts_with('-') {
             break;
+        }
+        if wrapper_does_not_execute(wrapper, token) {
+            return None;
         }
         let takes_value = !token.contains('=') && flag_takes_value(wrapper, token);
         index += 1;
@@ -464,7 +470,28 @@ fn skip_wrapper_flags(wrapper: &str, tokens: &[String], mut index: usize) -> usi
             index += 1;
         }
     }
-    index
+    Some(index)
+}
+
+fn wrapper_does_not_execute(wrapper: &str, flag: &str) -> bool {
+    if let Some(name) = flag.strip_prefix("--") {
+        return match wrapper {
+            "sudo" | "doas" => matches!(name, "list" | "validate"),
+            "command" => name == "help",
+            _ => false,
+        };
+    }
+    let Some(letters) = flag.strip_prefix('-') else {
+        return false;
+    };
+    if letters.is_empty() || letters.starts_with('-') {
+        return false;
+    }
+    match wrapper {
+        "sudo" | "doas" => letters.contains('l') || letters.contains('v'),
+        "command" => letters.contains('v') || letters.contains('V'),
+        _ => false,
+    }
 }
 
 fn skip_options(argv: &[String], mut index: usize) -> usize {
@@ -557,6 +584,13 @@ fn shell_script(tokens: &[String]) -> Option<String> {
         if token == "--" {
             return None;
         }
+        if shell_opt_takes_value(token) {
+            index += 1;
+            if index < tokens.len() {
+                index += 1;
+            }
+            continue;
+        }
         if let Some(script) = c_argument(token, tokens.get(index + 1)) {
             return Some(script);
         }
@@ -569,6 +603,11 @@ fn shell_script(tokens: &[String]) -> Option<String> {
     None
 }
 
+fn shell_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(name, "-o" | "rcfile" | "init-file")
+}
+
 fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
     if token == "-c" || token == "--command" {
         return next.cloned();
@@ -577,12 +616,7 @@ fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
     if flags.is_empty() || flags.starts_with('-') || !flags.contains('c') {
         return None;
     }
-    let rest = flags.split_once('c')?.1;
-    if rest.is_empty() {
-        next.cloned()
-    } else {
-        Some(rest.to_string())
-    }
+    next.cloned()
 }
 
 fn is_assignment(token: &str) -> bool {
@@ -621,6 +655,8 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     let mut token = String::new();
     let mut chars = command.chars().peekable();
     let mut quote = None;
+    let mut quoted = false;
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
     while let Some(ch) = chars.next() {
         if let Some(open) = quote {
             if ch == open {
@@ -637,7 +673,10 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
             continue;
         }
         match ch {
-            '\'' | '"' => quote = Some(ch),
+            '\'' | '"' => {
+                quote = Some(ch);
+                quoted = true;
+            }
             '\\' => {
                 if let Some(next) = chars.next()
                     && next != '\n'
@@ -645,25 +684,124 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
                     token.push(next);
                 }
             }
-            ' ' | '\t' | '\r' => push_token(&mut token, &mut current),
-            '\n' | '&' | '|' | ';' => {
+            '<' if chars.peek() == Some(&'<') => {
+                chars.next();
+                push_token(&mut token, &mut current, &mut quoted);
+                if chars.peek() == Some(&'<') {
+                    chars.next();
+                    skip_here_word(&mut chars);
+                } else if let Some(spec) = read_heredoc_delim(&mut chars) {
+                    heredocs.push(spec);
+                }
+            }
+            ' ' | '\t' | '\r' => push_token(&mut token, &mut current, &mut quoted),
+            '\n' => {
+                push_token(&mut token, &mut current, &mut quoted);
+                push_segment(&mut current, &mut segments);
+                for (delim, dash) in heredocs.drain(..) {
+                    skip_until_delim(&mut chars, &delim, dash);
+                }
+            }
+            '&' | '|' | ';' => {
                 if matches!(ch, '&' | '|') && chars.peek() == Some(&ch) {
                     chars.next();
                 }
-                push_token(&mut token, &mut current);
+                push_token(&mut token, &mut current, &mut quoted);
                 push_segment(&mut current, &mut segments);
             }
             _ => token.push(ch),
         }
     }
-    push_token(&mut token, &mut current);
+    push_token(&mut token, &mut current, &mut quoted);
     push_segment(&mut current, &mut segments);
     segments
 }
 
-fn push_token(token: &mut String, current: &mut Vec<String>) {
-    if !token.is_empty() {
+fn push_token(token: &mut String, current: &mut Vec<String>, quoted: &mut bool) {
+    if *quoted || !token.is_empty() {
         current.push(std::mem::take(token));
+    }
+    *quoted = false;
+}
+
+fn skip_here_word<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) {
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+    if matches!(chars.peek(), Some('\'' | '"')) {
+        let quote = chars.next().unwrap_or('"');
+        for ch in chars.by_ref() {
+            if ch == quote {
+                break;
+            }
+        }
+        return;
+    }
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            break;
+        }
+        chars.next();
+    }
+}
+
+fn read_heredoc_delim<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> Option<(String, bool)> {
+    let dash = chars.peek() == Some(&'-');
+    if dash {
+        chars.next();
+    }
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+    let mut delim = String::new();
+    if matches!(chars.peek(), Some('\'' | '"')) {
+        let quote = chars.next().unwrap_or('"');
+        for ch in chars.by_ref() {
+            if ch == quote {
+                break;
+            }
+            delim.push(ch);
+        }
+    } else {
+        while let Some(&ch) = chars.peek() {
+            if ch.is_whitespace() {
+                break;
+            }
+            delim.push(ch);
+            chars.next();
+        }
+    }
+    if delim.is_empty() {
+        None
+    } else {
+        Some((delim, dash))
+    }
+}
+
+fn skip_until_delim<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+    delim: &str,
+    dash: bool,
+) {
+    let mut line = String::new();
+    loop {
+        match chars.next() {
+            None => break,
+            Some('\n') => {
+                let text = if dash {
+                    line.trim_start_matches('\t')
+                } else {
+                    line.as_str()
+                };
+                if text == delim {
+                    break;
+                }
+                line.clear();
+            }
+            Some(ch) => line.push(ch),
+        }
     }
 }
 
@@ -863,6 +1001,11 @@ mod tests {
             "bash -lc \"rm -rf /tmp\"",
             "sudo bash -c 'rm -rf /'",
             "rm -rf / && git push",
+            "bash -cx 'rm -rf /'",
+            "bash -o pipefail -c 'rm -rf /'",
+            "command -p rm -rf /",
+            "cat <<'EOF'\ntext\nEOF\nrm -rf /tmp",
+            "cat <<EOF && rm -rf /\nbody\nEOF",
         ];
         for command in rm {
             assert_eq!(
@@ -900,6 +1043,15 @@ mod tests {
             "git -C repo status",
             "git -C push status",
             "ls",
+            "bash -crm 'echo ok'",
+            "bash --rcfile -c 'rm -rf /'",
+            "command -v rm",
+            "command -V rm",
+            "sudo -l rm",
+            "sudo -v rm",
+            "git '' push",
+            "bash -c '' rm",
+            "cat <<'EOF'\nrm -rf /\nEOF",
         ];
         for command in neither {
             assert!(
