@@ -117,6 +117,12 @@ pub struct ActionPolicy {
     pub class: HarmClass,
     #[serde(default)]
     pub block_on: Vec<Block>,
+    /// Host tool name, such as `Bash`. Unset matches only the action id.
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// Command prefixes for `tool`. The first matching action wins.
+    #[serde(default)]
+    pub prefixes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
@@ -338,6 +344,57 @@ fn check_action(
     Ok(())
 }
 
+/// Exact action id wins. Otherwise the first action whose `tool` matches
+/// `tool_name` and whose non-empty `prefixes` match `command`. An empty
+/// prefix list does not match, so that row cannot replace `default_action`.
+pub fn matched_action<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    command: Option<&str>,
+) -> Option<&'a ActionId> {
+    if let Some(id) = policy
+        .actions
+        .keys()
+        .find(|id| id.0.eq_ignore_ascii_case(tool_name))
+    {
+        return Some(id);
+    }
+    let command = command.unwrap_or("").trim_start();
+    for (id, row) in &policy.actions {
+        let Some(tool) = row.tool.as_deref() else {
+            continue;
+        };
+        if !tool.eq_ignore_ascii_case(tool_name) {
+            continue;
+        }
+        let hit = row
+            .prefixes
+            .iter()
+            .any(|prefix| prefix_matches(command, prefix));
+        if hit {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// `rm ` matches `rm` and `rm -rf`. `git push` matches `git push origin`
+/// and does not match `git push-all`.
+fn prefix_matches(command: &str, prefix: &str) -> bool {
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if command == trimmed {
+        return true;
+    }
+    if !command.starts_with(prefix) {
+        return false;
+    }
+    prefix.ends_with(|ch: char| ch.is_whitespace())
+        || command[prefix.len()..].starts_with(|ch: char| ch.is_whitespace())
+}
+
 pub fn effective_gates(
     policy: &Policy,
     action_id: &ActionId,
@@ -446,7 +503,7 @@ pub fn verdict_with_blocks(
 
 #[cfg(test)]
 mod tests {
-    use super::{Policy, effective_gates};
+    use super::{Policy, effective_gates, matched_action};
     use crate::ids::ActionId;
 
     #[test]
@@ -462,5 +519,25 @@ mod tests {
         let checked = Policy::from_toml_str(raw).expect("finish");
         assert!(checked.sealed);
         effective_gates(&checked, &ActionId::new("tag"), None).expect("sealed policy");
+    }
+
+    #[test]
+    fn bash_prefixes_do_not_steal_a_longer_token() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = matched_action(&policy, "Bash", Some("rm -rf /tmp"))
+            .expect("rm")
+            .0
+            .as_str();
+        assert_eq!(rm, "bash.rm");
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("git push origin"))
+                .expect("push")
+                .0
+                .as_str(),
+            "git.push"
+        );
+        assert!(matched_action(&policy, "Bash", Some("git push-all")).is_none());
+        assert!(matched_action(&policy, "Bash", Some("ls")).is_none());
+        assert!(matched_action(&policy, "Bash", Some("rmdir /tmp")).is_none());
     }
 }

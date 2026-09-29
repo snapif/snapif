@@ -54,14 +54,17 @@ enum Command {
     },
     /// Print effective gates for one action. Does not call a backend.
     Explain {
-        /// Action id, such as `tag`.
+        /// Action id or host tool name, such as `tag` or `Bash`.
         #[arg(long)]
         action: String,
+        /// Command text. With a host tool name, selects the prefix row.
+        #[arg(long)]
+        command: Option<String>,
         /// Shipped id or `.toml` path. Unset uses `SNAPIF_POLICY`, or tool-gate.
         #[arg(long)]
         policy: Option<String>,
     },
-    /// Claude Code PreToolUse hook. JSON on stdin, a permission decision on stdout.
+    /// Claude Code PreToolUse hook. Review asks. Escalate denies.
     Hook {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
@@ -115,9 +118,11 @@ fn main() -> ExitCode {
             policy,
             decisions,
         } => ExitCode::from(ask_cmd(&state, policy.as_deref(), decisions)),
-        Command::Explain { action, policy } => {
-            ExitCode::from(explain_cmd(&action, policy.as_deref()))
-        }
+        Command::Explain {
+            action,
+            command,
+            policy,
+        } => ExitCode::from(explain_cmd(&action, command.as_deref(), policy.as_deref())),
         Command::Hook { policy, shadow } => ExitCode::from(hook_cmd(policy.as_deref(), shadow)),
         Command::Calibrate { path, policy } => {
             ExitCode::from(calibrate_cmd(&path, policy.as_deref()))
@@ -783,7 +788,7 @@ fn load_policy(flag: Option<&str>) -> Result<Policy, Error> {
     snapif::load_policy_spec(from_env.as_deref())
 }
 
-fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
+fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 {
     let policy = match load_policy(policy) {
         Ok(policy) => policy,
         Err(err) => {
@@ -795,7 +800,8 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
         eprintln!("action id must not be blank");
         return 1;
     }
-    let id = ActionId::new(action);
+    let matched = snapif::policy::matched_action(&policy, action, command);
+    let id = matched.cloned().unwrap_or_else(|| ActionId::new(action));
     let gates = match snapif::policy::effective_gates(&policy, &id, None) {
         Ok(gates) => gates,
         Err(err) => {
@@ -803,7 +809,7 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
             return 1;
         }
     };
-    let configured = policy.actions.contains_key(&id);
+    let configured = policy.actions.contains_key(&id) || matched.is_some();
     let row = policy.actions.get(&id).or(policy.default_action.as_ref());
     let Some(row) = row else {
         eprintln!("unknown action {action}");
@@ -818,6 +824,9 @@ fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
         .map(|value| value.to_string())
         .unwrap_or_else(|| "none".to_string());
     println!("action {action}");
+    if matched.is_some_and(|matched| !matched.0.eq_ignore_ascii_case(action)) {
+        println!("matched {}", id.0);
+    }
     if !configured {
         println!("source default_action");
     }
@@ -897,15 +906,51 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     let trusted = hook_trusted(&value);
-    let client = match open_client(policy, shadow) {
+    let mut client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
             hook_decision("deny", &err.to_string());
             return 0;
         }
     };
+    if let Some(script) = value.get("script").filter(|item| item.is_object()) {
+        let script: ReplayScript = match serde_json::from_value(script.clone()) {
+            Ok(script) => script,
+            Err(_) => {
+                hook_decision("deny", "invalid json");
+                return 0;
+            }
+        };
+        let backend = match scripted(
+            &script.harm,
+            script.confidence,
+            &script.nouls,
+            script.timeout,
+        ) {
+            Ok(backend) => backend,
+            Err(err) => {
+                hook_decision("deny", &err.to_string());
+                return 0;
+            }
+        };
+        if client.replace_fake(backend).is_err() {
+            hook_decision("deny", "script is only used when SNAPIF_BACKEND=fake");
+            return 0;
+        }
+    }
+    let loaded = match load_policy(policy) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            hook_decision("deny", &err.to_string());
+            return 0;
+        }
+    };
+    let command = hook_command(&value);
+    let action_id = snapif::policy::matched_action(&loaded, name, command.as_deref())
+        .cloned()
+        .unwrap_or_else(|| ActionId::new(name));
     let request = GateRequest {
-        action_id: ActionId::new(name),
+        action_id,
         prepared: PreparedCall {
             name: name.to_string(),
             args,
@@ -924,10 +969,11 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
                 hook_decision("allow", name);
                 return 0;
             }
+            let reason = hook_reason(&verdict);
             match verdict {
-                Verdict::Auto(_) => hook_decision("allow", "auto"),
-                Verdict::Review(_) => hook_decision("deny", "review"),
-                Verdict::Escalate(_) => hook_decision("deny", "escalate"),
+                Verdict::Auto(_) => hook_decision("allow", &reason),
+                Verdict::Review(_) => hook_decision("ask", &reason),
+                Verdict::Escalate(_) => hook_decision("deny", &reason),
             }
             0
         }
@@ -935,6 +981,47 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
             hook_decision("deny", &err.to_string());
             0
         }
+    }
+}
+
+fn hook_command(value: &Value) -> Option<String> {
+    let input = value.get("tool_input")?;
+    if let Some(text) = input.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    input
+        .get("command")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+}
+
+fn hook_reason(verdict: &Verdict) -> String {
+    let name = verdict_name(verdict);
+    match verdict_reasons(verdict).first() {
+        Some(reason) => format!("{name}: {}", reason_tag(reason)),
+        None => name.to_string(),
+    }
+}
+
+fn reason_tag(reason: &snapif::verdict::UnsureReason) -> String {
+    use snapif::verdict::UnsureReason;
+    match reason {
+        UnsureReason::BelowFloor { .. } => "below_floor".to_string(),
+        UnsureReason::BelowAuto { .. } => "below_auto".to_string(),
+        UnsureReason::ReviewFloor { .. } => "review_floor".to_string(),
+        UnsureReason::NoulBand { .. } => "noul_band".to_string(),
+        UnsureReason::Battery { id, .. } => format!("battery:{}", id.0),
+        UnsureReason::AuthorityClaim { .. } => "authority_claim".to_string(),
+        UnsureReason::Decode(_) => "decode".to_string(),
+        UnsureReason::Wire => "wire".to_string(),
+        UnsureReason::Backend { cause } => format!("backend:{cause}"),
+        UnsureReason::CascadeStillUnsure => "cascade_still_unsure".to_string(),
+        UnsureReason::HarmClassBump { .. } => "harm_class_bump".to_string(),
+        UnsureReason::Truncated => "truncated".to_string(),
+        _ => "other".to_string(),
     }
 }
 
