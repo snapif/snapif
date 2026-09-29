@@ -1174,25 +1174,67 @@ fn hook_decision(decision: &str, reason: &str) {
     );
 }
 
+#[derive(Clone, Copy)]
+enum AskedKind {
+    Choice,
+    Noul,
+    Score { max: f64 },
+}
+
+impl From<&snapif::question::Question> for AskedKind {
+    fn from(question: &snapif::question::Question) -> Self {
+        match question {
+            snapif::question::Question::Choice(_) => AskedKind::Choice,
+            snapif::question::Question::Noul(_) => AskedKind::Noul,
+            snapif::question::Question::Score(score) => AskedKind::Score {
+                max: score.criteria.len().saturating_sub(1).max(1) as f64,
+            },
+        }
+    }
+}
+
 fn apply_asked_label(
     card: &mut snapif::scorecard::Scorecard,
     id: &str,
     score: f64,
     label: &serde_json::Value,
     decisions: &indexmap::IndexMap<snapif::ids::QuestionId, snapif::verdict::UntypedDecision>,
-) -> bool {
-    if let Some(truth) = label.as_bool() {
-        card.add_noul(score, truth);
-        true
-    } else if let Some(expected) = label.as_str() {
-        let matched = decisions
-            .iter()
-            .any(|(key, decision)| key.0 == id && choice_known(decision) == Some(expected));
-        card.add_choice(matched);
-        true
-    } else {
-        false
+    kind: AskedKind,
+) -> Result<(), &'static str> {
+    match kind {
+        AskedKind::Noul => {
+            let Some(truth) = label.as_bool() else {
+                return Err("bool");
+            };
+            card.add_noul(score, truth);
+        }
+        AskedKind::Choice => {
+            let Some(expected) = label.as_str() else {
+                return Err("string");
+            };
+            let decision = decisions
+                .iter()
+                .find(|(key, _)| key.0 == id)
+                .map(|(_, d)| d);
+            let known = decision.and_then(choice_known);
+            let guess = decision.and_then(choice_guess);
+            let (matched, via_guess) = if known == Some(expected) {
+                (true, false)
+            } else if guess == Some(expected) {
+                (true, true)
+            } else {
+                (false, guess.is_some() && known.is_none())
+            };
+            card.add_choice_compared(matched, via_guess);
+        }
+        AskedKind::Score { max } => {
+            let Some(truth) = label.as_f64() else {
+                return Err("number");
+            };
+            card.add_score(score, truth, max);
+        }
     }
+    Ok(())
 }
 
 fn finish_calibration(
@@ -1222,7 +1264,9 @@ fn finish_calibration(
         }
     }
     if let Some(accuracy) = card.choice_accuracy() {
+        let (known, guess) = card.choice_compared();
         println!("choice_accuracy {accuracy}");
+        println!("choice_compared known {known} guess {guess}");
     }
     if unused.is_empty() { 0 } else { 1 }
 }
@@ -1264,6 +1308,10 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 return ask_code(&err);
             }
         };
+        let asked: Vec<(String, AskedKind)> = questions
+            .iter()
+            .map(|question| (question.id().0.clone(), AskedKind::from(question)))
+            .collect();
         let out = match block_on(client.ask(state, questions)) {
             Ok(out) => out,
             Err(err) => {
@@ -1280,11 +1328,18 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             let Some(label) = labels.get(id) else {
                 continue;
             };
-            if !apply_asked_label(&mut card, id, *score, label, &out.decisions) {
-                eprintln!(
-                    "line {}: label {id} must be a bool or a string",
-                    line_no + 1
-                );
+            let Some(kind) = asked
+                .iter()
+                .find(|(asked_id, _)| asked_id == id)
+                .map(|(_, kind)| *kind)
+            else {
+                eprintln!("line {}: label {id} was not asked", line_no + 1);
+                return 1;
+            };
+            if let Err(expected) =
+                apply_asked_label(&mut card, id, *score, label, &out.decisions, kind)
+            {
+                eprintln!("line {}: label {id} must be a {expected}", line_no + 1);
                 return 1;
             }
         }
@@ -1302,6 +1357,16 @@ fn choice_known(decision: &snapif::verdict::UntypedDecision) -> Option<&str> {
         snapif::verdict::UntypedDecision::Choice(snapif::verdict::Decision::Known(label)) => {
             Some(label.as_str())
         }
+        _ => None,
+    }
+}
+
+fn choice_guess(decision: &snapif::verdict::UntypedDecision) -> Option<&str> {
+    match decision {
+        snapif::verdict::UntypedDecision::Choice(snapif::verdict::Decision::Unsure {
+            guess: Some(label),
+            ..
+        }) => Some(label.as_str()),
         _ => None,
     }
 }
@@ -1603,21 +1668,34 @@ mod calibrate_labels {
     }
 
     #[test]
-    fn a_numeric_label_is_not_scored() {
+    fn a_numeric_label_on_a_noul_is_rejected_and_a_score_is_scaled() {
         let mut card = snapif::scorecard::Scorecard::default();
-        let scored = apply_asked_label(
+        let rejected = apply_asked_label(
             &mut card,
             "sensitive",
             0.25,
             &serde_json::json!(1),
             &indexmap::IndexMap::new(),
+            super::AskedKind::Noul,
         );
-        assert!(!scored);
+        assert_eq!(rejected, Err("bool"));
         assert!(card.is_empty());
+        let scored = apply_asked_label(
+            &mut card,
+            "frustration",
+            2.0,
+            &serde_json::json!(0),
+            &indexmap::IndexMap::new(),
+            super::AskedKind::Score { max: 4.0 },
+        );
+        assert_eq!(scored, Ok(()));
+        let brier = card.brier().expect("score");
+        assert!(brier <= 1.0, "{brier}");
+        assert!((brier - 0.25).abs() < 1e-9, "{brier}");
     }
 
     #[test]
-    fn a_bool_label_is_scored() {
+    fn a_bool_label_is_scored_for_a_noul_only() {
         let mut card = snapif::scorecard::Scorecard::default();
         let scored = apply_asked_label(
             &mut card,
@@ -1625,8 +1703,47 @@ mod calibrate_labels {
             0.25,
             &serde_json::json!(false),
             &indexmap::IndexMap::new(),
+            super::AskedKind::Noul,
         );
-        assert!(scored);
+        assert_eq!(scored, Ok(()));
         assert!(card.brier().is_some());
+        let wrong = apply_asked_label(
+            &mut card,
+            "frustration",
+            1.0,
+            &serde_json::json!(false),
+            &indexmap::IndexMap::new(),
+            super::AskedKind::Score { max: 4.0 },
+        );
+        assert_eq!(wrong, Err("number"));
+    }
+
+    #[test]
+    fn a_choice_label_can_match_the_guess() {
+        use snapif::ids::QuestionId;
+        use snapif::verdict::{Decision, UnsureReason, UntypedDecision};
+        let mut decisions = indexmap::IndexMap::new();
+        decisions.insert(
+            QuestionId::new("harm_class"),
+            UntypedDecision::Choice(Decision::Unsure {
+                reason: UnsureReason::BelowFloor {
+                    confidence: 0.2,
+                    floor: 0.8,
+                },
+                guess: Some("read".to_string()),
+            }),
+        );
+        let mut card = snapif::scorecard::Scorecard::default();
+        let scored = apply_asked_label(
+            &mut card,
+            "harm_class",
+            0.2,
+            &serde_json::json!("read"),
+            &decisions,
+            super::AskedKind::Choice,
+        );
+        assert_eq!(scored, Ok(()));
+        assert_eq!(card.choice_accuracy(), Some(1.0));
+        assert_eq!(card.choice_compared(), (0, 1));
     }
 }

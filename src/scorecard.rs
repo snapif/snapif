@@ -8,6 +8,8 @@ pub struct Scorecard {
     bin_hits: [u64; 5],
     choice_hit: u64,
     choice_n: u64,
+    choice_known: u64,
+    choice_guess: u64,
 }
 
 impl Scorecard {
@@ -24,10 +26,29 @@ impl Scorecard {
     }
 
     pub fn add_choice(&mut self, matched: bool) {
+        self.add_choice_compared(matched, false);
+    }
+
+    /// `via_guess` is true when the label matched the unsure guess.
+    /// A known decision match leaves it false.
+    pub fn add_choice_compared(&mut self, matched: bool, via_guess: bool) {
         self.choice_n += 1;
         if matched {
             self.choice_hit += 1;
         }
+        if via_guess {
+            self.choice_guess += 1;
+        } else {
+            self.choice_known += 1;
+        }
+    }
+
+    /// Squared error on a 0 to 1 scale. `max` is the score criterion width.
+    pub fn add_score(&mut self, predicted: f64, label: f64, max: f64) {
+        let scale = if max <= 0.0 { 1.0 } else { max };
+        let err = ((predicted - label) / scale).clamp(-1.0, 1.0);
+        self.brier_sum += err * err;
+        self.brier_n += 1;
     }
 
     pub fn brier(&self) -> Option<f64> {
@@ -44,6 +65,11 @@ impl Scorecard {
         } else {
             Some(self.choice_hit as f64 / self.choice_n as f64)
         }
+    }
+
+    /// How many choice labels were compared to a known decision, then to a guess.
+    pub fn choice_compared(&self) -> (u64, u64) {
+        (self.choice_known, self.choice_guess)
     }
 
     pub fn bins(&self) -> impl Iterator<Item = (usize, u64, f64)> + '_ {
