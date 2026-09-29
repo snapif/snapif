@@ -2297,3 +2297,46 @@ fn replay_summary_counts_actions_and_logged_reasons() {
     assert!(stderr.contains("reason review_floor 1"), "{stderr}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn gate_json_prints_reasons_and_keeps_the_exit() {
+    let dir = std::env::temp_dir().join(format!("snapif-gate-json-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    let run = |body: &str, json: bool| {
+        fs::write(&call, body).expect("write");
+        let mut args = vec!["gate", "--call"];
+        let path = call.display().to_string();
+        args.push(&path);
+        if json {
+            args.push("--json");
+        }
+        bin()
+            .args(&args)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run")
+    };
+    let review = r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp"},"trusted":{"user_request":"clean tmp"},"script":{"harm":"exec","confidence":0.95}}"#;
+    let plain = run(review, false);
+    assert_eq!(plain.status.code(), Some(10));
+    assert_eq!(String::from_utf8_lossy(&plain.stdout).trim(), "review");
+    let review_json = run(review, true);
+    assert_eq!(review_json.status.code(), Some(10));
+    let review_body: serde_json::Value =
+        serde_json::from_slice(&review_json.stdout).expect("review json");
+    assert_eq!(review_body["verdict"], "review");
+    assert_eq!(review_body["reasons"][0]["tag"], "review_floor");
+    assert!(review_body["scores"].is_object(), "{review_body}");
+
+    let escalate = r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp"},"trusted":{"user_request":"clean tmp"},"script":{"harm":"exec","confidence":0.50}}"#;
+    let escalate_json = run(escalate, true);
+    assert_eq!(escalate_json.status.code(), Some(11));
+    let escalate_body: serde_json::Value =
+        serde_json::from_slice(&escalate_json.stdout).expect("escalate json");
+    assert_eq!(escalate_body["verdict"], "escalate");
+    assert_eq!(escalate_body["reasons"][0]["tag"], "below_floor");
+    assert!(escalate_body["scores"].is_object(), "{escalate_body}");
+    let _ = fs::remove_dir_all(dir);
+}

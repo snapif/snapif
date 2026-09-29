@@ -39,6 +39,9 @@ enum Command {
         /// Return the real verdict. The exit code stays the same.
         #[arg(long)]
         shadow: bool,
+        /// Print the verdict, reasons, and scores as JSON. The exit code stays the same.
+        #[arg(long)]
+        json: bool,
     },
     /// Observation. Exit 0 ok, 2 decode, 3 api, 4 rate limit, 5 auth, 1 programmer error.
     Ask {
@@ -112,7 +115,8 @@ fn main() -> ExitCode {
             policy,
             call,
             shadow,
-        } => ExitCode::from(gate_cmd(policy.as_deref(), &call, shadow)),
+            json,
+        } => ExitCode::from(gate_cmd(policy.as_deref(), &call, shadow, json)),
         Command::Ask {
             state,
             policy,
@@ -139,7 +143,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
+fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u8 {
     if call.is_dir() {
         eprintln!("{}: call path must be a file", call.display());
         return 1;
@@ -248,7 +252,11 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool) -> u8 {
             {
                 eprintln!("backend: {cause}");
             }
-            println!("{}", verdict_name(&verdict));
+            if json {
+                println!("{}", gate_json(&verdict));
+            } else {
+                println!("{}", verdict_name(&verdict));
+            }
             gate_code(&verdict)
         }
         Err(err) => {
@@ -1547,6 +1555,19 @@ fn verdict_reasons(verdict: &Verdict) -> &[snapif::verdict::UnsureReason] {
     match verdict {
         Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => &hint.reasons,
     }
+}
+
+fn gate_json(verdict: &Verdict) -> String {
+    let hint = match verdict {
+        Verdict::Auto(hint) | Verdict::Review(hint) | Verdict::Escalate(hint) => hint,
+    };
+    let reasons: Vec<Value> = hint.reasons.iter().map(reason_value).collect();
+    serde_json::json!({
+        "verdict": verdict_name(verdict),
+        "reasons": reasons,
+        "scores": hint.facts.scores,
+    })
+    .to_string()
 }
 
 fn verdict_name(verdict: &Verdict) -> &'static str {

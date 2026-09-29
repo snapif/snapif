@@ -170,7 +170,7 @@ cargo run --example pre_tool_use
 
 | Command | What it does |
 | --- | --- |
-| `gate` | Score one tool call. Exit 0 `auto`, 10 `review`, 11 `escalate`, 1 programmer error. |
+| `gate` | Score one tool call. Exit 0 `auto`, 10 `review`, 11 `escalate`, 1 programmer error. `--json` prints `verdict`, `reasons`, and `scores`. The exit code stays the same. |
 | `ask` | Ask the questions in a policy. Exit 0 prints `ok`. Exit 2 is a bad body, 3 an API error, 4 rate limit, 5 auth, 1 programmer error. |
 | `explain` | Print the gates for one action. It does not call a backend. |
 | `hook` | Claude Code PreToolUse hook. Always exits 0. |
