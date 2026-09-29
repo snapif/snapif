@@ -378,21 +378,39 @@ pub fn matched_action<'a>(
     None
 }
 
-/// `rm ` matches `rm` and `rm -rf`. `git push` matches `git push origin`
-/// and does not match `git push-all`.
+/// `rm ` matches `rm`, `/bin/rm -rf`, and `RM`. `git push` matches
+/// `git push origin` and `git\tpush origin`. It does not match `git push-all`.
 fn prefix_matches(command: &str, prefix: &str) -> bool {
-    let trimmed = prefix.trim();
-    if trimmed.is_empty() {
+    let command = command_words(command);
+    let prefix = command_words(prefix);
+    if prefix.is_empty() {
         return false;
     }
-    if command == trimmed {
+    if command.eq_ignore_ascii_case(&prefix) {
         return true;
     }
-    if !command.starts_with(prefix) {
-        return false;
+    let command = command.to_ascii_lowercase();
+    let prefix = prefix.to_ascii_lowercase();
+    command.starts_with(&prefix)
+        && command[prefix.len()..].starts_with(|ch: char| ch.is_whitespace())
+}
+
+/// First token's file name, then the remaining words separated by one space.
+fn command_words(text: &str) -> String {
+    let mut words = text.split_whitespace();
+    let Some(first) = words.next() else {
+        return String::new();
+    };
+    let base = first
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(first);
+    let mut out = String::from(base);
+    for word in words {
+        out.push(' ');
+        out.push_str(word);
     }
-    prefix.ends_with(|ch: char| ch.is_whitespace())
-        || command[prefix.len()..].starts_with(|ch: char| ch.is_whitespace())
+    out
 }
 
 pub fn effective_gates(
@@ -539,5 +557,33 @@ mod tests {
         assert!(matched_action(&policy, "Bash", Some("git push-all")).is_none());
         assert!(matched_action(&policy, "Bash", Some("ls")).is_none());
         assert!(matched_action(&policy, "Bash", Some("rmdir /tmp")).is_none());
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("/bin/rm -rf /tmp"))
+                .expect("path rm")
+                .0
+                .as_str(),
+            "bash.rm"
+        );
+        assert_eq!(
+            matched_action(&policy, "bash", Some("RM -rf /tmp"))
+                .expect("case rm")
+                .0
+                .as_str(),
+            "bash.rm"
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("git\tpush origin"))
+                .expect("tab push")
+                .0
+                .as_str(),
+            "git.push"
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("/usr/bin/git push origin"))
+                .expect("path git")
+                .0
+                .as_str(),
+            "git.push"
+        );
     }
 }
