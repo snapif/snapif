@@ -1901,7 +1901,8 @@ mod calibrate_labels {
             super::AskedKind::Noul,
         );
         assert_eq!(scored, Ok(()));
-        assert!(card.brier().is_some());
+        let brier = card.brier().expect("score");
+        assert!((brier - 0.0625).abs() < 1e-9, "{brier}");
         let wrong = apply_asked_label(
             &mut card,
             "frustration",
