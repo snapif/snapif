@@ -60,6 +60,7 @@ jobs:
       - name: Full clippy
         if: >-
           github.event_name != 'pull_request' ||
+          github.event.pull_request.user.login != 'github-actions[bot]' ||
           !startsWith(github.head_ref, 'release-please')
         run: |
           cargo clippy --locked --all-targets -- -D warnings
@@ -69,11 +70,13 @@ jobs:
       - name: Rustdoc
         if: >-
           github.event_name != 'pull_request' ||
+          github.event.pull_request.user.login != 'github-actions[bot]' ||
           !startsWith(github.head_ref, 'release-please')
         run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
       - name: Release-please check
         if: >-
           github.event_name == 'pull_request' &&
+          github.event.pull_request.user.login == 'github-actions[bot]' &&
           startsWith(github.head_ref, 'release-please')
         run: cargo check --locked --all-targets
       - run: cargo deny check
@@ -120,6 +123,7 @@ jobs:
       - name: Unit and integration tests
         if: >-
           github.event_name != 'pull_request' ||
+          github.event.pull_request.user.login != 'github-actions[bot]' ||
           !startsWith(github.head_ref, 'release-please')
         run: |
           cargo test --locked
@@ -129,6 +133,7 @@ jobs:
       - name: Release-please check
         if: >-
           github.event_name == 'pull_request' &&
+          github.event.pull_request.user.login == 'github-actions[bot]' &&
           startsWith(github.head_ref, 'release-please')
         run: cargo check --locked --all-targets
 

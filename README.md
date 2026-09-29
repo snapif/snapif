@@ -104,7 +104,7 @@ Drop `--shadow` and stdout denies. The process still exits 0. The reason names t
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate: decode"}}
 ```
 
-A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, and `git -C repo push` match those rows too. `rmdir`, `git push-all`, `echo rm`, and `find -delete` do not.
+A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `rmdir`, `git push-all`, `echo rm`, and `find -delete` do not.
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"review: review_floor"}}
@@ -216,7 +216,7 @@ With the `http` feature, `--base-url` posts each valid vector.
 | `args` | The tool arguments. |
 | `trusted` | Text the host wrote, such as `user_request`. |
 | `untrusted` | Text from outside the host. `null` when there is none. |
-| `script` | Only for `SNAPIF_BACKEND=fake`. Sets `harm` and `confidence`. A one-label choice keeps probability 1.0, so `top_prob` and `margin` stay 1.0. With more labels, the chosen label's probability is `confidence` and the others share the rest. |
+| `script` | Only for `SNAPIF_BACKEND=fake`. Sets `harm` and `confidence`. A one-label choice keeps probability 1.0, so `top_prob` and `margin` stay 1.0. With more labels, the chosen label gets `confidence` and the others share the rest, so `top_prob` equals `confidence` while no other label exceeds that mass. Otherwise every label is `1/n`. |
 
 `prepared` is `{ "name", "args" }`. `state` is `{ "trusted", "untrusted" }`.
 

@@ -194,10 +194,23 @@ fn scripted(script: &Script, question: &WireQuestion) -> Option<WireAnswer> {
     }
 }
 
+fn split_mass(confidence: f64, width: usize) -> (f64, f64) {
+    if width <= 1 {
+        return (1.0, 0.0);
+    }
+    let each = (1.0 - confidence) / (width - 1) as f64;
+    if confidence.is_finite() && each > confidence {
+        let uniform = 1.0 / width as f64;
+        return (uniform, uniform);
+    }
+    (confidence, each)
+}
+
 /// One criterion cannot carry a lower mass: the only probability is 1.0, so
 /// `top_prob` and `margin` stay 1.0. With more criteria, the chosen label
 /// gets `confidence` and the others share the rest, so `top_prob` equals
-/// `confidence` when that mass is strictly the largest.
+/// `confidence` while no other label exceeds that mass. Otherwise every
+/// label is `1/n`, so a rival cannot be the unique mode.
 fn choice_probabilities(label: &str, confidence: f64, labels: &[String]) -> IndexMap<String, f64> {
     let mut probabilities = IndexMap::new();
     let others: Vec<&String> = labels.iter().filter(|key| key.as_str() != label).collect();
@@ -205,8 +218,8 @@ fn choice_probabilities(label: &str, confidence: f64, labels: &[String]) -> Inde
         probabilities.insert(label.to_string(), 1.0);
         return probabilities;
     }
-    let each = (1.0 - confidence) / others.len() as f64;
-    probabilities.insert(label.to_string(), confidence);
+    let (scripted, each) = split_mass(confidence, others.len() + 1);
+    probabilities.insert(label.to_string(), scripted);
     for key in others {
         probabilities.insert(key.clone(), each);
     }
@@ -220,9 +233,9 @@ fn score_probabilities(score: f64, confidence: f64, width: usize) -> IndexMap<St
     }
     let index = score.round() as usize;
     if width >= 2 && confidence < 1.0 && index < width {
-        let each = (1.0 - confidence) / (width - 1) as f64;
+        let (scripted, each) = split_mass(confidence, width);
         for slot in 0..width {
-            let mass = if slot == index { confidence } else { each };
+            let mass = if slot == index { scripted } else { each };
             probabilities.insert(slot.to_string(), mass);
         }
         return probabilities;
@@ -237,10 +250,12 @@ mod tests {
     use crate::Client;
     use crate::backends::cascade::battery_ids;
     use crate::gate::GateRequest;
-    use crate::ids::ActionId;
+    use crate::ids::{ActionId, QuestionId};
     use crate::policy::Policy;
+    use crate::question::{ChoiceQ, Question, ScoreQ};
     use crate::state::{PreparedCall, State};
-    use crate::verdict::Verdict;
+    use crate::verdict::{Decision, UntypedDecision, Verdict};
+    use indexmap::IndexMap;
     use serde_json::json;
 
     #[test]
@@ -255,9 +270,19 @@ mod tests {
         assert_eq!(spread.values().filter(|value| **value > 0.5).count(), 0);
         let known = score_probabilities(0.0, 1.0, 5);
         assert_eq!(known.get("0"), Some(&1.0));
+        assert_eq!(known.len(), 1);
         let low = score_probabilities(2.0, 0.5, 5);
         assert_eq!(low.get("2"), Some(&0.5));
         assert_eq!(low.values().filter(|value| **value > 0.5).count(), 0);
+        let tied = choice_probabilities("no", 0.0, &["no".into(), "yes".into()]);
+        let scripted = *tied.get("no").expect("no");
+        assert_eq!(tied.values().filter(|value| **value > scripted).count(), 0);
+        assert_eq!(tied.get("yes").copied(), Some(scripted));
+        let tied_score = score_probabilities(0.0, 0.0, 2);
+        let low_bin = *tied_score.get("0").expect("0");
+        let high_bin = *tied_score.get("1").expect("1");
+        assert!(low_bin >= high_bin, "0={low_bin} 1={high_bin}");
+        assert_eq!(low_bin, high_bin);
     }
 
     #[test]
@@ -301,6 +326,154 @@ class = "read"
         }))
         .expect("gate");
         assert!(!matches!(verdict, Verdict::Auto(_)), "{verdict:?}");
+    }
+
+    #[test]
+    fn top_prob_two_label_extra_at_zero_does_not_auto() {
+        let policy = Policy::from_toml_str(
+            r#"
+schema_version = 1
+fail = "closed"
+cascade_min = 0.99
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 0.99
+signal = "top_prob"
+[default_action]
+auto = 0.99
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+"#,
+        )
+        .expect("policy");
+        let mut backend = super::FakeBackend::new()
+            .on_choice("harm_class", "read", 1.0)
+            .on_choice("pair", "no", 0.0);
+        for id in battery_ids() {
+            if id.0 != "harm_class" {
+                backend = backend.on_noul(&id.0, 0.0);
+            }
+        }
+        let mut criteria = IndexMap::new();
+        criteria.insert("no".to_string(), json!("no"));
+        criteria.insert("yes".to_string(), json!("yes"));
+        let client = Client::new(backend).policy(policy);
+        let verdict = pollster::block_on(client.gate(GateRequest {
+            action_id: ActionId::new("tag"),
+            prepared: PreparedCall {
+                name: "tag".to_string(),
+                args: json!({}),
+            },
+            state: State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            extra_questions: vec![Question::Choice(ChoiceQ {
+                id: QuestionId::new("pair"),
+                instructions: json!("pair"),
+                criteria,
+            })],
+        }))
+        .expect("gate");
+        assert!(!matches!(verdict, Verdict::Auto(_)), "{verdict:?}");
+    }
+
+    #[test]
+    fn margin_two_point_score_at_zero_does_not_auto() {
+        let policy = Policy::from_toml_str(
+            r#"
+schema_version = 1
+fail = "closed"
+cascade_min = 0.99
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 0.99
+signal = "margin"
+[default_action]
+auto = 0.99
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+"#,
+        )
+        .expect("policy");
+        let mut backend = super::FakeBackend::new()
+            .on_choice("harm_class", "read", 1.0)
+            .on_score_with_confidence("pair_score", 0.0, 0.0);
+        for id in battery_ids() {
+            if id.0 != "harm_class" {
+                backend = backend.on_noul(&id.0, 0.0);
+            }
+        }
+        let client = Client::new(backend).policy(policy);
+        let verdict = pollster::block_on(client.gate(GateRequest {
+            action_id: ActionId::new("tag"),
+            prepared: PreparedCall {
+                name: "tag".to_string(),
+                args: json!({}),
+            },
+            state: State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            extra_questions: vec![Question::Score(ScoreQ {
+                id: QuestionId::new("pair_score"),
+                instructions: json!("pair"),
+                criteria: vec![json!("low"), json!("high")],
+            })],
+        }))
+        .expect("gate");
+        assert!(!matches!(verdict, Verdict::Auto(_)), "{verdict:?}");
+    }
+
+    #[test]
+    fn ask_two_label_choice_at_zero_is_not_known() {
+        let policy = Policy::from_toml_str(
+            r#"
+schema_version = 1
+fail = "closed"
+cascade_min = 0.99
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 0.99
+signal = "top_prob"
+[default_action]
+auto = 0.99
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+"#,
+        )
+        .expect("policy");
+        let backend = super::FakeBackend::new().on_choice("pair", "no", 0.0);
+        let mut criteria = IndexMap::new();
+        criteria.insert("no".to_string(), json!("no"));
+        criteria.insert("yes".to_string(), json!("yes"));
+        let client = Client::new(backend).policy(policy);
+        let out = pollster::block_on(client.ask(
+            State {
+                trusted: json!({}),
+                untrusted: json!(null),
+            },
+            vec![Question::Choice(ChoiceQ {
+                id: QuestionId::new("pair"),
+                instructions: json!("pair"),
+                criteria,
+            })],
+        ))
+        .expect("ask");
+        let decision = out.decisions.get(&QuestionId::new("pair")).expect("pair");
+        assert!(
+            !matches!(
+                decision,
+                UntypedDecision::Choice(Decision::Known(label)) if label == "no"
+            ),
+            "{decision:?}"
+        );
     }
 
     #[test]

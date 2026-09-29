@@ -348,9 +348,10 @@ fn check_action(
 /// matches `tool_name` and whose non-empty `prefixes` match. An empty
 /// prefix list does not match, so that row cannot replace `default_action`.
 ///
-/// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `FOO=1 rm`, `env rm`,
-/// `cd x && rm`, and `bash -c 'rm ...'`. `git push` matches `git push`,
-/// `git\tpush`, `/usr/bin/git push`, and `git -C repo push`.
+/// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `sudo -nu root rm`,
+/// `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
+/// `env -S 'rm ...'`. `git push` matches `git push`, `git\tpush`,
+/// `/usr/bin/git push`, and `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
 /// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
 /// `command -v rm`, `sudo -l`, an empty word, and a heredoc body do not match.
@@ -382,9 +383,14 @@ fn matched_in<'a>(
         return None;
     }
     for segment in tokenize_segments(command) {
-        let Some(argv) = executed_argv(&segment) else {
+        let Some((argv, split_script)) = executed_argv(&segment) else {
             continue;
         };
+        if let Some(script) = split_script
+            && let Some(id) = matched_in(policy, tool_name, &script, depth + 1)
+        {
+            return Some(id);
+        }
         if let Some(script) = shell_script(&argv) {
             if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
                 return Some(id);
@@ -431,8 +437,9 @@ fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
     true
 }
 
-fn executed_argv(tokens: &[String]) -> Option<Vec<String>> {
+fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
     let mut index = 0;
+    let mut split_script = None;
     while index < tokens.len() {
         if is_assignment(&tokens[index]) {
             index += 1;
@@ -443,34 +450,110 @@ fn executed_argv(tokens: &[String]) -> Option<Vec<String>> {
             break;
         }
         index += 1;
-        index = skip_wrapper_flags(&base, tokens, index)?;
+        let Some((next, script)) = skip_wrapper_flags(&base, tokens, index) else {
+            return split_script.map(|script| (Vec::new(), Some(script)));
+        };
+        if split_script.is_none() {
+            split_script = script;
+        }
+        index = next;
     }
-    Some(tokens[index..].to_vec())
+    Some((tokens[index..].to_vec(), split_script))
 }
 
-fn skip_wrapper_flags(wrapper: &str, tokens: &[String], mut index: usize) -> Option<usize> {
+fn skip_wrapper_flags(
+    wrapper: &str,
+    tokens: &[String],
+    mut index: usize,
+) -> Option<(usize, Option<String>)> {
+    let mut split_script = None;
     while index < tokens.len() {
-        let token = &tokens[index];
+        let token = tokens[index].as_str();
         if is_assignment(token) {
             index += 1;
             continue;
         }
         if token == "--" {
-            return Some(index + 1);
+            return Some((index + 1, split_script));
         }
         if !token.starts_with('-') {
             break;
         }
         if wrapper_does_not_execute(wrapper, token) {
-            return None;
+            return split_script.map(|script| (tokens.len(), Some(script)));
         }
-        let takes_value = !token.contains('=') && flag_takes_value(wrapper, token);
+        if let Some((name, value)) = token.split_once('=') {
+            if split_script.is_none() && env_split_flag(wrapper, name) {
+                split_script = Some(value.to_string());
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(letters) = short_cluster(token) {
+            let next = tokens.get(index + 1).map(String::as_str);
+            let (step, script) = consume_short_cluster(wrapper, letters, next);
+            if split_script.is_none() {
+                split_script = script;
+            }
+            index += step;
+            continue;
+        }
+        let takes_value = flag_takes_value(wrapper, token);
+        let record_split = env_split_flag(wrapper, token);
         index += 1;
         if takes_value && index < tokens.len() {
+            if record_split && split_script.is_none() {
+                split_script = Some(tokens[index].clone());
+            }
             index += 1;
         }
     }
-    Some(index)
+    Some((index, split_script))
+}
+
+fn short_cluster(token: &str) -> Option<&str> {
+    let letters = token.strip_prefix('-')?;
+    if letters.is_empty() || letters.starts_with('-') {
+        None
+    } else {
+        Some(letters)
+    }
+}
+
+fn env_split_flag(wrapper: &str, flag: &str) -> bool {
+    if wrapper != "env" {
+        return false;
+    }
+    let name = flag.strip_prefix("--").unwrap_or(flag);
+    name == "-S" || name == "split-string"
+}
+
+fn consume_short_cluster(
+    wrapper: &str,
+    letters: &str,
+    next: Option<&str>,
+) -> (usize, Option<String>) {
+    for (pos, letter) in letters.char_indices() {
+        if !flag_takes_value(wrapper, &format!("-{letter}")) {
+            continue;
+        }
+        let rest = &letters[pos + letter.len_utf8()..];
+        let (step, value) = if rest.is_empty() {
+            match next {
+                Some(word) => (2, Some(word)),
+                None => (1, None),
+            }
+        } else {
+            (1, Some(rest))
+        };
+        let script = if wrapper == "env" && letter == 'S' {
+            value.map(str::to_string)
+        } else {
+            None
+        };
+        return (step, script);
+    }
+    (1, None)
 }
 
 fn wrapper_does_not_execute(wrapper: &str, flag: &str) -> bool {
@@ -992,11 +1075,14 @@ mod tests {
             "sudo rm -rf /",
             "sudo -n rm -rf /",
             "sudo -u root rm -rf /",
+            "sudo -nu root rm -rf /",
             "sudo -- rm -rf /",
             "cd x && rm -rf ~",
             "FOO=1 rm -rf /",
             "env rm -rf /",
             "env FOO=1 rm -rf /",
+            "env -iu PATH rm -rf /",
+            "env -S 'rm -rf /'",
             "bash -c 'rm -rf /'",
             "bash -lc \"rm -rf /tmp\"",
             "sudo bash -c 'rm -rf /'",
@@ -1018,11 +1104,13 @@ mod tests {
             "git -C repo push",
             "git -C repo push origin",
             "sudo git push",
+            "sudo -nu root git push",
             "cd repo && git push",
             "git\t-C\trepo\tpush",
             "/usr/bin/git --no-pager push",
             "git --git-dir=/repo push",
             "git push && rm -rf /",
+            "env -S 'git push'",
             "cd x && git push && rm -rf /",
         ];
         for command in push {
@@ -1037,6 +1125,8 @@ mod tests {
             "git push-all",
             "echo rm -rf /",
             "echo 'rm -rf /'",
+            "env -S 'echo rm'",
+            "sudo -nu root rmdir /tmp",
             "bash -c 'echo rm'",
             "find . -delete",
             "git status",
