@@ -1909,6 +1909,7 @@ fn snapif_log_row_replays_offline() {
         .arg(&log)
         .env("SNAPIF_BACKEND", "typesafe")
         .env("SNAPIF_CASCADE_BASE_URL", "http://127.0.0.1:9")
+        .env_remove("SNAPIF_POLICY")
         .output()
         .expect("replay");
     let stdout = String::from_utf8_lossy(&replayed.stdout);
@@ -1972,4 +1973,156 @@ fn calibrate_empty_directory_is_not_an_io_error() {
         format!("{}: no calibration rows", path.display())
     );
     let _ = fs::remove_dir(&path);
+}
+
+#[test]
+fn explain_and_replay_follow_snapif_policy() {
+    let dir = std::env::temp_dir().join(format!("snapif-policy-env-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let policy = dir.join("strict.toml");
+    fs::write(
+        &policy,
+        r#"
+schema_version = 1
+fail = "closed"
+battery = "from-env"
+cascade_min = 0.99
+[choice]
+escalate_below = 0.99
+review_below = 1.0
+signal = "confidence"
+[default_action]
+review = 0.99
+when_unsure = "escalate"
+class = "read"
+"#,
+    )
+    .expect("policy");
+    let policy_s = policy.display().to_string();
+    let explained = bin()
+        .args(["explain", "--action", "tag"])
+        .env("SNAPIF_POLICY", &policy_s)
+        .env_remove("SNAPIF_BACKEND")
+        .output()
+        .expect("explain");
+    let out = String::from_utf8_lossy(&explained.stdout);
+    assert_eq!(explained.status.code(), Some(0), "{out}");
+    assert!(out.contains("battery from-env"), "{out}");
+    assert!(out.contains("escalate_below 0.99"), "{out}");
+    let overridden = bin()
+        .args(["explain", "--action", "tag", "--policy", "tool-gate"])
+        .env("SNAPIF_POLICY", &policy_s)
+        .output()
+        .expect("override");
+    let over = String::from_utf8_lossy(&overridden.stdout);
+    assert_eq!(overridden.status.code(), Some(0), "{over}");
+    assert!(over.contains("battery tool-gate"), "{over}");
+    assert!(over.contains("pack tool-gate"), "{over}");
+    let missing = dir.join("missing.toml");
+    let bad = bin()
+        .args(["explain", "--action", "tag"])
+        .env("SNAPIF_POLICY", &missing)
+        .output()
+        .expect("bad");
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert_eq!(bad.status.code(), Some(1), "{err}");
+    assert!(err.contains("missing.toml"), "{err}");
+
+    let row = dir.join("row.jsonl");
+    fs::write(
+        &row,
+        "{\"id\":\"tag-auto\",\"gate_request\":{\"action_id\":\"tag\",\"prepared\":{\"name\":\"tag\",\"args\":{}},\"state\":{\"trusted\":{},\"untrusted\":null}},\"script\":{\"harm\":\"read\",\"confidence\":0.85},\"expected\":\"Auto\"}\n",
+    )
+    .expect("row");
+    let drifted = bin()
+        .arg("replay")
+        .arg(&row)
+        .env("SNAPIF_POLICY", &policy_s)
+        .env_remove("SNAPIF_BACKEND")
+        .output()
+        .expect("replay env");
+    assert_eq!(drifted.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&drifted.stdout).contains("\"got\":\"escalate\""));
+    let kept = bin()
+        .args(["replay", "--policy", "tool-gate"])
+        .arg(&row)
+        .env("SNAPIF_POLICY", &policy_s)
+        .output()
+        .expect("replay flag");
+    let kept_out = String::from_utf8_lossy(&kept.stdout);
+    assert_eq!(
+        kept.status.code(),
+        Some(0),
+        "{kept_out} {}",
+        String::from_utf8_lossy(&kept.stderr)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_base_url_honors_private_http_and_timeout() {
+    let vectors = manifest("tests/conformance");
+    let bad = bin()
+        .args([
+            "test",
+            "--vectors",
+            &vectors,
+            "--base-url",
+            "http://127.0.0.1:9",
+        ])
+        .env("SNAPIF_TIMEOUT_MS", "nope")
+        .env_remove("SNAPIF_ALLOW_PRIVATE_HTTP")
+        .output()
+        .expect("timeout");
+    let err = String::from_utf8_lossy(&bad.stderr);
+    assert_eq!(bad.status.code(), Some(1), "{err}");
+    assert!(err.contains("SNAPIF_TIMEOUT_MS"), "{err}");
+
+    let blocked = bin()
+        .args([
+            "test",
+            "--vectors",
+            &vectors,
+            "--base-url",
+            "http://192.168.0.8:9",
+        ])
+        .env_remove("SNAPIF_TIMEOUT_MS")
+        .env_remove("SNAPIF_ALLOW_PRIVATE_HTTP")
+        .output()
+        .expect("blocked");
+    let blocked_err = String::from_utf8_lossy(&blocked.stderr);
+    assert_eq!(blocked.status.code(), Some(1), "{blocked_err}");
+    assert!(blocked_err.contains("loopback"), "{blocked_err}");
+
+    let public_http = bin()
+        .args([
+            "test",
+            "--vectors",
+            &vectors,
+            "--base-url",
+            "http://1.1.1.1:9",
+        ])
+        .env("SNAPIF_ALLOW_PRIVATE_HTTP", "1")
+        .env_remove("SNAPIF_TIMEOUT_MS")
+        .output()
+        .expect("public");
+    let public_err = String::from_utf8_lossy(&public_http.stderr);
+    assert_eq!(public_http.status.code(), Some(1), "{public_err}");
+    assert!(public_err.contains("private address"), "{public_err}");
+
+    let allowed = bin()
+        .args([
+            "test",
+            "--vectors",
+            &vectors,
+            "--base-url",
+            "http://192.168.0.8:9",
+        ])
+        .env("SNAPIF_ALLOW_PRIVATE_HTTP", "true")
+        .env("SNAPIF_TIMEOUT_MS", "1")
+        .output()
+        .expect("allowed");
+    let allowed_err = String::from_utf8_lossy(&allowed.stderr);
+    assert_ne!(allowed.status.code(), Some(1), "{allowed_err}");
+    assert!(!allowed_err.contains("loopback"), "{allowed_err}");
 }

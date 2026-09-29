@@ -251,7 +251,7 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | --- | --- |
 | `SNAPIF_BACKEND` | `fake`, `typesafe`, or `compatible`. Unset is an error. |
 | `SNAPIF_MODEL` | Replaces the default model `jev-latest`. Blank is an error. |
-| `SNAPIF_POLICY` | Shipped id or a `.toml` path. Unset uses `tool-gate` for `gate`. |
+| `SNAPIF_POLICY` | Shipped id or a `.toml` path. Unset uses `tool-gate`. `explain` and `replay` follow it when `--policy` is unset. An explicit `--policy` wins. |
 | `SNAPIF_LOG` | Appends one replay row per gate. |
 | `SNAPIF_CACHE` | Integer cache capacity for a process that evaluates more than one call. One `snapif gate` or `snapif hook` invocation does not reuse it. Unset leaves the cache off. |
 | `TYPESAFE_API_KEY` | Required for `typesafe`. |

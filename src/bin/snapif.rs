@@ -57,7 +57,7 @@ enum Command {
         /// Action id, such as `tag`.
         #[arg(long)]
         action: String,
-        /// Shipped id or `.toml` path. Default is tool-gate.
+        /// Shipped id or `.toml` path. Unset uses `SNAPIF_POLICY`, or tool-gate.
         #[arg(long)]
         policy: Option<String>,
     },
@@ -91,8 +91,9 @@ enum Command {
     Replay {
         /// JSONL rows with `id`, `gate_request`, `script`, and `expected`.
         path: PathBuf,
-        #[arg(long, default_value = "tool-gate")]
-        policy: String,
+        /// Shipped id or `.toml` path. Unset uses `SNAPIF_POLICY`, or tool-gate.
+        #[arg(long)]
+        policy: Option<String>,
         /// Score each row and still compare `expected`.
         #[arg(long)]
         shadow: bool,
@@ -125,7 +126,7 @@ fn main() -> ExitCode {
             path,
             policy,
             shadow,
-        } => ExitCode::from(replay_cmd(&path, &policy, shadow)),
+        } => ExitCode::from(replay_cmd(&path, policy.as_deref(), shadow)),
     }
 }
 
@@ -321,10 +322,25 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
             return 1;
         }
     };
+    let timeout = match snapif::parse_timeout_ms(std::env::var("SNAPIF_TIMEOUT_MS").ok().as_deref())
+    {
+        Ok(Some(ms)) => std::time::Duration::from_millis(ms),
+        Ok(None) => std::time::Duration::from_secs(5),
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
     let key = std::env::var("SNAPIF_API_KEY")
         .ok()
         .filter(|value| !value.is_empty());
-    let backend = match snapif::backends::http::HttpBackend::compatible(url, key) {
+    let allow_private =
+        snapif::env_flag(std::env::var("SNAPIF_ALLOW_PRIVATE_HTTP").ok().as_deref());
+    let backend = match if allow_private {
+        snapif::backends::http::HttpBackend::compatible_private(url, key)
+    } else {
+        snapif::backends::http::HttpBackend::compatible(url, key)
+    } {
         Ok(backend) => backend,
         Err(err) => {
             eprintln!("{err}");
@@ -345,7 +361,7 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
         let Some(request) = vector_request(path, bytes)? else {
             return Ok(());
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + timeout;
         let evaluated = match runtime.block_on(snapif::backend::Backend::evaluate(
             &backend,
             request.clone(),
@@ -432,8 +448,8 @@ fn finish_checked(count: usize, what: &str) -> u8 {
     0
 }
 
-fn replay_cmd(path: &PathBuf, policy: &str, shadow: bool) -> u8 {
-    let policy = match Policy::load(policy) {
+fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool) -> u8 {
+    let policy = match load_policy(policy) {
         Ok(policy) => policy,
         Err(err) => {
             eprintln!("{err}");
@@ -694,12 +710,16 @@ fn decisions_json(out: &snapif::AskOut) -> String {
     .to_string()
 }
 
+fn load_policy(flag: Option<&str>) -> Result<Policy, Error> {
+    if let Some(spec) = flag.map(str::trim).filter(|text| !text.is_empty()) {
+        return snapif::load_policy_spec(Some(spec));
+    }
+    let from_env = std::env::var("SNAPIF_POLICY").ok();
+    snapif::load_policy_spec(from_env.as_deref())
+}
+
 fn explain_cmd(action: &str, policy: Option<&str>) -> u8 {
-    let policy = match policy {
-        Some(spec) => Policy::load(spec),
-        None => Policy::shipped("tool-gate").map_err(Error::Policy),
-    };
-    let policy = match policy {
+    let policy = match load_policy(policy) {
         Ok(policy) => policy,
         Err(err) => {
             eprintln!("{err}");
