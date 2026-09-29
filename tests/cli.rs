@@ -2395,3 +2395,21 @@ fn calibrate_gate_counts_verdicts_and_scores_labels() {
     assert!(missed_out.contains("gate_missed 1"), "{missed_out}");
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+fn hook_print_settings_does_not_read_stdin() {
+    let output = bin()
+        .args(["hook", "--print-settings"])
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("settings");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("PreToolUse"), "{stdout}");
+    assert!(stdout.contains("snapif hook --shadow"), "{stdout}");
+    assert!(stdout.contains("SNAPIF_LOG="), "{stdout}");
+    assert!(stdout.contains("snapif-hook.jsonl"), "{stdout}");
+    let here = std::env::current_dir().expect("cwd");
+    assert!(stdout.contains(&here.display().to_string()), "{stdout}");
+    assert!(!stdout.contains("permissionDecision"), "{stdout}");
+}
