@@ -122,6 +122,7 @@ class WorkflowTriggerTests(unittest.TestCase):
             "SNAPIF_POLICY",
             "SNAPIF_QUESTION",
             "SNAPIF_DENY_LABEL",
+            "SNAPIF_VERSION",
         ):
             self.assertIn(f"{name}:", text)
             self.assertIn(f"${name}", run)

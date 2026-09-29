@@ -8,6 +8,18 @@ state="${3:-}"
 policy="${4:-}"
 question="${5:-}"
 deny_label="${6:-}"
+version="${7:-}"
+
+if [[ -n "$version" ]]; then
+  case "$version" in
+    *[!0-9A-Za-z.+_-]*)
+      echo "snapif version must be a crate version, got $version" >&2
+      exit 1
+      ;;
+  esac
+  cargo install snapif --version "$version" --features cli
+  export PATH="${HOME}/.cargo/bin:${PATH}"
+fi
 
 if [[ -n "${SNAPIF_BIN:-}" ]]; then
   bin="$SNAPIF_BIN"

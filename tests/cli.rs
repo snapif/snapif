@@ -1883,6 +1883,23 @@ fn action_wrapper_fails_a_missing_call_and_an_escalate() {
 }
 
 #[test]
+fn action_wrapper_rejects_a_version_that_is_not_a_crate_version() {
+    let script = format!("{}/scripts/snapif-action.sh", env!("CARGO_MANIFEST_DIR"));
+    let output = std::process::Command::new("bash")
+        .arg(&script)
+        .args(["gate", "call.json", "", "", "", "", "1.2;rm"])
+        .env("SNAPIF_BIN", env!("CARGO_BIN_EXE_snapif"))
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("snapif version must be a crate version"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn snapif_log_row_replays_offline() {
     let dir = std::env::temp_dir().join(format!("snapif-log-cli-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
