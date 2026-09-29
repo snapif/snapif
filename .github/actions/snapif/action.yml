@@ -25,6 +25,10 @@ inputs:
     description: Choice label or the word true that fails the ask step
     required: false
     default: ""
+  version:
+    description: Crate version to cargo-install with --features cli before the step. Unset uses a snapif binary already on PATH. Setting it needs Rust on the runner.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
@@ -39,4 +43,5 @@ runs:
         SNAPIF_STATE: ${{ inputs.state }}
         SNAPIF_QUESTION: ${{ inputs.question }}
         SNAPIF_DENY_LABEL: ${{ inputs.deny_label }}
-      run: bash "$SNAPIF_ACTION_PATH/../../../scripts/snapif-action.sh" "$SNAPIF_MODE" "$SNAPIF_CALL" "$SNAPIF_STATE" "$SNAPIF_POLICY" "$SNAPIF_QUESTION" "$SNAPIF_DENY_LABEL"
+        SNAPIF_VERSION: ${{ inputs.version }}
+      run: bash "$SNAPIF_ACTION_PATH/../../../scripts/snapif-action.sh" "$SNAPIF_MODE" "$SNAPIF_CALL" "$SNAPIF_STATE" "$SNAPIF_POLICY" "$SNAPIF_QUESTION" "$SNAPIF_DENY_LABEL" "$SNAPIF_VERSION"
