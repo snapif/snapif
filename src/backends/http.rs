@@ -145,7 +145,17 @@ impl Backend for HttpBackend {
             };
             let status = response.status().as_u16();
             if response.status().is_success() {
-                let bytes = read_limited(response).await?;
+                let bytes = match read_limited(response).await {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        let detail = err.to_string();
+                        let prefix = format!("HTTP {status}");
+                        if detail.starts_with(&prefix) {
+                            return Err(err);
+                        }
+                        return Err(BackendError::Transport(format!("{prefix}: {detail}")));
+                    }
+                };
                 let wire: WireResponse = wire::decode_response(&bytes).map_err(|err| {
                     let snippet = host_line(&String::from_utf8_lossy(&bytes));
                     let body = if snippet.is_empty() {
@@ -186,7 +196,13 @@ impl Backend for HttpBackend {
                 retries += 1;
                 continue;
             }
-            let body = read_limited(response).await?;
+            let body = match read_limited(response).await {
+                Ok(body) => body,
+                Err(BackendError::Transport(message)) if message.contains("response cap") => {
+                    return Err(BackendError::Transport(message));
+                }
+                Err(_) => return Err(status_error(status, &[])),
+            };
             return Err(status_error(status, &body));
         }
     }
@@ -208,13 +224,29 @@ fn host_line(text: &str) -> String {
 fn safe_location(raw: &str) -> String {
     let Ok(mut url) = url::Url::parse(raw) else {
         let cut = raw.split(['?', '#']).next().unwrap_or(raw);
-        return host_line(cut);
+        return host_line(&strip_protocol_relative_userinfo(cut));
     };
     let _ = url.set_username("");
     let _ = url.set_password(None);
     url.set_query(None);
     url.set_fragment(None);
     host_line(url.as_str())
+}
+
+fn strip_protocol_relative_userinfo(cut: &str) -> String {
+    let Some(rest) = cut.strip_prefix("//") else {
+        return cut.to_string();
+    };
+    let split = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..split];
+    let Some(at) = authority.rfind('@') else {
+        return cut.to_string();
+    };
+    let host = &authority[at + 1..];
+    if host.is_empty() {
+        return rest[split..].to_string();
+    }
+    format!("//{host}{}", &rest[split..])
 }
 
 fn status_error(status: u16, body: &[u8]) -> BackendError {

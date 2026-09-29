@@ -385,6 +385,61 @@ fn redirect_relative_location_drops_query_secrets() {
 }
 
 #[test]
+fn redirect_protocol_relative_location_drops_userinfo() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response(
+            "302 Found",
+            "Location: //user:pw@example.test/path?access_token=secret#frag\r\n",
+            "",
+        )],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(text.contains("example.test"), "{text}");
+    assert!(text.contains("/path"), "{text}");
+    assert!(!text.contains("user:pw"), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(!text.contains('?'), "{text}");
+    assert!(!text.contains('#'), "{text}");
+    assert!(text.len() < 160, "{text}");
+}
+
+#[test]
+fn redirect_protocol_relative_empty_host_drops_userinfo() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response(
+            "302 Found",
+            "Location: //user:pw@/path?access_token=secret\r\n",
+            "",
+        )],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(text.contains("/path"), "{text}");
+    assert!(!text.contains("user:pw"), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+    assert!(text.len() < 160, "{text}");
+}
+
+#[test]
+fn redirect_protocol_relative_bare_userinfo_drops_userinfo() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response("302 Found", "Location: //user:pw@\r\n", "")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(!text.contains("user:pw"), "{text}");
+    assert!(!text.contains('@'), "{text}");
+    assert!(text.contains("redirect 302"), "{text}");
+    assert!(text.len() < 160, "{text}");
+}
+
+#[test]
 fn status_401_is_auth() {
     let (err, hits, _) = expect_backend_err(
         vec![http_response("401 Unauthorized", "", "")],
@@ -393,6 +448,55 @@ fn status_401_is_auth() {
     assert_eq!(hits.len(), 1);
     assert!(matches!(err, BackendError::Auth), "{err:?}");
     assert!(err.to_string().contains("401"), "{err}");
+}
+
+fn short_body(status: &str) -> Vec<u8> {
+    format!("HTTP/1.1 {status}\r\nContent-Length: 20\r\nConnection: close\r\n\r\n").into_bytes()
+}
+
+#[test]
+fn status_401_stays_auth_when_body_read_fails() {
+    let (err, hits, _) =
+        expect_backend_err(vec![short_body("401 Unauthorized")], Duration::from_secs(2));
+    assert_eq!(hits.len(), 1);
+    assert!(matches!(err, BackendError::Auth), "{err:?}");
+    assert!(err.to_string().contains("401"), "{err}");
+}
+
+#[test]
+fn status_422_stays_rejected_when_body_read_fails() {
+    let (err, hits, _) = expect_backend_err(
+        vec![short_body("422 Unprocessable Entity")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    assert!(
+        matches!(err, BackendError::Rejected { status: 422, ref body } if body.is_empty()),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn status_500_names_status_when_body_read_fails() {
+    let (err, hits, _) = expect_backend_err(
+        vec![short_body("500 Internal Server Error")],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(matches!(err, BackendError::Transport(_)), "{err:?}");
+    assert!(text.contains("HTTP 500"), "{text}");
+    assert!(text.len() < 160, "{text}");
+}
+
+#[test]
+fn success_names_status_when_body_read_fails() {
+    let (err, hits, _) = expect_backend_err(vec![short_body("200 OK")], Duration::from_secs(2));
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(matches!(err, BackendError::Transport(_)), "{err:?}");
+    assert!(text.contains("HTTP 200"), "{text}");
+    assert!(text.len() < 160, "{text}");
 }
 
 #[test]
