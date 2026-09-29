@@ -127,6 +127,23 @@ class WorkflowTriggerTests(unittest.TestCase):
             self.assertIn(f"{name}:", text)
             self.assertIn(f"${name}", run)
 
+    def test_ci_light_path_is_the_release_bot(self) -> None:
+        text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+        needle = "run: cargo check --locked --all-targets"
+        bot = "github.event.pull_request.user.login == 'github-actions[bot]'"
+        self.assertEqual(text.count(needle), 2)
+        start = 0
+        for _ in range(2):
+            at = text.index(needle, start)
+            window = text[max(0, at - 500) : at]
+            self.assertIn(bot, window)
+            self.assertIn("startsWith(github.head_ref, 'release-please')", window)
+            start = at + len(needle)
+        self.assertEqual(
+            text.count("github.event.pull_request.user.login != 'github-actions[bot]'"),
+            3,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
