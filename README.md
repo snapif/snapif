@@ -193,7 +193,7 @@ SNAPIF_BACKEND=fake snapif ask --policy tool-gate --state state.json
 snapif explain --action git.push
 ```
 
-`calibrate` reads a JSON or JSONL file, or a directory of those files. Each row needs `trusted`, `untrusted`, and `labels`. A label key must be a question that policy asks. A boolean label is a yes/no. A string label is the expected choice.
+`calibrate` reads a JSON or JSONL file, or a directory of those files. Each row needs `trusted`, `untrusted`, and `labels`. A label key must be a question that policy asks. A boolean label is a yes/no. A string label is the expected choice. `calibrate --gate` reads log or replay rows instead, compares `expected` to the gate verdict, and scores bool labels and a `harm_class` string when `labels` is present. Ask calibration stays the command without `--gate`.
 
 `test` checks the files in a directory. The sample directory in this repo is `tests/conformance`:
 
