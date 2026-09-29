@@ -926,6 +926,7 @@ fn hook_cmd(policy: Option<&str>, shadow: bool) -> u8 {
             script.confidence,
             &script.nouls,
             script.timeout,
+            &[],
         ) {
             Ok(backend) => backend,
             Err(err) => {
