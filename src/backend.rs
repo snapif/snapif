@@ -449,10 +449,7 @@ impl Client<AnyBackend> {
         };
         let config = ClientConfig {
             backend: std::env::var("SNAPIF_BACKEND").unwrap_or_default(),
-            shadow: matches!(
-                std::env::var("SNAPIF_SHADOW").ok().as_deref(),
-                Some("1" | "true" | "TRUE" | "True")
-            ),
+            shadow: env_flag(std::env::var("SNAPIF_SHADOW").ok().as_deref()),
             model: std::env::var("SNAPIF_MODEL").ok(),
             timeout_ms: std::env::var("SNAPIF_TIMEOUT_MS").ok(),
             policy: std::env::var("SNAPIF_POLICY").ok(),
@@ -469,9 +466,8 @@ impl Client<AnyBackend> {
             #[cfg(not(feature = "http"))]
             typesafe_key: None,
             #[cfg(feature = "http")]
-            allow_private_http: matches!(
+            allow_private_http: env_flag(
                 std::env::var("SNAPIF_ALLOW_PRIVATE_HTTP").ok().as_deref(),
-                Some("1" | "true" | "TRUE" | "True")
             ),
             #[cfg(not(feature = "http"))]
             allow_private_http: false,
@@ -573,22 +569,39 @@ fn policy_label(policy: &Policy) -> String {
 }
 
 fn env_policy(env: &BackendEnv) -> Result<Policy, Error> {
-    match nonempty(env.policy.as_deref()) {
+    load_policy_spec(env.policy.as_deref())
+}
+
+/// `1`, `true`, `TRUE`, or `True`. Every other value, including unset, is false.
+pub fn env_flag(raw: Option<&str>) -> bool {
+    matches!(raw, Some("1" | "true" | "TRUE" | "True"))
+}
+
+/// Empty or unset means the shipped `tool-gate` policy.
+pub fn load_policy_spec(spec: Option<&str>) -> Result<Policy, Error> {
+    match nonempty(spec) {
         Some(spec) => Policy::load(spec),
         None => Ok(Policy::shipped("tool-gate")?),
     }
+}
+
+/// `SNAPIF_TIMEOUT_MS` as milliseconds. Unset or blank is `None`.
+pub fn parse_timeout_ms(raw: Option<&str>) -> Result<Option<u64>, Error> {
+    let Some(raw) = nonempty(raw) else {
+        return Ok(None);
+    };
+    raw.parse::<u64>().map(Some).map_err(|_| {
+        Error::Policy(PolicyError::Config(format!(
+            "SNAPIF_TIMEOUT_MS must be an integer, got {raw}"
+        )))
+    })
 }
 
 fn apply_runtime(
     mut client: Client<AnyBackend>,
     env: &BackendEnv,
 ) -> Result<Client<AnyBackend>, Error> {
-    if let Some(raw) = nonempty(env.timeout_ms.as_deref()) {
-        let ms: u64 = raw.parse().map_err(|_| {
-            Error::Policy(PolicyError::Config(format!(
-                "SNAPIF_TIMEOUT_MS must be an integer, got {raw}"
-            )))
-        })?;
+    if let Some(ms) = parse_timeout_ms(env.timeout_ms.as_deref())? {
         client = client.timeout(Duration::from_millis(ms));
     }
     if let Some(raw) = env.model.as_deref() {

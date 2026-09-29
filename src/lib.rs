@@ -31,6 +31,7 @@ pub mod wire;
 
 pub use backend::{
     AnswerMeta, AnyBackend, AskOut, CallChoice, CascadeHop, Client, ClientConfig, ClientStatus,
+    env_flag, load_policy_spec, parse_timeout_ms,
 };
 pub use backends::fake::FakeBackend;
 pub use error::Error;
