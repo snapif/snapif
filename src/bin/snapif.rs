@@ -925,6 +925,7 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
         println!("{}", hook_settings_block());
         return 0;
     }
+    let shadow = shadow || env_shadow();
     use std::io::Read;
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() {
