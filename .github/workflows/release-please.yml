@@ -53,11 +53,21 @@ jobs:
           set -euo pipefail
           install -d -m 700 "$HOME/.gnupg"
           printf '%s\n' "pinentry-mode loopback" > "$HOME/.gnupg/gpg.conf"
-          printf '%s\n' "$GPG_PRIVATE_KEY" | gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
+          printf '%s\n' "allow-loopback-pinentry" > "$HOME/.gnupg/gpg-agent.conf"
+          gpgconf --kill gpg-agent || true
+          wrapper="$RUNNER_TEMP/snapif-gpg"
+          cat > "$wrapper" << 'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          exec gpg --batch --yes --pinentry-mode loopback --passphrase-fd 3 "$@" 3< <(printf '%s' "$GPG_PASSPHRASE")
+          EOF
+          chmod 700 "$wrapper"
+          printf '%s\n' "$GPG_PRIVATE_KEY" | "$wrapper" --import
           key=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
           git config user.name "Sebastien Tardif"
           git config user.email "sebtardif@ncf.ca"
           git config user.signingkey "$key"
+          git config gpg.program "$wrapper"
           git tag -s -f -m "$TAG" "$TAG" HEAD
           git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "+refs/tags/${TAG}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
