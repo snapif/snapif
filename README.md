@@ -257,11 +257,15 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | --- | --- |
 | `SNAPIF_BACKEND` | `fake`, `typesafe`, or `compatible`. Unset is an error. |
 | `SNAPIF_MODEL` | Replaces the default model `jev-latest`. Blank is an error. |
-| `SNAPIF_POLICY` | Shipped id or a `.toml` path. Unset uses `tool-gate`. `explain` and `replay` follow it when `--policy` is unset. An explicit `--policy` wins. |
+| `SNAPIF_POLICY` | Shipped id or a `.toml` path. Unset uses `tool-gate`. `gate`, `ask`, `explain`, `hook`, `calibrate`, and `replay` follow it when `--policy` is unset. `test` does not read it. An explicit `--policy` wins. |
+| `SNAPIF_SHADOW` | `1` or `true` is the same override as `--shadow`. |
+| `SNAPIF_TIMEOUT_MS` | Gate budget in milliseconds. Unset is 2000. `0` is a zero-millisecond budget. |
 | `SNAPIF_LOG` | Appends one replay row per gate. |
 | `SNAPIF_CACHE` | Integer cache capacity for a process that evaluates more than one call. One `snapif gate` or `snapif hook` invocation does not reuse it. Unset leaves the cache off. |
 | `TYPESAFE_API_KEY` | Required for `typesafe`. |
 | `SNAPIF_BASE_URL` | Required for `compatible`. Origin only. |
 | `SNAPIF_API_KEY` | Required for `compatible` when the base URL is not a loopback address. |
+| `SNAPIF_ALLOW_PRIVATE_HTTP` | `1` or `true` allows `http` to loopback, link-local, RFC1918, and IPv6 unique-local addresses. Unset keeps `http` on loopback only. The same rule applies to `SNAPIF_CASCADE_BASE_URL`. |
+| `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. |
 
 `typesafe` calls the TypeSafe API. `compatible` calls another server that speaks the same System One shape. Both send the model `jev-latest` unless `SNAPIF_MODEL` is set.
