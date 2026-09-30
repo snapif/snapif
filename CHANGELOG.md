@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.0](https://github.com/snapif/snapif/compare/snapif-v0.1.2...snapif-v0.2.0) (2026-09-30)
+
+
+### Features
+
+* ask on hook review and match host tool prefixes ([#167](https://github.com/snapif/snapif/issues/167)) ([d39737b](https://github.com/snapif/snapif/commit/d39737b9c859fe9cd317e951240153ed1a2aa5c1))
+* calibrate gate verdicts from labeled rows ([#172](https://github.com/snapif/snapif/issues/172)) ([7c67f36](https://github.com/snapif/snapif/commit/7c67f367d3d46b0c5b78ff42e140217134ca95cf)), closes [#157](https://github.com/snapif/snapif/issues/157)
+* install snapif from the action when version is set ([#168](https://github.com/snapif/snapif/issues/168)) ([b2e6f31](https://github.com/snapif/snapif/commit/b2e6f31d67e830fcef25f7bac563bb0c2ff38e02)), closes [#160](https://github.com/snapif/snapif/issues/160)
+* print a Claude Code hook settings block ([#173](https://github.com/snapif/snapif/issues/173)) ([c15696b](https://github.com/snapif/snapif/commit/c15696b022f6b9704fca961609d3348b9f68d26e)), closes [#159](https://github.com/snapif/snapif/issues/159)
+* summarize replay counts and record log reasons ([#171](https://github.com/snapif/snapif/issues/171)) ([86498c1](https://github.com/snapif/snapif/commit/86498c1a77efdccc23a8a2ca63fd11ba33504dbf)), closes [#158](https://github.com/snapif/snapif/issues/158)
+
+
+### Bug Fixes
+
+* ask exits 2 when the state file is not JSON ([#147](https://github.com/snapif/snapif/issues/147)) ([4f8f737](https://github.com/snapif/snapif/commit/4f8f7373a195c6b8b78aca896b8fb94322017bac))
+* calibrate names skipped labels ([#148](https://github.com/snapif/snapif/issues/148)) ([db024fc](https://github.com/snapif/snapif/commit/db024fc588ff3446609f61cf9b09b790400feefe))
+* fake two-way probabilities and sudo/env command match ([#178](https://github.com/snapif/snapif/issues/178)) ([8eaf189](https://github.com/snapif/snapif/commit/8eaf1892dcbd5c057e694c4655a9ccc92d25e903))
+* honor SNAPIF_POLICY, private HTTP, and timeout on explain, replay, and test ([#164](https://github.com/snapif/snapif/issues/164)) ([5274acf](https://github.com/snapif/snapif/commit/5274acfcbb2e210ec650103ee4cc45899c552f0c))
+* honor SNAPIF_SHADOW on the hook ([#181](https://github.com/snapif/snapif/issues/181)) ([cee9954](https://github.com/snapif/snapif/commit/cee995444af7cc08fec7d146b65a026f940e1f48))
+* keep a scripted score of 0 from replaying as escalate ([#177](https://github.com/snapif/snapif/issues/177)) ([e807e9d](https://github.com/snapif/snapif/commit/e807e9d9555aa1ada14a057f82b2602da9768350))
+* keep redirect secrets and HTTP status on the right error ([#145](https://github.com/snapif/snapif/issues/145)) ([2bbdbcf](https://github.com/snapif/snapif/commit/2bbdbcf3a13743c90c7ed3401a98120392fdb376))
+* let fake script confidence drive top_prob ([#165](https://github.com/snapif/snapif/issues/165)) ([d7e46e7](https://github.com/snapif/snapif/commit/d7e46e7f3250091dd3fbeadab60279056faa65f0))
+* match command prefixes on path, case, and tabs ([#175](https://github.com/snapif/snapif/issues/175)) ([420c752](https://github.com/snapif/snapif/commit/420c752866f5e0500e79ff701bfaea9a8da980e0)), closes [#174](https://github.com/snapif/snapif/issues/174)
+* name an unknown script harm ([#182](https://github.com/snapif/snapif/issues/182)) ([5fd854b](https://github.com/snapif/snapif/commit/5fd854b30a2f67f1764cc01efc2e1d38c9210f52))
+* print gate reasons and scores as JSON ([#170](https://github.com/snapif/snapif/issues/170)) ([3d4b63b](https://github.com/snapif/snapif/commit/3d4b63be08894b2fc89923e8cdbb76b21ed1b6e2)), closes [#156](https://github.com/snapif/snapif/issues/156)
+* reject a negative choice or score probability ([#149](https://github.com/snapif/snapif/issues/149)) ([df3fbd8](https://github.com/snapif/snapif/commit/df3fbd8b297c0e4e6b9fbd28cc1b013cfb152a17))
+* replay extra questions from the logged scores ([#166](https://github.com/snapif/snapif/issues/166)) ([efb17a0](https://github.com/snapif/snapif/commit/efb17a061f222a17acf08c94f2bc1a16a1c293fe)), closes [#153](https://github.com/snapif/snapif/issues/153)
+* score calibrate labels by question type ([#169](https://github.com/snapif/snapif/issues/169)) ([d941abf](https://github.com/snapif/snapif/commit/d941abf72a427748c10a6b18aa8116823fbb987b)), closes [#154](https://github.com/snapif/snapif/issues/154)
+
 ## [0.1.2](https://github.com/snapif/snapif/compare/snapif-v0.1.1...snapif-v0.1.2) (2026-09-28)
 
 
