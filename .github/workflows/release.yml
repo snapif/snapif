@@ -1,0 +1,504 @@
+# Release archives for a snapif-vX.Y.Z tag.
+# Adapted from cargo-dist 0.31. The installer is pinned in
+# scripts/install-dist.sh. allow-dirty = ["ci"] so a later dist
+# generate does not overwrite this file.
+name: Release
+
+on:
+  push:
+    tags:
+      - "snapif-v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (snapif-vX.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      val: ${{ steps.plan.outputs.manifest }}
+      tag: ${{ steps.plan.outputs.tag }}
+      tag-flag: ${{ steps.plan.outputs.tag_flag }}
+      publishing: ${{ steps.plan.outputs.publishing }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          TAG_CREATED: ${{ github.event.created }}
+        run: |
+          set -euo pipefail
+          TAG=""
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF_TYPE" = "tag" ]; then
+            TAG="$REF_NAME"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "Release needs a snapif-vX.Y.Z tag" >&2
+            exit 1
+          fi
+          # A GPG re-sign force-updates the tag (created=false). Skipping
+          # this job would leave the matrix output empty and fromJson fails.
+          if [ "$EVENT_NAME" = "push" ] && [ "$TAG_CREATED" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.decide.outputs.skip != 'true'
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install dist
+        if: steps.decide.outputs.skip != 'true'
+        shell: bash
+        run: bash scripts/install-dist.sh
+      - name: Cache dist
+        if: steps.decide.outputs.skip != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/dist
+      - id: plan
+        env:
+          SKIP: ${{ steps.decide.outputs.skip }}
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "$SKIP" = "true" ]; then
+            echo "tag ${TAG} already existed; not building again"
+            printf '%s\n' '{"ci":{"github":{"artifacts_matrix":{"include":[]}}},"announcement_is_prerelease":false,"publish_prereleases":false,"releases":[]}' > plan-dist-manifest.json
+            {
+              echo "publishing=false"
+              echo "tag=$TAG"
+              echo "tag_flag=--tag=$TAG"
+            } >> "$GITHUB_OUTPUT"
+            echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          dist plan --output-format=json --allow-dirty --tag="$TAG" > plan-dist-manifest.json
+          {
+            echo "publishing=true"
+            echo "tag=$TAG"
+            echo "tag_flag=--tag=$TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "manifest=$(jq -c "." plan-dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload dist-manifest.json
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifacts-plan-dist-manifest
+          path: plan-dist-manifest.json
+
+  build-local-artifacts:
+    name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
+    needs:
+      - plan
+    if: ${{ needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      BUILD_MANIFEST_NAME: target/distrib/${{ join(matrix.targets, '-') }}-dist-manifest.json
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        if: runner.os == 'Linux'
+        with:
+          egress-policy: audit
+      - name: enable windows longpaths
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.95"
+          targets: ${{ join(matrix.targets, ',') }}
+      - name: Install Rust non-interactively if not already installed
+        if: ${{ matrix.container }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v cargo > /dev/null 2>&1; then
+            exit 0
+          fi
+          RUSTUP_VERSION=1.29.0
+          case "$(uname -m)" in
+            x86_64)
+              RUSTUP_TRIPLE=x86_64-unknown-linux-gnu
+              RUSTUP_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+              ;;
+            aarch64|arm64)
+              RUSTUP_TRIPLE=aarch64-unknown-linux-gnu
+              RUSTUP_SHA256=9732d6c5e2a098d3521fca8145d826ae0aaa067ef2385ead08e6feac88fa5792
+              ;;
+            *)
+              echo "unsupported architecture for pinned rustup-init: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          URL="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_TRIPLE}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init "${URL}"
+          echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c -
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+      - name: Install dist
+        shell: bash
+        run: bash scripts/install-dist.sh
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Build artifacts
+        shell: bash
+        env:
+          DIST_TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
+          DIST_ARGS: ${{ matrix.dist_args }}
+        run: |
+          set -euo pipefail
+          # DIST_ARGS is the dist plan's own flag string.
+          # shellcheck disable=SC2086
+          dist build "$DIST_TAG_FLAG" --print=linkage --output-format=json $DIST_ARGS > dist-manifest.json
+      - id: cargo-dist
+        name: Post-build
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "paths<<EOF"
+            dist print-upload-files-from-manifest --manifest dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          mkdir -p "$(dirname "$BUILD_MANIFEST_NAME")"
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifacts-build-local-${{ join(matrix.targets, '_') }}
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  build-global-artifacts:
+    needs:
+      - plan
+      - build-local-artifacts
+    if: ${{ needs.plan.result == 'success' && needs.build-local-artifacts.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.95"
+      - name: Install cached dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - name: Put dist on PATH
+        shell: bash
+        run: |
+          chmod +x "${HOME}/.cargo/bin/dist"
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+      - name: Fetch local artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - id: cargo-dist
+        shell: bash
+        env:
+          DIST_TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
+        run: |
+          set -euo pipefail
+          dist build "$DIST_TAG_FLAG" --output-format=json "--artifacts=global" > dist-manifest.json
+          {
+            echo "paths<<EOF"
+            jq --raw-output ".upload_files[]" dist-manifest.json
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          mkdir -p "$(dirname "$BUILD_MANIFEST_NAME")"
+          cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifacts-build-global
+          path: |
+            ${{ steps.cargo-dist.outputs.paths }}
+            ${{ env.BUILD_MANIFEST_NAME }}
+
+  host:
+    needs:
+      - plan
+      - build-local-artifacts
+      - build-global-artifacts
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.build-local-artifacts.result == 'success' && needs.build-global-artifacts.result == 'success' }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      val: ${{ steps.host.outputs.manifest }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install cached dist
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cargo-dist-cache
+          path: ~/.cargo/bin/
+      - name: Put dist on PATH
+        shell: bash
+        run: |
+          chmod +x "${HOME}/.cargo/bin/dist"
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+      - name: Fetch artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - id: host
+        shell: bash
+        env:
+          DIST_TAG_FLAG: ${{ needs.plan.outputs.tag-flag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # dist host --steps=upload needs the GitHub Release to exist.
+          # A plain tag push has no Release yet; keep the plan manifest
+          # so the create step below can still open one.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            dist host "$DIST_TAG_FLAG" --steps=upload --output-format=json > dist-manifest.json
+          else
+            cp target/distrib/plan-dist-manifest.json dist-manifest.json
+          fi
+          echo "manifest=$(jq -c "." dist-manifest.json)" >> "$GITHUB_OUTPUT"
+      - name: Upload dist-manifest.json
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: artifacts-dist-manifest
+          path: dist-manifest.json
+      - name: Download GitHub Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Cleanup
+        run: rm -f artifacts/*-dist-manifest.json
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          ANNOUNCEMENT_TITLE: ${{ fromJson(steps.host.outputs.manifest).announcement_title }}
+          ANNOUNCEMENT_BODY: ${{ fromJson(steps.host.outputs.manifest).announcement_github_body }}
+          IS_PRERELEASE: ${{ fromJson(steps.host.outputs.manifest).announcement_is_prerelease }}
+        run: |
+          set -euo pipefail
+          echo "$ANNOUNCEMENT_BODY" > "$RUNNER_TEMP/notes.txt"
+          extra=()
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            extra+=(--prerelease)
+          fi
+          # release-please may already have created the GitHub Release.
+          # Upload only in that case so dist does not replace the changelog.
+          # Target the tag itself. workflow_dispatch from main has a
+          # github.sha that can be newer than the release commit.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; uploading artifacts"
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" \
+              --target "$TAG" \
+              "${extra[@]}" \
+              --title "$ANNOUNCEMENT_TITLE" \
+              --notes-file "$RUNNER_TEMP/notes.txt" \
+              artifacts/*
+          fi
+
+  provenance:
+    needs:
+      - plan
+      - host
+    if: ${{ always() && !cancelled() && needs.host.result == 'success' && needs.plan.outputs.publishing == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ needs.plan.outputs.tag }}
+      REPO: ${{ github.repository }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: artifacts
+          merge-multiple: true
+      - name: Clean non-distributable files
+        run: |
+          rm -f artifacts/*-dist-manifest.json artifacts/plan-dist-manifest.json
+          rm -f artifacts/*.sigstore.json artifacts/*.sigstore.jsonl \
+            artifacts/*.intoto.jsonl artifacts/*.sig artifacts/*.asc
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.95"
+      - uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
+        with:
+          tool: cargo-cyclonedx@0.5.9
+      - name: Generate SBOM
+        run: |
+          set -euo pipefail
+          cargo cyclonedx --format json --features cli --override-filename snapif-sbom
+          src=""
+          for candidate in snapif-sbom.cdx.json snapif-sbom.json; do
+            if [ -f "$candidate" ]; then
+              src="$candidate"
+              break
+            fi
+          done
+          if [ -z "$src" ]; then
+            echo "cargo cyclonedx did not write snapif-sbom.cdx.json" >&2
+            find . -maxdepth 2 -type f \( -name '*.cdx.json' -o -name '*sbom*' \) >&2 || true
+            exit 1
+          fi
+          cp "$src" artifacts/snapif-sbom.cdx.json
+      - name: Upload SBOM
+        run: gh release upload "$TAG" artifacts/snapif-sbom.cdx.json --repo "$REPO" --clobber
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: artifacts/*
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+      - name: Sign and upload
+        env:
+          ARTIFACTS: artifacts
+        run: bash scripts/attach-release-signatures.sh
+
+  publish-homebrew-formula:
+    needs:
+      - plan
+      - host
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      PLAN: ${{ needs.plan.outputs.val }}
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    if: ${{ always() && !cancelled() && needs.host.result == 'success' && !github.event.repository.private && (!fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases) }}
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: snapif/homebrew-tap
+          persist-credentials: false
+      - name: Fetch homebrew formulae
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: artifacts-*
+          path: Formula/
+          merge-multiple: true
+      - name: Commit formula files
+        run: |
+          set -euo pipefail
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set" >&2
+            exit 1
+          fi
+          git config user.name "snapif release"
+          git config user.email "sebtardif@ncf.ca"
+          seen=0
+          changed=0
+          while IFS= read -r release; do
+            [ -n "$release" ] || continue
+            filename=$(printf '%s\n' "$release" | jq --raw-output '[.artifacts[] | select(endswith(".rb"))][0] // empty')
+            if [ -z "$filename" ]; then
+              echo "release entry has no formula" >&2
+              exit 1
+            fi
+            name="${filename%.rb}"
+            version=$(printf '%s\n' "$release" | jq --raw-output .app_version)
+            seen=1
+            export PATH="/home/linuxbrew/.linuxbrew/bin:$PATH"
+            if command -v brew >/dev/null 2>&1; then
+              brew update
+              brew style --except-cops FormulaAudit/Homepage,FormulaAudit/Desc,FormulaAuditStrict --fix "Formula/${filename}" || true
+            else
+              echo "brew not on PATH; committing formula without brew style"
+            fi
+            git add "Formula/${filename}"
+            if git diff --cached --quiet; then
+              echo "Formula/${filename} unchanged"
+            else
+              git commit -m "${name} ${version}"
+              changed=1
+            fi
+          done < <(printf '%s\n' "$PLAN" | jq --compact-output '.releases[] | select([.artifacts[] | endswith(".rb")] | any)')
+          if [ "$seen" -eq 0 ]; then
+            echo "no Homebrew formula in the release plan" >&2
+            exit 1
+          fi
+          if [ "$changed" -eq 0 ]; then
+            echo "homebrew formula already published"
+            exit 0
+          fi
+          git push "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/snapif/homebrew-tap.git" HEAD:main

@@ -1488,6 +1488,31 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
     assert!(array_out.contains("invalid json"), "{array_out}");
 }
 
+#[test]
+fn hook_denies_an_unknown_script_harm() {
+    let denied = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"nope","confidence":0.95}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("script harm must be none, read, write, exec, network, or money"),
+        "{stdout}"
+    );
+    let harm = "nope";
+    let in_json = format!("{harm:?}").replace('"', "\\\"");
+    assert!(stdout.contains(&in_json), "{stdout}");
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+}
+
 fn hook_env(body: &[u8], shadow: Option<&str>) -> std::process::Output {
     let mut command = bin();
     command

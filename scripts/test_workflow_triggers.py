@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -52,7 +55,14 @@ class WorkflowTriggerTests(unittest.TestCase):
     def test_gitleaks_gates_ci_and_is_not_an_install_action_tool(self) -> None:
         text = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
         self.assertIn("name: Gitleaks", text)
-        self.assertIn("needs: [stealth, lint, workflows, test, gitleaks, fuzz]", text)
+        self.assertIn(
+            "needs: [stealth, lint, workflows, test, gitleaks, fuzz, publish-dry-run, semver-checks]",
+            text,
+        )
+        self.assertIn('test "$PUBLISH" = success', text)
+        self.assertIn('test "$SEMVER" = success', text)
+        self.assertIn("cargo publish --dry-run --locked", text)
+        self.assertIn("cargo-semver-checks@0.50.0", text)
         self.assertIn("max_total_time=10", text)
         self.assertIn("cargo-fuzz@0.13.2", text)
         self.assertIn("RUSTUP_TOOLCHAIN: nightly", text)
@@ -88,10 +98,49 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", on_block)
         self.assertNotIn("pull_request:", on_block)
         self.assertNotIn("cargo test", text)
-        self.assertIn("cargo publish --locked", text)
+        self.assertIn("bash publisher/scripts/publish-crate.sh", text)
         self.assertIn("CARGO_REGISTRY_TOKEN", text)
         self.assertIn("git tag -s -f", text)
         self.assertIn("GPG_PRIVATE_KEY", text)
+        self.assertIn("actions: write", text)
+        self.assertIn('gh workflow run Release --ref main --repo "$REPO" -f tag="$TAG"', text)
+        self.assertIn(
+            "github.event_name == 'workflow_dispatch' && inputs.tag != ''",
+            text,
+        )
+        publish = (ROOT / "scripts" / "publish-crate.sh").read_text(encoding="utf-8")
+        self.assertIn("cargo publish --locked", publish)
+        self.assertIn("snapif-release", publish)
+        release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+        release_on = _on_block(release)
+        self.assertIn("workflow_dispatch:", release_on)
+        self.assertIn("push:", release_on)
+        self.assertIn('tags:', release_on)
+        self.assertIn('"snapif-v[0-9]+.[0-9]+.[0-9]+"', release)
+        self.assertNotIn("pull_request:", release_on)
+        for needle in (
+            "bash scripts/install-dist.sh",
+            "actions/attest-build-provenance@",
+            "sigstore/cosign-installer@",
+            "cargo-cyclonedx@0.5.9",
+            "HOMEBREW_TAP_TOKEN",
+            "snapif-sbom.cdx.json",
+            "bash scripts/attach-release-signatures.sh",
+            'toolchain: "1.95"',
+            "publishing=false",
+            "plan-dist-manifest.json",
+        ):
+            self.assertIn(needle, release)
+        for banned in (
+            "cargo-dist-installer.sh",
+            "cargo-dist-installer.ps1",
+            "sh.rustup.rs",
+            "publish-scoop",
+            "winget",
+            "chocolatey",
+            "npm-package",
+        ):
+            self.assertNotIn(banned, release)
         config = (ROOT / "release-please-config.json").read_text(encoding="utf-8")
         self.assertNotIn("release-as", config)
         self.assertIn('"release-type": "rust"', config)
@@ -141,8 +190,42 @@ class WorkflowTriggerTests(unittest.TestCase):
             start = at + len(needle)
         self.assertEqual(
             text.count("github.event.pull_request.user.login != 'github-actions[bot]'"),
-            3,
+            4,
         )
+
+    def test_signature_script_rejects_a_plain_version_tag(self) -> None:
+        script = ROOT / "scripts" / "attach-release-signatures.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            asset = Path(tmp) / "snapif.tar.xz"
+            asset.write_text("not a real archive\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.update(
+                {
+                    "DRY_RUN": "1",
+                    "TAG": "snapif-v0.2.0",
+                    "REPO": "snapif/snapif",
+                    "ARTIFACTS": tmp,
+                }
+            )
+            ok = subprocess.run(
+                ["bash", str(script)],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(ok.returncode, 0, ok.stderr)
+            self.assertIn("SUBJECT: snapif.tar.xz", ok.stdout)
+            env["TAG"] = "v0.2.0"
+            bad = subprocess.run(
+                ["bash", str(script)],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(bad.returncode, 1)
+            self.assertIn("snapif-vX.Y.Z", bad.stderr)
 
     def test_make_scans_fuzz_manifest(self) -> None:
         text = (ROOT / "Makefile").read_text(encoding="utf-8")
