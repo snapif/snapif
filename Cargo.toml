@@ -6,6 +6,7 @@ rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "Snapif scores one tool call and returns Auto, Review, or Escalate."
 repository = "https://github.com/snapif/snapif"
+homepage = "https://github.com/snapif/snapif"
 keywords = ["cli", "jev", "typesafe", "agent", "hook"]
 categories = ["command-line-utilities", "development-tools"]
 publish = true
@@ -19,6 +20,15 @@ cli = ["http", "dep:clap"]
 name = "snapif"
 path = "src/bin/snapif.rs"
 required-features = ["cli"]
+
+# cargo-dist builds the CLI archive with the cli feature.
+[package.metadata.dist]
+features = ["cli"]
+
+# cargo-dist builds release archives with this profile.
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [dependencies]
 indexmap = { version = "2", features = ["serde"] }
