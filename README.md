@@ -201,7 +201,7 @@ snapif explain --action git.push
 snapif test --vectors tests/conformance
 ```
 
-With the `http` feature, `--base-url` posts each valid vector.
+With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIMEOUT_MS` is unset, that command waits 5000 milliseconds.
 
 `replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. A `SNAPIF_LOG` row records those reasons and the policy id.
 
@@ -259,13 +259,13 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | `SNAPIF_MODEL` | Replaces the default model `jev-latest`. Blank is an error. |
 | `SNAPIF_POLICY` | Shipped id or a `.toml` path. Unset uses `tool-gate`. `gate`, `ask`, `explain`, `hook`, `calibrate`, and `replay` follow it when `--policy` is unset. `test` does not read it. An explicit `--policy` wins. |
 | `SNAPIF_SHADOW` | `1` or `true` is the same override as `--shadow`. |
-| `SNAPIF_TIMEOUT_MS` | Gate budget in milliseconds. Unset is 2000. `0` is a zero-millisecond budget. |
+| `SNAPIF_TIMEOUT_MS` | Milliseconds for `gate`, `ask`, `hook`, and `calibrate` without `--gate`. Unset is 2000. `test --base-url` uses the same variable; unset there is 5000. `0` is a zero-millisecond budget. |
 | `SNAPIF_LOG` | Appends one replay row per gate. |
 | `SNAPIF_CACHE` | Integer cache capacity for a process that evaluates more than one call. One `snapif gate` or `snapif hook` invocation does not reuse it. Unset leaves the cache off. |
 | `TYPESAFE_API_KEY` | Required for `typesafe`. |
 | `SNAPIF_BASE_URL` | Required for `compatible`. Origin only. |
 | `SNAPIF_API_KEY` | Required for `compatible` when the base URL is not a loopback address. |
-| `SNAPIF_ALLOW_PRIVATE_HTTP` | `1` or `true` allows `http` to loopback, link-local, RFC1918, and IPv6 unique-local addresses. Unset keeps `http` on loopback only. The same rule applies to `SNAPIF_CASCADE_BASE_URL`. |
+| `SNAPIF_ALLOW_PRIVATE_HTTP` | `1` or `true` allows `http` to loopback, link-local, RFC1918, and IPv6 unique-local addresses. Unset keeps `http` on loopback only. The same rule applies to `SNAPIF_CASCADE_BASE_URL` and to `test --base-url`. |
 | `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. |
 
 `typesafe` calls the TypeSafe API. `compatible` calls another server that speaks the same System One shape. Both send the model `jev-latest` unless `SNAPIF_MODEL` is set.
