@@ -31,11 +31,35 @@ fn normative_names_are_exported_and_from_error_marks_backend() {
     );
     match rejected.reasons.as_slice() {
         [UnsureReason::Backend { cause }] => {
-            assert!(cause.contains("422"), "{cause}");
+            assert_eq!(cause.len(), 163, "{cause}");
+            assert!(cause.starts_with("rejected HTTP 422: "), "{cause}");
             assert!(cause.ends_with("..."), "{cause}");
-            assert!(cause.len() < 200, "{cause}");
+            assert_eq!(
+                &cause[..160],
+                &format!("rejected HTTP 422: {}", "x".repeat(141))
+            );
         }
         other => panic!("rejected reason: {other:?}"),
+    }
+    let lead = 140;
+    let marked = ActionHint::from_error(
+        &Error::Rejected {
+            status: 422,
+            body: format!("{}é{}", "a".repeat(lead), "b".repeat(40)),
+        },
+        ActionId::new("bash"),
+    );
+    match marked.reasons.as_slice() {
+        [UnsureReason::Backend { cause }] => {
+            assert_eq!(cause.len(), 162, "{cause}");
+            assert!(cause.ends_with("..."), "{cause}");
+            assert!(!cause.contains('é'), "{cause}");
+            assert!(
+                cause.starts_with(&format!("rejected HTTP 422: {}", "a".repeat(lead))),
+                "{cause}"
+            );
+        }
+        other => panic!("marked reason: {other:?}"),
     }
     let from_gate = ActionHint::from_error(&Error::EmptyActionId, ActionId::new("bash"));
     assert_eq!(from_gate.action_id.0, "bash");
