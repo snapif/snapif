@@ -525,6 +525,60 @@ fn gate_script_confidence_outside_zero_to_one_exits_1() {
 }
 
 #[test]
+fn gate_script_harm_names_an_unknown_label() {
+    let dir = std::env::temp_dir().join(format!("snapif-harm-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    for harm in ["nope", "EXEC", ""] {
+        let call = dir.join(format!("bad-{}.json", harm.len()));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"trusted":{{"user_request":"clean"}},"untrusted":null,"script":{{"harm":"{harm}","confidence":0.95}}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{harm:?} {out}{err}");
+        assert!(
+            err.contains("script harm must be none, read, write, exec, network, or money"),
+            "{err}"
+        );
+        assert!(err.contains(&format!("{harm:?}")), "{err}");
+        assert!(out.trim().is_empty(), "{out}");
+    }
+    let money = dir.join("money.json");
+    fs::write(
+        &money,
+        r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp/demo"},"trusted":{"user_request":"clean"},"untrusted":null,"script":{"harm":"money","confidence":0.95}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&money)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_ne!(output.status.code(), Some(1), "{out}{err}");
+    assert!(!err.contains("script harm"), "{err}");
+    assert!(
+        matches!(out.trim(), "auto" | "review" | "escalate"),
+        "{out}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([
