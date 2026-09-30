@@ -107,4 +107,43 @@ mod tests {
         card.add_choice(false);
         assert_eq!(card.choice_accuracy().unwrap(), 0.5);
     }
+
+    #[test]
+    fn noul_probability_one_lands_in_the_last_bin() {
+        let mut card = Scorecard::default();
+        assert!(card.is_empty());
+        assert_eq!(card.brier(), None);
+        assert_eq!(card.choice_accuracy(), None);
+        assert_eq!(card.bins().count(), 0);
+
+        card.add_noul(0.5, false);
+        assert_eq!(card.brier(), Some(0.25));
+        assert_eq!(card.bins().collect::<Vec<_>>(), vec![(2, 1, 0.0)]);
+
+        card.add_noul(1.0, true);
+        assert_eq!(card.brier(), Some(0.125));
+        assert_eq!(
+            card.bins().collect::<Vec<_>>(),
+            vec![(2, 1, 0.0), (4, 1, 1.0)]
+        );
+    }
+
+    #[test]
+    fn score_width_clamps_the_squared_error() {
+        let mut wide = Scorecard::default();
+        wide.add_score(2.0, 0.0, 1.0);
+        assert_eq!(wide.brier(), Some(1.0));
+
+        let mut zero_width = Scorecard::default();
+        zero_width.add_score(0.5, 0.0, 0.0);
+        assert_eq!(zero_width.brier(), Some(0.25));
+    }
+
+    #[test]
+    fn a_guess_match_is_not_counted_as_known() {
+        let mut card = Scorecard::default();
+        card.add_choice_compared(false, true);
+        assert_eq!(card.choice_accuracy(), Some(0.0));
+        assert_eq!(card.choice_compared(), (0, 1));
+    }
 }
