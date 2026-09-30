@@ -1434,6 +1434,74 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
     assert!(array_out.contains("invalid json"), "{array_out}");
 }
 
+fn hook_env(body: &[u8], shadow: Option<&str>) -> std::process::Output {
+    let mut command = bin();
+    command
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    match shadow {
+        Some(value) => {
+            command.env("SNAPIF_SHADOW", value);
+        }
+        None => {
+            command.env_remove("SNAPIF_SHADOW");
+        }
+    }
+    let mut child = command.spawn().expect("spawn");
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(body).unwrap();
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn hook_shadow_env_allows_like_the_flag() {
+    let plain = br#"{"tool_name":"bash","tool_input":{"command":"ls"}}"#;
+    let on = hook_env(plain, Some("1"));
+    let out = String::from_utf8_lossy(&on.stdout);
+    let err = String::from_utf8_lossy(&on.stderr);
+    assert_eq!(on.status.code(), Some(0), "{out}{err}");
+    assert!(out.contains("\"permissionDecision\":\"allow\""), "{out}");
+    assert!(
+        out.contains("\"permissionDecisionReason\":\"escalate\""),
+        "{out}"
+    );
+    assert_eq!(err.trim(), "escalate");
+    let word = hook_env(plain, Some("true"));
+    let word_out = String::from_utf8_lossy(&word.stdout);
+    assert!(
+        word_out.contains("\"permissionDecision\":\"allow\""),
+        "{word_out}"
+    );
+    let off = hook_env(plain, Some("yes"));
+    let off_out = String::from_utf8_lossy(&off.stdout);
+    assert!(
+        off_out.contains("\"permissionDecision\":\"deny\""),
+        "{off_out}"
+    );
+    let asked = br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"exec","confidence":0.95}}"#;
+    let review = hook_env(asked, Some("1"));
+    let review_out = String::from_utf8_lossy(&review.stdout);
+    let review_err = String::from_utf8_lossy(&review.stderr);
+    assert_eq!(review.status.code(), Some(0), "{review_out}{review_err}");
+    assert!(
+        review_out.contains("\"permissionDecision\":\"allow\""),
+        "{review_out}"
+    );
+    assert!(
+        review_out.contains("\"permissionDecisionReason\":\"review\""),
+        "{review_out}"
+    );
+    assert!(
+        !review_out.contains("\"permissionDecision\":\"ask\""),
+        "{review_out}"
+    );
+    assert_eq!(review_err.trim(), "review");
+}
+
 #[test]
 fn hook_asks_on_review_and_explain_names_the_bash_rule() {
     let asked = hook_output(
