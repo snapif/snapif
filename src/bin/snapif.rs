@@ -638,6 +638,12 @@ fn scripted(
             "script confidence must be from 0 to 1, got {confidence}"
         ))));
     }
+    if serde_json::from_value::<snapif::policy::HarmClass>(Value::String(harm.to_string())).is_err()
+    {
+        return Err(Error::Policy(snapif::error::PolicyError::Config(format!(
+            "script harm must be none, read, write, exec, network, or money, got {harm:?}"
+        ))));
+    }
     let battery = snapif::backends::cascade::battery_ids();
     let mut backend = FakeBackend::new().on_choice("harm_class", harm, confidence);
     for id in &battery {
