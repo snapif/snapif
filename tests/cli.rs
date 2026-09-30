@@ -2055,6 +2055,37 @@ fn calibrate_empty_file_names_the_path() {
 }
 
 #[test]
+fn calibrate_rejects_bad_json_and_a_questions_array() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-shape-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let cases = [
+        ("not-json.jsonl", "not-json\n", 1, "line 1:"),
+        ("array.jsonl", "[]\n", 2, "state must be an object"),
+        (
+            "questions.jsonl",
+            "{\"questions\":[]}\n",
+            2,
+            "questions must be an object",
+        ),
+    ];
+    for (name, body, code, needle) in cases {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .arg("calibrate")
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{name} {err}");
+        assert!(err.contains(needle), "{name} {err}");
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_empty_directory_is_not_an_io_error() {
     let path = std::env::temp_dir().join(format!("snapif-cal-dir-{}", std::process::id()));
     fs::create_dir(&path).expect("dir");
