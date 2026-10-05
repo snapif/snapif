@@ -355,6 +355,8 @@ fn check_action(
 /// followed by a null and `dir` stays `rmdir`. `$'rm'` and `$"rm"`
 /// match too, because bash runs those words as `rm`. An ANSI-C null
 /// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
+/// `exec rm` and `eval 'rm ...'` match. `exec -a rm echo` and
+/// `eval echo` do not.
 /// `git push` matches `git push`, `git\tpush`, `/usr/bin/git push`, and
 /// `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
@@ -397,6 +399,12 @@ fn matched_in<'a>(
             return Some(id);
         }
         if let Some(script) = shell_script(&argv) {
+            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+                return Some(id);
+            }
+            continue;
+        }
+        if let Some(script) = eval_script(&argv) {
             if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
                 return Some(id);
             }
@@ -603,7 +611,7 @@ fn skip_options(argv: &[String], mut index: usize) -> usize {
 fn is_wrapper(name: &str) -> bool {
     const WRAPPERS: &[&str] = &[
         "sudo", "doas", "pkexec", "env", "command", "nice", "nohup", "time", "busybox", "ionice",
-        "stdbuf", "setsid",
+        "stdbuf", "setsid", "exec",
     ];
     WRAPPERS
         .iter()
@@ -642,6 +650,7 @@ fn flag_takes_value(wrapper: &str, flag: &str) -> bool {
         "time" => matches!(name, "-f" | "-o" | "format" | "output"),
         "stdbuf" => matches!(name, "-i" | "-o" | "-e" | "input" | "output" | "error"),
         "pkexec" => name == "user",
+        "exec" => name == "-a",
         _ => false,
     }
 }
@@ -658,6 +667,21 @@ fn option_takes_value(flag: &str) -> bool {
             | "config-env"
             | "exec-path"
     )
+}
+
+fn eval_script(tokens: &[String]) -> Option<String> {
+    let base = command_basename(tokens.first()?);
+    if !base.eq_ignore_ascii_case("eval") {
+        return None;
+    }
+    let mut rest = &tokens[1..];
+    if rest.first().is_some_and(|token| token == "--") {
+        rest = &rest[1..];
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.join(" "))
 }
 
 fn shell_script(tokens: &[String]) -> Option<String> {
@@ -1412,6 +1436,52 @@ mod tests {
             "$\"r\\m\" --version",
             "$\"rm --version\"",
             "$'rm\\n--version'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_and_eval_match_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "exec rm --version",
+            "exec -a name rm --version",
+            "exec -- rm --version",
+            "exec -cl rm --version",
+            "command exec rm --version",
+            "sudo exec rm --version",
+            "eval rm --version",
+            "eval 'rm --version'",
+            "eval $\"rm --version\"",
+            "eval -- rm --version",
+            "eval 'echo ok; rm --version'",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = ["exec git push", "eval 'git push'"];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "exec -a rm echo hello",
+            "exec rmdir /tmp",
+            "echo exec rm",
+            "eval echo ok",
+            "eval 'echo rm'",
         ];
         for command in neither {
             assert!(

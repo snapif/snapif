@@ -104,7 +104,7 @@ Drop `--shadow` and stdout denies. The process still exits 0. The reason names t
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate: decode"}}
 ```
 
-A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `$'rm'`, `$"rm"`, and `bash -c $'rm -rf /'` match as well, because bash runs those words as `rm`. `rmdir`, `git push-all`, `echo rm`, `echo $'rm'`, and `find -delete` do not.
+A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `$'rm'`, `$"rm"`, `bash -c $'rm -rf /'`, `exec rm`, and `eval 'rm -rf /'` match as well, because bash runs those words as `rm`. `rmdir`, `git push-all`, `echo rm`, `echo $'rm'`, `exec -a rm echo`, and `find -delete` do not.
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"review: review_floor"}}

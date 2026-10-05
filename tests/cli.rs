@@ -1748,6 +1748,38 @@ fn hook_asks_when_ansi_c_quotes_hide_rm() {
 }
 
 #[test]
+fn hook_asks_when_exec_or_eval_hides_rm() {
+    let hidden = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"exec rm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&hidden.stdout);
+    assert_eq!(hidden.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    let evaluated = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"eval 'rm --version'"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let evaluated_out = String::from_utf8_lossy(&evaluated.stdout);
+    assert!(
+        evaluated_out.contains("\"permissionDecision\":\"ask\""),
+        "{evaluated_out}"
+    );
+    let renamed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"exec -a rm echo hello"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let renamed_out = String::from_utf8_lossy(&renamed.stdout);
+    assert!(
+        renamed_out.contains("\"permissionDecision\":\"allow\""),
+        "{renamed_out}"
+    );
+}
+
+#[test]
 fn hook_keeps_the_prompt_and_drops_the_session_id() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-turn-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
