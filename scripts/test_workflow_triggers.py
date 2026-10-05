@@ -237,6 +237,106 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertEqual(text.count(deny), 3)
         self.assertEqual(text.count(forbid), 3)
 
+    def test_dependabot_pin_plus_patch_can_auto_merge(self) -> None:
+        module = _automerge()
+        pin = "02cb101ec7c40f2c49e1d9714d64511d8e1b74de"
+        pin_and_patch = [
+            {
+                "dependencyName": "dtolnay/rust-toolchain",
+                "updateType": "version-update:semver-major",
+                "prevVersion": pin,
+            },
+            {
+                "dependencyName": "taiki-e/install-action",
+                "updateType": "version-update:semver-patch",
+                "prevVersion": "2.87.20",
+            },
+        ]
+        self.assertEqual(
+            module.decision("version-update:semver-major", pin, pin_and_patch),
+            "merge",
+        )
+        self.assertEqual(
+            module.decision(
+                "version-update:semver-major",
+                pin,
+                [
+                    pin_and_patch[0],
+                    {
+                        "dependencyName": "actions/checkout",
+                        "updateType": "version-update:semver-major",
+                        "prevVersion": "4",
+                    },
+                ],
+            ),
+            "skip",
+        )
+        self.assertEqual(
+            module.decision("version-update:semver-patch", "1.2.3", None),
+            "merge",
+        )
+        self.assertEqual(
+            module.decision("version-update:semver-minor", "1.2.3", []),
+            "merge",
+        )
+        self.assertEqual(
+            module.decision("version-update:semver-major", "1.2.3", None),
+            "skip",
+        )
+        self.assertEqual(
+            module.decision("version-update:semver-major", pin, []),
+            "merge",
+        )
+        self.assertEqual(module.decision("", "", None), "skip")
+        self.assertEqual(
+            module.decision(
+                "version-update:semver-major",
+                "1.2.3",
+                [{"updateType": "version-update:semver-patch"}],
+            ),
+            "merge",
+        )
+        text = (WORKFLOWS / "dependabot-auto-merge.yml").read_text(encoding="utf-8")
+        self.assertIn("pull_request_target:", text)
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("dependabot[bot]", text)
+        self.assertIn("github.event.pull_request.base.sha", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn("gh pr merge --auto --squash", text)
+        self.assertIn("dependabot/fetch-metadata@", text)
+        self.assertNotIn("head.sha", text)
+        self.assertNotIn("head.ref", text)
+        approve = (WORKFLOWS / "auto-approve.yml").read_text(encoding="utf-8")
+        self.assertNotIn("dependabot", approve)
+
+    def test_dependabot_automerge_script_fails_closed(self) -> None:
+        script = ROOT / "scripts" / "dependabot_automerge_ok.py"
+        env = os.environ.copy()
+        env["UPDATE_TYPE"] = "version-update:semver-major"
+        env["PREV"] = "1.0.0"
+        env["DEPS"] = "not-json"
+        bad = subprocess.run(
+            ["python3", str(script)],
+            check=False,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(bad.returncode, 0, bad.stderr)
+        self.assertEqual(bad.stdout.strip(), "decision=skip")
+
+
+def _automerge():
+    import importlib.util
+
+    path = ROOT / "scripts" / "dependabot_automerge_ok.py"
+    spec = importlib.util.spec_from_file_location("dependabot_automerge_ok", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 if __name__ == "__main__":
     unittest.main()
