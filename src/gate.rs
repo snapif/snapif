@@ -1192,6 +1192,32 @@ mod tests {
         assert!(matches!(verdict, crate::verdict::Verdict::Auto(_)));
     }
 
+    #[test]
+    fn replace_fake_drops_the_cached_verdict() {
+        let mut client = Client::<AnyBackend>::from_config(&crate::ClientConfig {
+            backend: "fake".to_string(),
+            cache_capacity: Some(4),
+            ..crate::ClientConfig::default()
+        })
+        .expect("fake");
+        client.replace_fake(read_backend()).expect("auto script");
+        let first = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(matches!(first, crate::verdict::Verdict::Auto(_)));
+        let mut slow = FakeBackend::new().on_timeout("harm_class");
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            slow = slow.on_noul(&id.0, 0.0);
+        }
+        client.replace_fake(slow).expect("timeout script");
+        let second = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(
+            matches!(second, crate::verdict::Verdict::Escalate(_)),
+            "{second:?}"
+        );
+    }
+
     fn read_backend() -> FakeBackend {
         let mut backend = FakeBackend::new().on_choice("harm_class", "read", 0.91);
         for id in crate::backends::cascade::battery_ids() {
