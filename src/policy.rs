@@ -350,8 +350,10 @@ fn check_action(
 ///
 /// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `sudo -nu root rm`,
 /// `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
-/// `env -S 'rm ...'`. `git push` matches `git push`, `git\tpush`,
-/// `/usr/bin/git push`, and `git -C repo push`.
+/// `env -S 'rm ...'`. A null byte is removed first, because bash
+/// removes it: `rm` followed by a null and `-rf` matches, and `rm`
+/// followed by a null and `dir` stays `rmdir`. `git push` matches
+/// `git push`, `git\tpush`, `/usr/bin/git push`, and `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
 /// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
 /// `command -v rm`, `sudo -l`, an empty word, and a heredoc body do not match.
@@ -741,13 +743,19 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     let mut quoted = false;
     let mut heredocs: Vec<(String, bool)> = Vec::new();
     while let Some(ch) = chars.next() {
+        // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
+        if ch == '\0' {
+            continue;
+        }
         if let Some(open) = quote {
             if ch == open {
                 quote = None;
                 continue;
             }
             if open == '"' && ch == '\\' {
-                if let Some(next) = chars.next() {
+                if let Some(next) = chars.next()
+                    && next != '\0'
+                {
                     token.push(next);
                 }
                 continue;
@@ -763,6 +771,7 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
             '\\' => {
                 if let Some(next) = chars.next()
                     && next != '\n'
+                    && next != '\0'
                 {
                     token.push(next);
                 }
@@ -1149,5 +1158,23 @@ mod tests {
                 "{command}"
             );
         }
+        // Bash deletes a null byte. `rm` + NUL + ` -rf` is rm. `rm` + NUL + `dir` is rmdir.
+        let dropped = "rm\u{0} -rf /tmp";
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(dropped)).map(|id| id.0.as_str()),
+            Some("bash.rm"),
+            "{dropped:?}"
+        );
+        let later_line = "echo ok\nrm\u{0} -rf /";
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(later_line)).map(|id| id.0.as_str()),
+            Some("bash.rm"),
+            "{later_line:?}"
+        );
+        let glued = "rm\u{0}dir /tmp";
+        assert!(
+            matched_action(&policy, "Bash", Some(glued)).is_none(),
+            "{glued:?}"
+        );
     }
 }
