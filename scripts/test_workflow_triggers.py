@@ -325,6 +325,67 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertEqual(bad.returncode, 0, bad.stderr)
         self.assertEqual(bad.stdout.strip(), "decision=skip")
 
+    def test_stealth_does_not_claim_an_unread_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            script = root / "scripts" / "assert-stealth.sh"
+            script.write_text(
+                (ROOT / "scripts" / "assert-stealth.sh").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            readme = root / "README.md"
+            readme.write_text(
+                "[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15006/badge)]"
+                "(https://www.bestpractices.dev/en/projects/15006)\n",
+                encoding="utf-8",
+            )
+            (root / "Cargo.toml").write_text(
+                'keywords = ["cli"]\ncategories = ["command-line-utilities"]\n',
+                encoding="utf-8",
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "repo" ]; then\n'
+                "  printf '%s\\n' "
+                '\'{"description":"Snapif","homepageUrl":"","repositoryTopics":'
+                '[{"name":"rust"}],"isPrivate":false}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/snapif/snapif.git",
+                ],
+                cwd=root,
+                check=True,
+            )
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            result = subprocess.run(
+                ["bash", str(script), "snapif/snapif"],
+                cwd=root,
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("FAIL:", result.stdout)
+            self.assertNotIn("README badges match live signals", result.stdout)
+
 
 def _automerge():
     import importlib.util

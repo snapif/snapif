@@ -350,8 +350,18 @@ fn check_action(
 ///
 /// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `sudo -nu root rm`,
 /// `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
-/// `env -S 'rm ...'`. `git push` matches `git push`, `git\tpush`,
-/// `/usr/bin/git push`, and `git -C repo push`.
+/// `env -S 'rm ...'`. A null byte is removed first, because bash
+/// removes it: `rm` followed by a null and `-rf` matches, and `rm`
+/// followed by a null and `dir` stays `rmdir`. `$'rm'` and `$"rm"`
+/// match too, because bash runs those words as `rm`. An ANSI-C null
+/// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
+/// `exec rm` and `eval 'rm ...'` match. `exec -a rm echo` and
+/// `eval echo` do not. `timeout 1 rm` and `xargs rm` match.
+/// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
+/// and `xargs echo rm` do not match. Homebrew names the same binaries
+/// `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm`.
+/// `git push` matches `git push`, `git\tpush`, `/usr/bin/git push`, and
+/// `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
 /// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
 /// `command -v rm`, `sudo -l`, an empty word, and a heredoc body do not match.
@@ -397,6 +407,12 @@ fn matched_in<'a>(
             }
             continue;
         }
+        if let Some(script) = eval_script(&argv) {
+            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+                return Some(id);
+            }
+            continue;
+        }
         for (id, row) in &policy.actions {
             let Some(tool) = row.tool.as_deref() else {
                 continue;
@@ -420,7 +436,7 @@ fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
     if argv.is_empty() || prefix.is_empty() {
         return false;
     }
-    if !same_word(command_basename(&argv[0]), command_basename(&prefix[0])) {
+    if !same_tool(command_basename(&argv[0]), command_basename(&prefix[0])) {
         return false;
     }
     if prefix.len() == 1 {
@@ -445,12 +461,13 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
             index += 1;
             continue;
         }
-        let base = command_basename(&tokens[index]).to_ascii_lowercase();
-        if !is_wrapper(&base) {
+        let lowered = command_basename(&tokens[index]).to_ascii_lowercase();
+        let base = gnu_alias(&lowered);
+        if !is_wrapper(base) {
             break;
         }
         index += 1;
-        let Some((next, script)) = skip_wrapper_flags(&base, tokens, index) else {
+        let Some((next, script)) = skip_wrapper_flags(base, tokens, index) else {
             return split_script.map(|script| (Vec::new(), Some(script)));
         };
         if split_script.is_none() {
@@ -474,6 +491,10 @@ fn skip_wrapper_flags(
             continue;
         }
         if token == "--" {
+            // `timeout -- 1 rm` still has a duration after the option end.
+            if wrapper == "timeout" {
+                return Some(((index + 2).min(tokens.len()), split_script));
+            }
             return Some((index + 1, split_script));
         }
         if !token.starts_with('-') {
@@ -507,6 +528,10 @@ fn skip_wrapper_flags(
             }
             index += 1;
         }
+    }
+    // The first word after timeout's options is the duration, not the command.
+    if wrapper == "timeout" && index < tokens.len() {
+        index += 1;
     }
     Some((index, split_script))
 }
@@ -595,10 +620,28 @@ fn skip_options(argv: &[String], mut index: usize) -> usize {
     index
 }
 
+fn same_tool(token: &str, prefix: &str) -> bool {
+    same_word(token, prefix) || (same_word(token, "grm") && same_word(prefix, "rm"))
+}
+
+/// Homebrew installs the same coreutils and findutils binaries under a
+/// `g` name (`gtimeout`, `grm`). The shell runs that name as the unprefixed tool.
+fn gnu_alias(name: &str) -> &str {
+    match name {
+        "genv" => "env",
+        "gnice" => "nice",
+        "gnohup" => "nohup",
+        "gstdbuf" => "stdbuf",
+        "gtimeout" => "timeout",
+        "gxargs" => "xargs",
+        other => other,
+    }
+}
+
 fn is_wrapper(name: &str) -> bool {
     const WRAPPERS: &[&str] = &[
         "sudo", "doas", "pkexec", "env", "command", "nice", "nohup", "time", "busybox", "ionice",
-        "stdbuf", "setsid",
+        "stdbuf", "setsid", "exec", "timeout", "xargs",
     ];
     WRAPPERS
         .iter()
@@ -637,6 +680,27 @@ fn flag_takes_value(wrapper: &str, flag: &str) -> bool {
         "time" => matches!(name, "-f" | "-o" | "format" | "output"),
         "stdbuf" => matches!(name, "-i" | "-o" | "-e" | "input" | "output" | "error"),
         "pkexec" => name == "user",
+        "exec" => name == "-a",
+        "timeout" => matches!(name, "-k" | "-s" | "kill-after" | "signal"),
+        "xargs" => matches!(
+            name,
+            "-a" | "-I"
+                | "-L"
+                | "-n"
+                | "-P"
+                | "-s"
+                | "-d"
+                | "-E"
+                | "arg-file"
+                | "replace"
+                | "max-lines"
+                | "max-args"
+                | "max-procs"
+                | "max-chars"
+                | "delimiter"
+                | "process-slot-var"
+                | "eof"
+        ),
         _ => false,
     }
 }
@@ -653,6 +717,21 @@ fn option_takes_value(flag: &str) -> bool {
             | "config-env"
             | "exec-path"
     )
+}
+
+fn eval_script(tokens: &[String]) -> Option<String> {
+    let base = command_basename(tokens.first()?);
+    if !base.eq_ignore_ascii_case("eval") {
+        return None;
+    }
+    let mut rest = &tokens[1..];
+    if rest.first().is_some_and(|token| token == "--") {
+        rest = &rest[1..];
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest.join(" "))
 }
 
 fn shell_script(tokens: &[String]) -> Option<String> {
@@ -732,6 +811,177 @@ fn same_word(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+/// Bash `$'...'` word. A decoded null ends the word. A raw null in the
+/// source is skipped, because the bash reader deletes it before parsing.
+fn read_ansi_c<I>(chars: &mut std::iter::Peekable<I>, token: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    let mut truncated = false;
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if truncated {
+            if ch == '\'' {
+                return;
+            }
+            continue;
+        }
+        if ch == '\'' {
+            return;
+        }
+        if ch != '\\' {
+            token.push(ch);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            token.push('\\');
+            return;
+        };
+        if next == '\0' {
+            token.push('\\');
+            continue;
+        }
+        if push_ansi_escape(chars, token, next) {
+            truncated = true;
+        }
+    }
+}
+
+fn push_ansi_escape<I>(chars: &mut std::iter::Peekable<I>, token: &mut String, next: char) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    match next {
+        '\\' | '\'' | '"' | '?' => token.push(next),
+        'a' => token.push('\u{7}'),
+        'b' => token.push('\u{8}'),
+        'e' | 'E' => token.push('\u{1b}'),
+        'f' => token.push('\u{c}'),
+        'n' => token.push('\n'),
+        'r' => token.push('\r'),
+        't' => token.push('\t'),
+        'v' => token.push('\u{b}'),
+        'c' => {
+            let Some(ctrl) = chars.next() else {
+                token.push('\\');
+                token.push('c');
+                return false;
+            };
+            if ctrl == '\0' {
+                token.push('\\');
+                token.push('c');
+                return false;
+            }
+            let value = (ctrl as u32) & 0x1f;
+            if value == 0 {
+                return true;
+            }
+            token.push(char::from_u32(value).unwrap_or('\u{FFFD}'));
+        }
+        'x' | 'X' => return push_ansi_number(chars, token, 16, 2, next),
+        'u' => return push_ansi_number(chars, token, 16, 4, next),
+        'U' => return push_ansi_number(chars, token, 16, 8, next),
+        '0'..='7' => {
+            let mut value = next.to_digit(8).unwrap_or(0);
+            for _ in 1..3 {
+                let Some(digit) = chars.peek().copied() else {
+                    break;
+                };
+                let Some(part) = digit.to_digit(8) else {
+                    break;
+                };
+                chars.next();
+                value = value * 8 + part;
+            }
+            return push_ansi_value(token, u64::from(value));
+        }
+        _ => {
+            token.push('\\');
+            token.push(next);
+        }
+    }
+    false
+}
+
+fn push_ansi_number<I>(
+    chars: &mut std::iter::Peekable<I>,
+    token: &mut String,
+    radix: u32,
+    max: usize,
+    introducer: char,
+) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = 0u64;
+    let mut count = 0;
+    while count < max {
+        let Some(digit) = chars.peek().copied() else {
+            break;
+        };
+        let Some(part) = digit.to_digit(radix) else {
+            break;
+        };
+        chars.next();
+        value = value * u64::from(radix) + u64::from(part);
+        count += 1;
+    }
+    if count == 0 {
+        token.push('\\');
+        token.push(introducer);
+        return false;
+    }
+    push_ansi_value(token, value)
+}
+
+fn push_ansi_value(token: &mut String, value: u64) -> bool {
+    if value == 0 {
+        return true;
+    }
+    match u32::try_from(value).ok().and_then(char::from_u32) {
+        Some(ch) => token.push(ch),
+        None => token.push('\u{FFFD}'),
+    }
+    false
+}
+
+/// Bash `$"..."` word. A backslash escapes `$`, backtick, `"`, `\`, and a newline.
+fn read_dollar_double<I>(chars: &mut std::iter::Peekable<I>, token: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if ch == '"' {
+            return;
+        }
+        if ch != '\\' {
+            token.push(ch);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            token.push('\\');
+            return;
+        };
+        if next == '\0' {
+            token.push('\\');
+            continue;
+        }
+        match next {
+            '\\' | '$' | '`' | '"' => token.push(next),
+            '\n' => {}
+            _ => {
+                token.push('\\');
+                token.push(next);
+            }
+        }
+    }
+}
+
 fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
     let mut current = Vec::new();
@@ -741,18 +991,37 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     let mut quoted = false;
     let mut heredocs: Vec<(String, bool)> = Vec::new();
     while let Some(ch) = chars.next() {
+        // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
+        if ch == '\0' {
+            continue;
+        }
         if let Some(open) = quote {
             if ch == open {
                 quote = None;
                 continue;
             }
             if open == '"' && ch == '\\' {
-                if let Some(next) = chars.next() {
+                if let Some(next) = chars.next()
+                    && next != '\0'
+                {
                     token.push(next);
                 }
                 continue;
             }
             token.push(ch);
+            continue;
+        }
+        if ch == '$'
+            && let Some(&next) = chars.peek()
+            && (next == '\'' || next == '"')
+        {
+            chars.next();
+            quoted = true;
+            if next == '\'' {
+                read_ansi_c(&mut chars, &mut token);
+            } else {
+                read_dollar_double(&mut chars, &mut token);
+            }
             continue;
         }
         match ch {
@@ -763,6 +1032,7 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
             '\\' => {
                 if let Some(next) = chars.next()
                     && next != '\n'
+                    && next != '\0'
                 {
                     token.push(next);
                 }
@@ -910,11 +1180,14 @@ pub fn effective_gates(
         auto = auto.map(|value| value.max(policy.choice.review_below));
     }
     let mut harm_bumped = None;
-    if let Some(decoded) = harm_class
-        && decoded > action.class
-    {
-        auto = None;
-        harm_bumped = Some((action.class, decoded));
+    if let Some(decoded) = harm_class {
+        if decoded > action.class {
+            auto = None;
+            harm_bumped = Some((action.class, decoded));
+        } else if decoded < action.class && action.class >= HarmClass::Write {
+            // The confidence is in the lower label. It must not auto this row.
+            auto = None;
+        }
     }
     Ok(EffectiveGates {
         escalate_below,
@@ -1147,6 +1420,194 @@ mod tests {
             assert!(
                 matched_action(&policy, "Bash", Some(command)).is_none(),
                 "{command}"
+            );
+        }
+        // Bash deletes a null byte. `rm` + NUL + ` -rf` is rm. `rm` + NUL + `dir` is rmdir.
+        let dropped = "rm\u{0} -rf /tmp";
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(dropped)).map(|id| id.0.as_str()),
+            Some("bash.rm"),
+            "{dropped:?}"
+        );
+        let later_line = "echo ok\nrm\u{0} -rf /";
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(later_line)).map(|id| id.0.as_str()),
+            Some("bash.rm"),
+            "{later_line:?}"
+        );
+        let glued = "rm\u{0}dir /tmp";
+        assert!(
+            matched_action(&policy, "Bash", Some(glued)).is_none(),
+            "{glued:?}"
+        );
+    }
+
+    #[test]
+    fn ansi_c_and_locale_quotes_match_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "$'rm' --version",
+            "$\"rm\" --version",
+            "$'r\\x6d' --version",
+            "$'r\\155' --version",
+            "$'r\\u006d' --version",
+            "$'r\\u6d' --version",
+            "bash -c $'rm --version'",
+            "$'rm\\x00dir' --version",
+            "$'rm\\000dir' --version",
+            "$'rm\\0dir' --version",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = [
+            "$'git' push",
+            "$'git' $'push'",
+            "git $'push'",
+            "bash -c $'git push'",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "echo $'rm'",
+            "echo $\"rm\"",
+            "$'rmdir' /tmp",
+            "$\"rmdir\" /tmp",
+            "$'r\\m' --version",
+            "$\"r\\m\" --version",
+            "$\"rm --version\"",
+            "$'rm\\n--version'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_and_eval_match_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "exec rm --version",
+            "exec -a name rm --version",
+            "exec -- rm --version",
+            "exec -cl rm --version",
+            "command exec rm --version",
+            "sudo exec rm --version",
+            "eval rm --version",
+            "eval 'rm --version'",
+            "eval $\"rm --version\"",
+            "eval -- rm --version",
+            "eval 'echo ok; rm --version'",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = ["exec git push", "eval 'git push'"];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "exec -a rm echo hello",
+            "exec rmdir /tmp",
+            "echo exec rm",
+            "eval echo ok",
+            "eval 'echo rm'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_and_xargs_match_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "timeout 1 rm --version",
+            "timeout --foreground 1 rm --version",
+            "timeout -k 1 2 rm --version",
+            "timeout -k1 2 rm --version",
+            "timeout -s TERM 1 rm --version",
+            "timeout --signal=TERM 1 rm --version",
+            "timeout 1s rm --version",
+            "timeout -- 1 rm --version",
+            "timeout 1 command rm --version",
+            "xargs rm --version",
+            "xargs -n 1 rm --version",
+            "xargs -n1 rm --version",
+            "xargs -- rm --version",
+            "xargs -E _ rm --version",
+            "xargs -0 rm --version",
+            "xargs -e rm --version",
+            "xargs -a /dev/null rm --version",
+            "command xargs rm --version",
+            "timeout 1 bash -c 'rm --version'",
+            "xargs sh -c 'rm --version'",
+            "timeout 1 sudo rm --version",
+            "gtimeout 1 rm --version",
+            "gxargs rm --version",
+            "gstdbuf -oL rm --version",
+            "gnice rm --version",
+            "genv rm --version",
+            "genv -S 'rm --version'",
+            "gnohup rm --version",
+            "grm --version",
+            "gtimeout 1 grm --version",
+            "/opt/homebrew/bin/grm --version",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = ["timeout 1 git push", "xargs git push"];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "timeout 1 rmdir --version",
+            "timeout 1 echo rm",
+            "timeout -- rm --version",
+            "timeout 1 -- rm --version",
+            "xargs echo rm",
+            "echo timeout 1 rm",
+            "echo xargs rm",
+            "echo grm",
+            "gfalse rm --version",
+            "grmdir /tmp",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
             );
         }
     }

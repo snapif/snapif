@@ -511,17 +511,26 @@ impl Client<AnyBackend> {
     }
 
     /// Install a scripted fake scorer. Refuses any other backend.
+    ///
+    /// Cached gate results are dropped. The next `gate` runs this script.
     pub fn replace_fake(&mut self, backend: FakeBackend) -> Result<(), Error> {
         match &mut self.backend {
             AnyBackend::Fake(slot) => {
                 *slot = backend;
-                Ok(())
             }
             #[cfg(feature = "http")]
-            _ => Err(Error::Policy(PolicyError::Config(
-                "replace_fake requires a fake backend".to_string(),
-            ))),
+            _ => {
+                return Err(Error::Policy(PolicyError::Config(
+                    "replace_fake requires a fake backend".to_string(),
+                )));
+            }
         }
+        if let Some(cache) = &self.cache
+            && let Ok(mut guard) = cache.lock()
+        {
+            guard.entries.clear();
+        }
+        Ok(())
     }
 
     #[cfg_attr(not(feature = "http"), allow(unused_variables))]

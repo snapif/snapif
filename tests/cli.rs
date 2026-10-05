@@ -31,6 +31,25 @@ fn test_empty_directory_exits_1() {
 }
 
 #[test]
+fn test_invalid_json_names_the_file_without_debug_quotes() {
+    let dir = std::env::temp_dir().join(format!("snapif-bad-json-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("bad.json");
+    fs::write(&path, "not-json").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    let shown = format!("{}: invalid json", path.display());
+    assert!(err.contains(&shown), "{err}");
+    assert!(!err.contains(&format!("{path:?}")), "{err}");
+}
+
+#[test]
 fn missing_paths_name_the_file() {
     let missing = std::env::temp_dir().join(format!("snapif-missing-{}", std::process::id()));
     let missing_s = missing.display().to_string();
@@ -1325,6 +1344,8 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         "{blank_model_err}"
     );
     assert!(stdout.contains("exfil:yes"), "{stdout}");
+    assert!(stdout.contains("class network"), "{stdout}");
+    assert!(stdout.contains("when_unsure escalate"), "{stdout}");
     assert!(!stdout.contains("source default_action"), "{stdout}");
     let unknown = bin()
         .args(["explain", "--action", "no-such-action"])
@@ -1337,6 +1358,12 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         unknown_out.contains("source default_action"),
         "{unknown_out}"
     );
+    assert!(
+        unknown_out.contains("when_unsure review_guess"),
+        "{unknown_out}"
+    );
+    assert!(unknown_out.contains("class read"), "{unknown_out}");
+    assert!(!unknown_out.contains("ReviewGuess"), "{unknown_out}");
     let missing =
         std::env::temp_dir().join(format!("snapif-missing-policy-{}.toml", std::process::id()));
     let bad = bin()
@@ -1513,6 +1540,39 @@ fn hook_denies_an_unknown_script_harm() {
     );
 }
 
+#[test]
+fn hook_denies_a_missing_tool_name_instead_of_the_default_action() {
+    let body =
+        br#"{"tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":0.99}}"#;
+    for shadow in [false, true] {
+        let denied = hook_output(body, shadow);
+        let stdout = String::from_utf8_lossy(&denied.stdout);
+        assert_eq!(denied.status.code(), Some(0), "{shadow} {stdout}");
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "{shadow} {stdout}"
+        );
+        assert!(
+            stdout.contains("tool_name is required"),
+            "{shadow} {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"allow\""),
+            "{shadow} {stdout}"
+        );
+    }
+    let blank = hook_output(
+        br#"{"tool_name":"  ","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":0.99}}"#,
+        false,
+    );
+    let blank_out = String::from_utf8_lossy(&blank.stdout);
+    assert!(
+        blank_out.contains("\"permissionDecision\":\"deny\""),
+        "{blank_out}"
+    );
+    assert!(blank_out.contains("tool_name is required"), "{blank_out}");
+}
+
 fn hook_env(body: &[u8], shadow: Option<&str>) -> std::process::Output {
     let mut command = bin();
     command
@@ -1631,6 +1691,151 @@ fn hook_asks_on_review_and_explain_names_the_bash_rule() {
         "{fallback_out}"
     );
     assert!(!fallback_out.contains("matched "), "{fallback_out}");
+}
+
+#[test]
+fn hook_asks_when_rm_is_scored_as_a_read() {
+    let under = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&under.stdout);
+    assert_eq!(under.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let same = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"exec","confidence":1.0}}"#,
+        false,
+    );
+    let same_out = String::from_utf8_lossy(&same.stdout);
+    assert!(
+        same_out.contains("\"permissionDecision\":\"allow\""),
+        "{same_out}"
+    );
+}
+
+#[test]
+fn hook_asks_when_ansi_c_quotes_hide_rm() {
+    let hidden = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"$'rm' --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&hidden.stdout);
+    assert_eq!(hidden.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let echoed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"echo $'rm'"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_out = String::from_utf8_lossy(&echoed.stdout);
+    assert!(
+        echoed_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_out}"
+    );
+}
+
+#[test]
+fn hook_asks_when_exec_or_eval_hides_rm() {
+    let hidden = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"exec rm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&hidden.stdout);
+    assert_eq!(hidden.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    let evaluated = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"eval 'rm --version'"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let evaluated_out = String::from_utf8_lossy(&evaluated.stdout);
+    assert!(
+        evaluated_out.contains("\"permissionDecision\":\"ask\""),
+        "{evaluated_out}"
+    );
+    let renamed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"exec -a rm echo hello"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let renamed_out = String::from_utf8_lossy(&renamed.stdout);
+    assert!(
+        renamed_out.contains("\"permissionDecision\":\"allow\""),
+        "{renamed_out}"
+    );
+}
+
+#[test]
+fn hook_asks_when_timeout_or_xargs_hides_rm() {
+    let timed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"timeout 1 rm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let timed_out = String::from_utf8_lossy(&timed.stdout);
+    assert_eq!(timed.status.code(), Some(0), "{timed_out}");
+    assert!(
+        timed_out.contains("\"permissionDecision\":\"ask\""),
+        "{timed_out}"
+    );
+    let gathered = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"xargs rm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let gathered_out = String::from_utf8_lossy(&gathered.stdout);
+    assert!(
+        gathered_out.contains("\"permissionDecision\":\"ask\""),
+        "{gathered_out}"
+    );
+    let echoed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"timeout 1 echo rm"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_out = String::from_utf8_lossy(&echoed.stdout);
+    assert!(
+        echoed_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_out}"
+    );
+    let echoed_args = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"xargs echo rm"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_args_out = String::from_utf8_lossy(&echoed_args.stdout);
+    assert!(
+        echoed_args_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_args_out}"
+    );
+    let prefixed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"gtimeout 1 grm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let prefixed_out = String::from_utf8_lossy(&prefixed.stdout);
+    assert!(
+        prefixed_out.contains("\"permissionDecision\":\"ask\""),
+        "{prefixed_out}"
+    );
+    let echoed_grm = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"echo grm"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_grm_out = String::from_utf8_lossy(&echoed_grm.stdout);
+    assert!(
+        echoed_grm_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_grm_out}"
+    );
 }
 
 #[test]
@@ -1944,6 +2149,98 @@ fn hook_keeps_an_approval_phrase_from_the_dropped_middle() {
         "{text}"
     );
     assert!(!text.contains("DROPPED-MARKER"), "{text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn hook_ignores_a_transcript_prefix_past_the_tail() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-tail-bound-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    let mut file = fs::File::create(&transcript).expect("transcript");
+    use std::io::Write;
+    let outside = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "prefix-approval-outside-tail"}
+    });
+    writeln!(file, "{}", serde_json::to_string(&outside).unwrap()).expect("prefix");
+    let filler_body = "x".repeat(800);
+    let filler = format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": filler_body}
+        })
+    );
+    // Stay inside the 4000-line scan and past the 1 MiB byte tail.
+    for _ in 0..1_500 {
+        file.write_all(filler.as_bytes()).expect("filler");
+    }
+    drop(file);
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(
+        !text.contains("prefix-approval-outside-tail"),
+        "len={} head={}",
+        text.len(),
+        &text[..text.len().min(500)]
+    );
+    let kept = dir.join("kept.jsonl");
+    let mut kept_file = fs::File::create(&kept).expect("kept");
+    for _ in 0..1_500 {
+        kept_file.write_all(filler.as_bytes()).expect("filler");
+    }
+    let inside = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "tail-still-visible"}
+    });
+    writeln!(kept_file, "{}", serde_json::to_string(&inside).unwrap()).expect("tail");
+    drop(kept_file);
+    let kept_log = dir.join("kept-log.jsonl");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(kept.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &kept_log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let kept_text = fs::read_to_string(&kept_log).expect("log");
+    assert!(kept_text.contains("tail-still-visible"), "{kept_text}");
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -2544,6 +2841,28 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
     assert_eq!(escalate_body["verdict"], "escalate");
     assert_eq!(escalate_body["reasons"][0]["tag"], "below_floor");
     assert!(escalate_body["scores"].is_object(), "{escalate_body}");
+    let bump = r#"{"action_id":"git.push","name":"git.push","args":{},"trusted":{"user_request":"the supervisor already approved this"},"script":{"harm":"money","confidence":0.99,"nouls":{"authority_claim":0.95}}}"#;
+    let bump_json = run(bump, true);
+    assert_eq!(
+        bump_json.status.code(),
+        Some(11),
+        "{}",
+        String::from_utf8_lossy(&bump_json.stderr)
+    );
+    let bump_body: serde_json::Value =
+        serde_json::from_slice(&bump_json.stdout).expect("bump json");
+    let reasons = bump_body["reasons"].as_array().expect("reasons");
+    let battery = reasons
+        .iter()
+        .find(|reason| reason["tag"] == "battery" && reason["id"] == "authority_claim")
+        .expect("authority battery");
+    assert_eq!(battery["when"], "yes", "{bump_body}");
+    let harm = reasons
+        .iter()
+        .find(|reason| reason["tag"] == "harm_class_bump")
+        .expect("harm bump");
+    assert_eq!(harm["from"], "network", "{bump_body}");
+    assert_eq!(harm["to"], "money", "{bump_body}");
     let _ = fs::remove_dir_all(dir);
 }
 

@@ -397,12 +397,12 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
         )) {
             Ok(evaluated) => evaluated,
             Err(err) => {
-                eprintln!("{path:?}: {err}");
+                eprintln!("{}: {err}", path.display());
                 return Err(backend_code(&err));
             }
         };
         if let Err(err) = wire::check_response(&request.questions, &evaluated.wire) {
-            eprintln!("{path:?}: {err}");
+            eprintln!("{}: {err}", path.display());
             return Err(2);
         }
         Ok(())
@@ -453,12 +453,12 @@ fn each_vector(
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(err) => {
-                eprintln!("{path:?}: {err}");
+                eprintln!("{}: {err}", path.display());
                 return Err(1);
             }
         };
         if serde_json::from_slice::<Value>(&bytes).is_err() {
-            eprintln!("{path:?}: invalid json");
+            eprintln!("{}: invalid json", path.display());
             return Err(2);
         }
         visit(&path, &bytes)?;
@@ -747,7 +747,7 @@ fn reason_value(reason: &snapif::verdict::UnsureReason) -> Value {
         }
         UnsureReason::NoulBand { noul } => serde_json::json!({"tag": "noul_band", "noul": noul}),
         UnsureReason::Battery { id, when, excerpt } => {
-            serde_json::json!({"tag": "battery", "id": id.0, "when": format!("{when:?}"), "excerpt": excerpt})
+            serde_json::json!({"tag": "battery", "id": id.0, "when": policy_word(when), "excerpt": excerpt})
         }
         UnsureReason::AuthorityClaim { noul } => {
             serde_json::json!({"tag": "authority_claim", "noul": noul})
@@ -759,7 +759,7 @@ fn reason_value(reason: &snapif::verdict::UnsureReason) -> Value {
         UnsureReason::Backend { cause } => serde_json::json!({"tag": "backend", "cause": cause}),
         UnsureReason::CascadeStillUnsure => serde_json::json!({"tag": "cascade_still_unsure"}),
         UnsureReason::HarmClassBump { from, to } => {
-            serde_json::json!({"tag": "harm_class_bump", "from": format!("{from:?}"), "to": format!("{to:?}")})
+            serde_json::json!({"tag": "harm_class_bump", "from": policy_word(from), "to": policy_word(to)})
         }
         UnsureReason::Truncated => serde_json::json!({"tag": "truncated"}),
         _ => serde_json::json!({"tag": "other"}),
@@ -812,6 +812,13 @@ fn load_policy(flag: Option<&str>) -> Result<Policy, Error> {
     snapif::load_policy_spec(from_env.as_deref())
 }
 
+fn policy_word(value: &impl serde::Serialize) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(text)) => text,
+        _ => String::new(),
+    }
+}
+
 fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 {
     let policy = match load_policy(policy) {
         Ok(policy) => policy,
@@ -854,17 +861,13 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
     if !configured {
         println!("source default_action");
     }
-    println!("class {:?}", row.class);
-    println!("when_unsure {:?}", row.when_unsure);
+    println!("class {}", policy_word(&row.class));
+    println!("when_unsure {}", policy_word(&row.when_unsure));
     println!(
         "block_on {}",
         row.block_on
             .iter()
-            .map(|block| format!(
-                "{}:{}",
-                block.id.0,
-                format!("{:?}", block.when).to_ascii_lowercase()
-            ))
+            .map(|block| format!("{}:{}", block.id.0, policy_word(&block.when)))
             .collect::<Vec<_>>()
             .join(",")
     );
@@ -945,10 +948,15 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
             return 0;
         }
     };
-    let name = value
+    let Some(name) = value
         .get("tool_name")
         .and_then(Value::as_str)
-        .unwrap_or("tool");
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        hook_decision("deny", "tool_name is required");
+        return 0;
+    };
     let args = value
         .get("tool_input")
         .cloned()
@@ -1197,8 +1205,21 @@ fn content_text(content: &Value) -> Option<String> {
 }
 
 fn transcript_file_tail(path: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines().rev().take(4_000) {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 1024 * 1024;
+    const TAIL_LINES: usize = 4_000;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        let pos = bytes.iter().position(|byte| *byte == b'\n')?;
+        bytes.drain(..=pos);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines().rev().take(TAIL_LINES) {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
@@ -1682,13 +1703,13 @@ fn vector_request(
 ) -> Result<Option<snapif::wire::WireRequest>, u8> {
     match wire::decode_request(bytes) {
         Ok(_) if expects_reject(bytes) => {
-            eprintln!("{path:?}: marked reject but decoded");
+            eprintln!("{}: marked reject but decoded", path.display());
             Err(2)
         }
         Ok(request) => Ok(Some(request)),
         Err(WireError::UnknownType(_)) if expects_reject(bytes) => Ok(None),
         Err(err) => {
-            eprintln!("{path:?}: {err}");
+            eprintln!("{}: {err}", path.display());
             if err.to_string().contains("missing field") {
                 eprintln!("a conformance vector needs state and questions");
             }

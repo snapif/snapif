@@ -46,7 +46,7 @@ The process prints one word and exits:
 
 ### Hook
 
-`snapif hook` is a Claude Code PreToolUse hook. It reads one JSON object on stdin and prints a permission decision on stdout. A bad body still exits 0 and denies the call, because a hook error would otherwise let the call proceed. `snapif hook --print-settings` prints a PreToolUse block that runs `snapif hook --shadow` and sets `SNAPIF_LOG` to `snapif-hook.jsonl` in the current directory. It does not read stdin.
+`snapif hook` is a Claude Code PreToolUse hook. It reads one JSON object on stdin and prints a permission decision on stdout. A bad body still exits 0 and denies the call, because a hook error would otherwise let the call proceed. A missing or blank `tool_name` denies too, including with `--shadow`. `snapif hook --print-settings` prints a PreToolUse block that runs `snapif hook --shadow` and sets `SNAPIF_LOG` to `snapif-hook.jsonl` in the current directory. It does not read stdin.
 
 ```bash
 printf '%s\n' '{"tool_name":"bash","tool_input":{"command":"ls"}}' | SNAPIF_BACKEND=fake snapif hook
@@ -82,7 +82,7 @@ SNAPIF_BACKEND=fake snapif gate --call call.json
 | `0.95` | `review` | 10 |
 | `0.50` | `escalate` | 11 |
 
-Auto on this row needs confidence `1.0`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates.
+Auto on this row needs confidence `1.0` and harm `exec`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates. A lower label does not auto: `rm` scored as `read` at confidence `1.0` asks.
 
 ### Shadow, then enforce
 
@@ -104,7 +104,7 @@ Drop `--shadow` and stdout denies. The process still exits 0. The reason names t
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate: decode"}}
 ```
 
-A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `rmdir`, `git push-all`, `echo rm`, and `find -delete` do not.
+A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `$'rm'`, `$"rm"`, `bash -c $'rm -rf /'`, `exec rm`, `eval 'rm -rf /'`, `timeout 1 rm`, and `xargs rm` match as well, because bash runs those words as `rm`. Homebrew's `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm` match the same rows. `rmdir`, `git push-all`, `echo rm`, `echo $'rm'`, `exec -a rm echo`, `timeout 1 echo rm`, `xargs echo rm`, `echo grm`, and `find -delete` do not.
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"review: review_floor"}}
