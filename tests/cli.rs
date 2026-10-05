@@ -1948,6 +1948,98 @@ fn hook_keeps_an_approval_phrase_from_the_dropped_middle() {
 }
 
 #[test]
+fn hook_ignores_a_transcript_prefix_past_the_tail() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-tail-bound-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    let mut file = fs::File::create(&transcript).expect("transcript");
+    use std::io::Write;
+    let outside = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "prefix-approval-outside-tail"}
+    });
+    writeln!(file, "{}", serde_json::to_string(&outside).unwrap()).expect("prefix");
+    let filler_body = "x".repeat(800);
+    let filler = format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {"role": "assistant", "content": filler_body}
+        })
+    );
+    // Stay inside the 4000-line scan and past the 1 MiB byte tail.
+    for _ in 0..1_500 {
+        file.write_all(filler.as_bytes()).expect("filler");
+    }
+    drop(file);
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(
+        !text.contains("prefix-approval-outside-tail"),
+        "len={} head={}",
+        text.len(),
+        &text[..text.len().min(500)]
+    );
+    let kept = dir.join("kept.jsonl");
+    let mut kept_file = fs::File::create(&kept).expect("kept");
+    for _ in 0..1_500 {
+        kept_file.write_all(filler.as_bytes()).expect("filler");
+    }
+    let inside = serde_json::json!({
+        "type": "user",
+        "message": {"role": "user", "content": "tail-still-visible"}
+    });
+    writeln!(kept_file, "{}", serde_json::to_string(&inside).unwrap()).expect("tail");
+    drop(kept_file);
+    let kept_log = dir.join("kept-log.jsonl");
+    let body = format!(
+        "{{\"tool_name\":\"bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{}}}",
+        serde_json::to_string(kept.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &kept_log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(body.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    assert_eq!(filed.status.code(), Some(0));
+    let kept_text = fs::read_to_string(&kept_log).expect("log");
+    assert!(kept_text.contains("tail-still-visible"), "{kept_text}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn hook_scans_past_tool_result_rows() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-tail-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

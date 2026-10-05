@@ -1197,8 +1197,21 @@ fn content_text(content: &Value) -> Option<String> {
 }
 
 fn transcript_file_tail(path: &str) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines().rev().take(4_000) {
+    use std::io::{Read, Seek, SeekFrom};
+    const TAIL_BYTES: u64 = 1024 * 1024;
+    const TAIL_LINES: usize = 4_000;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let start = len.saturating_sub(TAIL_BYTES);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        let pos = bytes.iter().position(|byte| *byte == b'\n')?;
+        bytes.drain(..=pos);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    for line in text.lines().rev().take(TAIL_LINES) {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
         };
