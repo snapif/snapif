@@ -216,6 +216,56 @@ fn harm_class_bump_clears_auto() {
 }
 
 #[test]
+fn a_lower_harm_label_does_not_auto_bash_rm() {
+    let policy = Policy::shipped("tool-gate").unwrap();
+    let under = verdict_with_blocks(
+        &policy,
+        &ActionId::new("bash.rm"),
+        1.0,
+        Some(HarmClass::Read),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(under, Verdict::Review(_)),
+        "read at 1.0 must not auto rm, got {under:?}"
+    );
+    let same = verdict_with_blocks(
+        &policy,
+        &ActionId::new("bash.rm"),
+        1.0,
+        Some(HarmClass::Exec),
+        &[],
+    )
+    .unwrap();
+    assert!(matches!(same, Verdict::Auto(_)), "{same:?}");
+    let refund = verdict_with_blocks(
+        &policy,
+        &ActionId::new("refund"),
+        1.0,
+        Some(HarmClass::Read),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(refund, Verdict::Review(_)),
+        "read at 1.0 must not auto a money row, got {refund:?}"
+    );
+    let quiet = verdict_with_blocks(
+        &policy,
+        &ActionId::new("read_file"),
+        0.95,
+        Some(HarmClass::None),
+        &[],
+    )
+    .unwrap();
+    assert!(
+        matches!(quiet, Verdict::Auto(_)),
+        "a read-class row still autos on a lower label, got {quiet:?}"
+    );
+}
+
+#[test]
 fn choice_and_score_labels() {
     assert_eq!(Department::Billing.as_label(), "billing");
     assert_eq!(

@@ -1694,6 +1694,33 @@ fn hook_asks_on_review_and_explain_names_the_bash_rule() {
 }
 
 #[test]
+fn hook_asks_when_rm_is_scored_as_a_read() {
+    let under = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&under.stdout);
+    assert_eq!(under.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let same = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"exec","confidence":1.0}}"#,
+        false,
+    );
+    let same_out = String::from_utf8_lossy(&same.stdout);
+    assert!(
+        same_out.contains("\"permissionDecision\":\"allow\""),
+        "{same_out}"
+    );
+}
+
+#[test]
 fn hook_keeps_the_prompt_and_drops_the_session_id() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-turn-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

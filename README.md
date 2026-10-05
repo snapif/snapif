@@ -82,7 +82,7 @@ SNAPIF_BACKEND=fake snapif gate --call call.json
 | `0.95` | `review` | 10 |
 | `0.50` | `escalate` | 11 |
 
-Auto on this row needs confidence `1.0`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates.
+Auto on this row needs confidence `1.0` and harm `exec`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates. A lower label does not auto: `rm` scored as `read` at confidence `1.0` asks.
 
 ### Shadow, then enforce
 

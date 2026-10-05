@@ -919,11 +919,14 @@ pub fn effective_gates(
         auto = auto.map(|value| value.max(policy.choice.review_below));
     }
     let mut harm_bumped = None;
-    if let Some(decoded) = harm_class
-        && decoded > action.class
-    {
-        auto = None;
-        harm_bumped = Some((action.class, decoded));
+    if let Some(decoded) = harm_class {
+        if decoded > action.class {
+            auto = None;
+            harm_bumped = Some((action.class, decoded));
+        } else if decoded < action.class && action.class >= HarmClass::Write {
+            // The confidence is in the lower label. It must not auto this row.
+            auto = None;
+        }
     }
     Ok(EffectiveGates {
         escalate_below,
