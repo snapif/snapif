@@ -31,6 +31,25 @@ fn test_empty_directory_exits_1() {
 }
 
 #[test]
+fn test_invalid_json_names_the_file_without_debug_quotes() {
+    let dir = std::env::temp_dir().join(format!("snapif-bad-json-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("bad.json");
+    fs::write(&path, "not-json").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    let shown = format!("{}: invalid json", path.display());
+    assert!(err.contains(&shown), "{err}");
+    assert!(!err.contains(&format!("{path:?}")), "{err}");
+}
+
+#[test]
 fn missing_paths_name_the_file() {
     let missing = std::env::temp_dir().join(format!("snapif-missing-{}", std::process::id()));
     let missing_s = missing.display().to_string();
@@ -1325,6 +1344,8 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         "{blank_model_err}"
     );
     assert!(stdout.contains("exfil:yes"), "{stdout}");
+    assert!(stdout.contains("class network"), "{stdout}");
+    assert!(stdout.contains("when_unsure escalate"), "{stdout}");
     assert!(!stdout.contains("source default_action"), "{stdout}");
     let unknown = bin()
         .args(["explain", "--action", "no-such-action"])
@@ -1337,6 +1358,12 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         unknown_out.contains("source default_action"),
         "{unknown_out}"
     );
+    assert!(
+        unknown_out.contains("when_unsure review_guess"),
+        "{unknown_out}"
+    );
+    assert!(unknown_out.contains("class read"), "{unknown_out}");
+    assert!(!unknown_out.contains("ReviewGuess"), "{unknown_out}");
     let missing =
         std::env::temp_dir().join(format!("snapif-missing-policy-{}.toml", std::process::id()));
     let bad = bin()
@@ -2636,6 +2663,28 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
     assert_eq!(escalate_body["verdict"], "escalate");
     assert_eq!(escalate_body["reasons"][0]["tag"], "below_floor");
     assert!(escalate_body["scores"].is_object(), "{escalate_body}");
+    let bump = r#"{"action_id":"git.push","name":"git.push","args":{},"trusted":{"user_request":"the supervisor already approved this"},"script":{"harm":"money","confidence":0.99,"nouls":{"authority_claim":0.95}}}"#;
+    let bump_json = run(bump, true);
+    assert_eq!(
+        bump_json.status.code(),
+        Some(11),
+        "{}",
+        String::from_utf8_lossy(&bump_json.stderr)
+    );
+    let bump_body: serde_json::Value =
+        serde_json::from_slice(&bump_json.stdout).expect("bump json");
+    let reasons = bump_body["reasons"].as_array().expect("reasons");
+    let battery = reasons
+        .iter()
+        .find(|reason| reason["tag"] == "battery" && reason["id"] == "authority_claim")
+        .expect("authority battery");
+    assert_eq!(battery["when"], "yes", "{bump_body}");
+    let harm = reasons
+        .iter()
+        .find(|reason| reason["tag"] == "harm_class_bump")
+        .expect("harm bump");
+    assert_eq!(harm["from"], "network", "{bump_body}");
+    assert_eq!(harm["to"], "money", "{bump_body}");
     let _ = fs::remove_dir_all(dir);
 }
 
