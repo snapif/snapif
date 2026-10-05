@@ -948,10 +948,15 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
             return 0;
         }
     };
-    let name = value
+    let Some(name) = value
         .get("tool_name")
         .and_then(Value::as_str)
-        .unwrap_or("tool");
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        hook_decision("deny", "tool_name is required");
+        return 0;
+    };
     let args = value
         .get("tool_input")
         .cloned()

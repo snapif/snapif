@@ -46,7 +46,7 @@ The process prints one word and exits:
 
 ### Hook
 
-`snapif hook` is a Claude Code PreToolUse hook. It reads one JSON object on stdin and prints a permission decision on stdout. A bad body still exits 0 and denies the call, because a hook error would otherwise let the call proceed. `snapif hook --print-settings` prints a PreToolUse block that runs `snapif hook --shadow` and sets `SNAPIF_LOG` to `snapif-hook.jsonl` in the current directory. It does not read stdin.
+`snapif hook` is a Claude Code PreToolUse hook. It reads one JSON object on stdin and prints a permission decision on stdout. A bad body still exits 0 and denies the call, because a hook error would otherwise let the call proceed. A missing or blank `tool_name` denies too, including with `--shadow`. `snapif hook --print-settings` prints a PreToolUse block that runs `snapif hook --shadow` and sets `SNAPIF_LOG` to `snapif-hook.jsonl` in the current directory. It does not read stdin.
 
 ```bash
 printf '%s\n' '{"tool_name":"bash","tool_input":{"command":"ls"}}' | SNAPIF_BACKEND=fake snapif hook

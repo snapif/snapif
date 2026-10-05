@@ -1540,6 +1540,39 @@ fn hook_denies_an_unknown_script_harm() {
     );
 }
 
+#[test]
+fn hook_denies_a_missing_tool_name_instead_of_the_default_action() {
+    let body =
+        br#"{"tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":0.99}}"#;
+    for shadow in [false, true] {
+        let denied = hook_output(body, shadow);
+        let stdout = String::from_utf8_lossy(&denied.stdout);
+        assert_eq!(denied.status.code(), Some(0), "{shadow} {stdout}");
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "{shadow} {stdout}"
+        );
+        assert!(
+            stdout.contains("tool_name is required"),
+            "{shadow} {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"allow\""),
+            "{shadow} {stdout}"
+        );
+    }
+    let blank = hook_output(
+        br#"{"tool_name":"  ","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":0.99}}"#,
+        false,
+    );
+    let blank_out = String::from_utf8_lossy(&blank.stdout);
+    assert!(
+        blank_out.contains("\"permissionDecision\":\"deny\""),
+        "{blank_out}"
+    );
+    assert!(blank_out.contains("tool_name is required"), "{blank_out}");
+}
+
 fn hook_env(body: &[u8], shadow: Option<&str>) -> std::process::Output {
     let mut command = bin();
     command
