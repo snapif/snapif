@@ -356,7 +356,10 @@ fn check_action(
 /// match too, because bash runs those words as `rm`. An ANSI-C null
 /// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
 /// `exec rm` and `eval 'rm ...'` match. `exec -a rm echo` and
-/// `eval echo` do not.
+/// `eval echo` do not. `timeout 1 rm` and `xargs rm` match.
+/// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
+/// and `xargs echo rm` do not match. Homebrew names the same binaries
+/// `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm`.
 /// `git push` matches `git push`, `git\tpush`, `/usr/bin/git push`, and
 /// `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
@@ -433,7 +436,7 @@ fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
     if argv.is_empty() || prefix.is_empty() {
         return false;
     }
-    if !same_word(command_basename(&argv[0]), command_basename(&prefix[0])) {
+    if !same_tool(command_basename(&argv[0]), command_basename(&prefix[0])) {
         return false;
     }
     if prefix.len() == 1 {
@@ -458,12 +461,13 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
             index += 1;
             continue;
         }
-        let base = command_basename(&tokens[index]).to_ascii_lowercase();
-        if !is_wrapper(&base) {
+        let lowered = command_basename(&tokens[index]).to_ascii_lowercase();
+        let base = gnu_alias(&lowered);
+        if !is_wrapper(base) {
             break;
         }
         index += 1;
-        let Some((next, script)) = skip_wrapper_flags(&base, tokens, index) else {
+        let Some((next, script)) = skip_wrapper_flags(base, tokens, index) else {
             return split_script.map(|script| (Vec::new(), Some(script)));
         };
         if split_script.is_none() {
@@ -487,6 +491,10 @@ fn skip_wrapper_flags(
             continue;
         }
         if token == "--" {
+            // `timeout -- 1 rm` still has a duration after the option end.
+            if wrapper == "timeout" {
+                return Some(((index + 2).min(tokens.len()), split_script));
+            }
             return Some((index + 1, split_script));
         }
         if !token.starts_with('-') {
@@ -520,6 +528,10 @@ fn skip_wrapper_flags(
             }
             index += 1;
         }
+    }
+    // The first word after timeout's options is the duration, not the command.
+    if wrapper == "timeout" && index < tokens.len() {
+        index += 1;
     }
     Some((index, split_script))
 }
@@ -608,10 +620,28 @@ fn skip_options(argv: &[String], mut index: usize) -> usize {
     index
 }
 
+fn same_tool(token: &str, prefix: &str) -> bool {
+    same_word(token, prefix) || (same_word(token, "grm") && same_word(prefix, "rm"))
+}
+
+/// Homebrew installs the same coreutils and findutils binaries under a
+/// `g` name (`gtimeout`, `grm`). The shell runs that name as the unprefixed tool.
+fn gnu_alias(name: &str) -> &str {
+    match name {
+        "genv" => "env",
+        "gnice" => "nice",
+        "gnohup" => "nohup",
+        "gstdbuf" => "stdbuf",
+        "gtimeout" => "timeout",
+        "gxargs" => "xargs",
+        other => other,
+    }
+}
+
 fn is_wrapper(name: &str) -> bool {
     const WRAPPERS: &[&str] = &[
         "sudo", "doas", "pkexec", "env", "command", "nice", "nohup", "time", "busybox", "ionice",
-        "stdbuf", "setsid", "exec",
+        "stdbuf", "setsid", "exec", "timeout", "xargs",
     ];
     WRAPPERS
         .iter()
@@ -651,6 +681,26 @@ fn flag_takes_value(wrapper: &str, flag: &str) -> bool {
         "stdbuf" => matches!(name, "-i" | "-o" | "-e" | "input" | "output" | "error"),
         "pkexec" => name == "user",
         "exec" => name == "-a",
+        "timeout" => matches!(name, "-k" | "-s" | "kill-after" | "signal"),
+        "xargs" => matches!(
+            name,
+            "-a" | "-I"
+                | "-L"
+                | "-n"
+                | "-P"
+                | "-s"
+                | "-d"
+                | "-E"
+                | "arg-file"
+                | "replace"
+                | "max-lines"
+                | "max-args"
+                | "max-procs"
+                | "max-chars"
+                | "delimiter"
+                | "process-slot-var"
+                | "eof"
+        ),
         _ => false,
     }
 }
@@ -1482,6 +1532,77 @@ mod tests {
             "echo exec rm",
             "eval echo ok",
             "eval 'echo rm'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn timeout_and_xargs_match_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "timeout 1 rm --version",
+            "timeout --foreground 1 rm --version",
+            "timeout -k 1 2 rm --version",
+            "timeout -k1 2 rm --version",
+            "timeout -s TERM 1 rm --version",
+            "timeout --signal=TERM 1 rm --version",
+            "timeout 1s rm --version",
+            "timeout -- 1 rm --version",
+            "timeout 1 command rm --version",
+            "xargs rm --version",
+            "xargs -n 1 rm --version",
+            "xargs -n1 rm --version",
+            "xargs -- rm --version",
+            "xargs -E _ rm --version",
+            "xargs -0 rm --version",
+            "xargs -e rm --version",
+            "xargs -a /dev/null rm --version",
+            "command xargs rm --version",
+            "timeout 1 bash -c 'rm --version'",
+            "xargs sh -c 'rm --version'",
+            "timeout 1 sudo rm --version",
+            "gtimeout 1 rm --version",
+            "gxargs rm --version",
+            "gstdbuf -oL rm --version",
+            "gnice rm --version",
+            "genv rm --version",
+            "genv -S 'rm --version'",
+            "gnohup rm --version",
+            "grm --version",
+            "gtimeout 1 grm --version",
+            "/opt/homebrew/bin/grm --version",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = ["timeout 1 git push", "xargs git push"];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "timeout 1 rmdir --version",
+            "timeout 1 echo rm",
+            "timeout -- rm --version",
+            "timeout 1 -- rm --version",
+            "xargs echo rm",
+            "echo timeout 1 rm",
+            "echo xargs rm",
+            "echo grm",
+            "gfalse rm --version",
+            "grmdir /tmp",
         ];
         for command in neither {
             assert!(

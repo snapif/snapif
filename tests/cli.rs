@@ -1780,6 +1780,65 @@ fn hook_asks_when_exec_or_eval_hides_rm() {
 }
 
 #[test]
+fn hook_asks_when_timeout_or_xargs_hides_rm() {
+    let timed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"timeout 1 rm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let timed_out = String::from_utf8_lossy(&timed.stdout);
+    assert_eq!(timed.status.code(), Some(0), "{timed_out}");
+    assert!(
+        timed_out.contains("\"permissionDecision\":\"ask\""),
+        "{timed_out}"
+    );
+    let gathered = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"xargs rm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let gathered_out = String::from_utf8_lossy(&gathered.stdout);
+    assert!(
+        gathered_out.contains("\"permissionDecision\":\"ask\""),
+        "{gathered_out}"
+    );
+    let echoed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"timeout 1 echo rm"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_out = String::from_utf8_lossy(&echoed.stdout);
+    assert!(
+        echoed_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_out}"
+    );
+    let echoed_args = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"xargs echo rm"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_args_out = String::from_utf8_lossy(&echoed_args.stdout);
+    assert!(
+        echoed_args_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_args_out}"
+    );
+    let prefixed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"gtimeout 1 grm --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let prefixed_out = String::from_utf8_lossy(&prefixed.stdout);
+    assert!(
+        prefixed_out.contains("\"permissionDecision\":\"ask\""),
+        "{prefixed_out}"
+    );
+    let echoed_grm = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"echo grm"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_grm_out = String::from_utf8_lossy(&echoed_grm.stdout);
+    assert!(
+        echoed_grm_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_grm_out}"
+    );
+}
+
+#[test]
 fn hook_keeps_the_prompt_and_drops_the_session_id() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-turn-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
