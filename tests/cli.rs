@@ -1721,6 +1721,33 @@ fn hook_asks_when_rm_is_scored_as_a_read() {
 }
 
 #[test]
+fn hook_asks_when_ansi_c_quotes_hide_rm() {
+    let hidden = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"$'rm' --version"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&hidden.stdout);
+    assert_eq!(hidden.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let echoed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"echo $'rm'"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_out = String::from_utf8_lossy(&echoed.stdout);
+    assert!(
+        echoed_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_out}"
+    );
+}
+
+#[test]
 fn hook_keeps_the_prompt_and_drops_the_session_id() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-turn-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

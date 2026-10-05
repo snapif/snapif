@@ -352,8 +352,11 @@ fn check_action(
 /// `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
 /// `env -S 'rm ...'`. A null byte is removed first, because bash
 /// removes it: `rm` followed by a null and `-rf` matches, and `rm`
-/// followed by a null and `dir` stays `rmdir`. `git push` matches
-/// `git push`, `git\tpush`, `/usr/bin/git push`, and `git -C repo push`.
+/// followed by a null and `dir` stays `rmdir`. `$'rm'` and `$"rm"`
+/// match too, because bash runs those words as `rm`. An ANSI-C null
+/// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
+/// `git push` matches `git push`, `git\tpush`, `/usr/bin/git push`, and
+/// `git -C repo push`.
 /// A later command does not replace an earlier hit: `git push && rm` stays
 /// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
 /// `command -v rm`, `sudo -l`, an empty word, and a heredoc body do not match.
@@ -734,6 +737,177 @@ fn same_word(left: &str, right: &str) -> bool {
     left.eq_ignore_ascii_case(right)
 }
 
+/// Bash `$'...'` word. A decoded null ends the word. A raw null in the
+/// source is skipped, because the bash reader deletes it before parsing.
+fn read_ansi_c<I>(chars: &mut std::iter::Peekable<I>, token: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    let mut truncated = false;
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if truncated {
+            if ch == '\'' {
+                return;
+            }
+            continue;
+        }
+        if ch == '\'' {
+            return;
+        }
+        if ch != '\\' {
+            token.push(ch);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            token.push('\\');
+            return;
+        };
+        if next == '\0' {
+            token.push('\\');
+            continue;
+        }
+        if push_ansi_escape(chars, token, next) {
+            truncated = true;
+        }
+    }
+}
+
+fn push_ansi_escape<I>(chars: &mut std::iter::Peekable<I>, token: &mut String, next: char) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    match next {
+        '\\' | '\'' | '"' | '?' => token.push(next),
+        'a' => token.push('\u{7}'),
+        'b' => token.push('\u{8}'),
+        'e' | 'E' => token.push('\u{1b}'),
+        'f' => token.push('\u{c}'),
+        'n' => token.push('\n'),
+        'r' => token.push('\r'),
+        't' => token.push('\t'),
+        'v' => token.push('\u{b}'),
+        'c' => {
+            let Some(ctrl) = chars.next() else {
+                token.push('\\');
+                token.push('c');
+                return false;
+            };
+            if ctrl == '\0' {
+                token.push('\\');
+                token.push('c');
+                return false;
+            }
+            let value = (ctrl as u32) & 0x1f;
+            if value == 0 {
+                return true;
+            }
+            token.push(char::from_u32(value).unwrap_or('\u{FFFD}'));
+        }
+        'x' | 'X' => return push_ansi_number(chars, token, 16, 2, next),
+        'u' => return push_ansi_number(chars, token, 16, 4, next),
+        'U' => return push_ansi_number(chars, token, 16, 8, next),
+        '0'..='7' => {
+            let mut value = next.to_digit(8).unwrap_or(0);
+            for _ in 1..3 {
+                let Some(digit) = chars.peek().copied() else {
+                    break;
+                };
+                let Some(part) = digit.to_digit(8) else {
+                    break;
+                };
+                chars.next();
+                value = value * 8 + part;
+            }
+            return push_ansi_value(token, u64::from(value));
+        }
+        _ => {
+            token.push('\\');
+            token.push(next);
+        }
+    }
+    false
+}
+
+fn push_ansi_number<I>(
+    chars: &mut std::iter::Peekable<I>,
+    token: &mut String,
+    radix: u32,
+    max: usize,
+    introducer: char,
+) -> bool
+where
+    I: Iterator<Item = char>,
+{
+    let mut value = 0u64;
+    let mut count = 0;
+    while count < max {
+        let Some(digit) = chars.peek().copied() else {
+            break;
+        };
+        let Some(part) = digit.to_digit(radix) else {
+            break;
+        };
+        chars.next();
+        value = value * u64::from(radix) + u64::from(part);
+        count += 1;
+    }
+    if count == 0 {
+        token.push('\\');
+        token.push(introducer);
+        return false;
+    }
+    push_ansi_value(token, value)
+}
+
+fn push_ansi_value(token: &mut String, value: u64) -> bool {
+    if value == 0 {
+        return true;
+    }
+    match u32::try_from(value).ok().and_then(char::from_u32) {
+        Some(ch) => token.push(ch),
+        None => token.push('\u{FFFD}'),
+    }
+    false
+}
+
+/// Bash `$"..."` word. A backslash escapes `$`, backtick, `"`, `\`, and a newline.
+fn read_dollar_double<I>(chars: &mut std::iter::Peekable<I>, token: &mut String)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if ch == '"' {
+            return;
+        }
+        if ch != '\\' {
+            token.push(ch);
+            continue;
+        }
+        let Some(next) = chars.next() else {
+            token.push('\\');
+            return;
+        };
+        if next == '\0' {
+            token.push('\\');
+            continue;
+        }
+        match next {
+            '\\' | '$' | '`' | '"' => token.push(next),
+            '\n' => {}
+            _ => {
+                token.push('\\');
+                token.push(next);
+            }
+        }
+    }
+}
+
 fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     let mut segments = Vec::new();
     let mut current = Vec::new();
@@ -761,6 +935,19 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
                 continue;
             }
             token.push(ch);
+            continue;
+        }
+        if ch == '$'
+            && let Some(&next) = chars.peek()
+            && (next == '\'' || next == '"')
+        {
+            chars.next();
+            quoted = true;
+            if next == '\'' {
+                read_ansi_c(&mut chars, &mut token);
+            } else {
+                read_dollar_double(&mut chars, &mut token);
+            }
             continue;
         }
         match ch {
@@ -1179,5 +1366,58 @@ mod tests {
             matched_action(&policy, "Bash", Some(glued)).is_none(),
             "{glued:?}"
         );
+    }
+
+    #[test]
+    fn ansi_c_and_locale_quotes_match_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "$'rm' --version",
+            "$\"rm\" --version",
+            "$'r\\x6d' --version",
+            "$'r\\155' --version",
+            "$'r\\u006d' --version",
+            "$'r\\u6d' --version",
+            "bash -c $'rm --version'",
+            "$'rm\\x00dir' --version",
+            "$'rm\\000dir' --version",
+            "$'rm\\0dir' --version",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = [
+            "$'git' push",
+            "$'git' $'push'",
+            "git $'push'",
+            "bash -c $'git push'",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "echo $'rm'",
+            "echo $\"rm\"",
+            "$'rmdir' /tmp",
+            "$\"rmdir\" /tmp",
+            "$'r\\m' --version",
+            "$\"r\\m\" --version",
+            "$\"rm --version\"",
+            "$'rm\\n--version'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
     }
 }
