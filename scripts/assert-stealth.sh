@@ -109,10 +109,6 @@ else
 fi
 
 if [[ -n "$root" ]]; then
-  if [[ -f "$root/README.md" ]]; then
-    echo "OK: README badges match live signals"
-  fi
-
   if [[ -f "$root/.github/FUNDING.yml" ]]; then
     echo "FAIL: .github/FUNDING.yml present"
     leaks=$((leaks + 1))
