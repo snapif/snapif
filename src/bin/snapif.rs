@@ -204,17 +204,32 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
         }
     }
     let has = |key: &str| present.is_some_and(|obj| obj.contains_key(key));
-    let prepared_name = file
+    let name = if has("name") {
+        match file.name.as_deref().and_then(nonempty_trim) {
+            Some(name) => name.to_string(),
+            None => {
+                eprintln!("name must not be blank");
+                return 1;
+            }
+        }
+    } else if let Some(raw) = file
         .prepared
         .as_ref()
-        .map(|prepared| prepared.name.clone())
-        .filter(|name| !name.is_empty());
-    let name = if has("name") {
-        file.name
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(default_name)
+        .map(|prepared| prepared.name.as_str())
+    {
+        if raw.is_empty() {
+            default_name()
+        } else {
+            match nonempty_trim(raw) {
+                Some(name) => name.to_string(),
+                None => {
+                    eprintln!("name must not be blank");
+                    return 1;
+                }
+            }
+        }
     } else {
-        prepared_name.unwrap_or_else(default_name)
+        default_name()
     };
     let args = if has("args") {
         file.args.unwrap_or(Value::Null)
@@ -240,7 +255,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
             .map(|state| state.untrusted.clone())
             .unwrap_or(Value::Null)
     };
-    let action_id = if file.action_id.is_empty() {
+    let action_id = if file.action_id.trim().is_empty() {
         match action_id_from_tool(policy, &name, &args) {
             Ok(id) => id,
             Err(err) => {
@@ -249,7 +264,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
             }
         }
     } else {
-        file.action_id.clone()
+        file.action_id.trim().to_string()
     };
     let request = GateRequest {
         action_id: ActionId::new(&action_id),
@@ -2001,6 +2016,11 @@ struct ReplayScript {
     nouls: serde_json::Map<String, Value>,
     #[serde(default)]
     timeout: bool,
+}
+
+fn nonempty_trim(raw: &str) -> Option<&str> {
+    let name = raw.trim();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn default_name() -> String {
