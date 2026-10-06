@@ -364,7 +364,8 @@ fn check_action(
 /// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
 /// `exec rm` and `eval 'rm ...'` match. `exec -a rm echo` and
 /// `eval echo` do not. `if`, `then`, `else`, `elif`, `do`, `while`,
-/// `until`, and `!` are skipped, so `if true; then rm` matches. `for`
+/// `until`, `!`, `{`, and `(` are skipped, so `if true; then rm`,
+/// `{ rm; }`, and `(rm)` match. `for`
 /// is not skipped. `$(rm)`, `echo "$(rm)"`, and a backtick `rm` match.
 /// Single quotes do not run `$(rm)`. A command substitution is checked
 /// after the simple commands, so `git push $(rm)` stays `git.push`.
@@ -512,7 +513,7 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
 fn leading_shell_keyword(token: &str) -> bool {
     matches!(
         token,
-        "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!"
+        "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "("
     )
 }
 
@@ -1125,6 +1126,10 @@ fn tokenize_segments(command: &str) -> (Vec<Vec<String>>, Vec<String>) {
                 }
             }
             '`' => substitutions.push(read_backtick(&mut chars)),
+            '(' | ')' => {
+                push_token(&mut token, &mut current, &mut quoted);
+                current.push(ch.to_string());
+            }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
                 push_token(&mut token, &mut current, &mut quoted);
@@ -1559,6 +1564,10 @@ mod tests {
             "bash -O extglob -c 'rm -rf /tmp/x'",
             "bash +O extglob -c 'rm -rf /tmp/x'",
             "bash -Oextglob -c 'rm -rf /tmp/x'",
+            "{ rm --version; }",
+            "( rm --version )",
+            "(rm --version)",
+            "true && { rm --version; }",
         ];
         for command in rm {
             assert_eq!(
@@ -1596,6 +1605,8 @@ mod tests {
             "echo 'rm -rf /'",
             "echo '$(rm -rf /tmp)'",
             "for rm in a",
+            "{rm --version;}",
+            "f() { rm --version; }",
             "env -S 'echo rm'",
             "sudo -nu root rmdir /tmp",
             "bash -c 'echo rm'",
