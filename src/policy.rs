@@ -356,7 +356,7 @@ fn check_action(
 /// prefix list does not match, so that row cannot replace `default_action`.
 ///
 /// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `sudo -nu root rm`,
-/// `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
+/// `FOO=1 rm`, `FOO+=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
 /// `env -S 'rm ...'`. A null byte is removed first, because bash
 /// removes it: `rm` followed by a null and `-rf` matches, and `rm`
 /// followed by a null and `dir` stays `rmdir`. `$'rm'` and `$"rm"`
@@ -796,11 +796,16 @@ fn is_assignment(token: &str) -> bool {
     if !(first.is_ascii_alphabetic() || first == '_') {
         return false;
     }
+    let mut plus = false;
     for ch in chars {
         if ch == '=' {
             return true;
         }
-        if !(ch.is_ascii_alphanumeric() || ch == '_') {
+        if ch == '+' && !plus {
+            plus = true;
+            continue;
+        }
+        if plus || !(ch.is_ascii_alphanumeric() || ch == '_') {
             return false;
         }
     }
@@ -1359,6 +1364,8 @@ mod tests {
             "sudo -- rm -rf /",
             "cd x && rm -rf ~",
             "FOO=1 rm -rf /",
+            "FOO+=1 rm -rf /",
+            "A+=1 B+=2 rm -rf /",
             "env rm -rf /",
             "env FOO=1 rm -rf /",
             "env -iu PATH rm -rf /",
@@ -1404,6 +1411,7 @@ mod tests {
             "rmdir /tmp",
             "git push-all",
             "echo rm -rf /",
+            "FOO+1 rm -rf /",
             "echo 'rm -rf /'",
             "env -S 'echo rm'",
             "sudo -nu root rmdir /tmp",
