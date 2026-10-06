@@ -210,9 +210,9 @@ impl Policy {
         }
     }
 
-    /// Shipped id, or a path whose name ends in `.toml`.
+    /// Shipped id, or a path whose extension is `toml` in any ASCII case.
     pub fn load(spec: &str) -> Result<Self, Error> {
-        if spec.ends_with(".toml") {
+        if Self::toml_extension(spec) {
             let text = std::fs::read_to_string(spec).map_err(|err| {
                 Error::Io(std::io::Error::new(err.kind(), format!("{spec}: {err}")))
             })?;
@@ -228,6 +228,13 @@ impl Policy {
         let policy: Self =
             toml::from_str(raw).map_err(|err| PolicyError::Config(err.to_string()))?;
         policy.finish()
+    }
+
+    fn toml_extension(spec: &str) -> bool {
+        std::path::Path::new(spec)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
     }
 
     fn finish(mut self) -> Result<Self, PolicyError> {
