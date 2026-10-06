@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.1](https://github.com/snapif/snapif/compare/snapif-v0.2.0...snapif-v0.2.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* bound the hook transcript read to the tail ([#190](https://github.com/snapif/snapif/issues/190)) ([b96880f](https://github.com/snapif/snapif/commit/b96880f66ed4f3b2c82dca8b1ed2b8aaad107e2b))
+* deny a hook tool_input that is not an object ([#199](https://github.com/snapif/snapif/issues/199)) ([ca0f2c3](https://github.com/snapif/snapif/commit/ca0f2c3d29d892e3eef4674ed9bd32ffab7a24bf))
+* drop userinfo from an opaque redirect location ([#192](https://github.com/snapif/snapif/issues/192)) ([559b02b](https://github.com/snapif/snapif/commit/559b02b70c6e5e82faa890807ab93f9ef5034110))
+* ignore a leading UTF-8 BOM in replay, calibrate, and test ([#198](https://github.com/snapif/snapif/issues/198)) ([33a6c1d](https://github.com/snapif/snapif/commit/33a6c1da95563883f67b187b2f5910e1305735c9))
+* load a policy file whose extension is TOML in any case ([#200](https://github.com/snapif/snapif/issues/200)) ([9c51de9](https://github.com/snapif/snapif/commit/9c51de9d6c13659a48ab103b015b401a17f67db6))
+* match an argv array in the hook command ([#195](https://github.com/snapif/snapif/issues/195)) ([aa8c179](https://github.com/snapif/snapif/commit/aa8c179e5d3158bc9ec0ccb6e1441dd5e55bf31f))
+* match an argv array passed as hook tool_input ([#197](https://github.com/snapif/snapif/issues/197)) ([df7577a](https://github.com/snapif/snapif/commit/df7577ac878b9deabf0b9667ade294f8e1dcf288))
+* match rm after a bash += assignment ([#201](https://github.com/snapif/snapif/issues/201)) ([fb38f0b](https://github.com/snapif/snapif/commit/fb38f0b7f477e2000fc93e66a377fa5d4c579e71))
+* name the calibration file in a row error ([#194](https://github.com/snapif/snapif/issues/194)) ([c89e138](https://github.com/snapif/snapif/commit/c89e138df66808f30eaf57993984268cb8050757))
+* read JSON and JSONL files with any letter case ([#196](https://github.com/snapif/snapif/issues/196)) ([6e9bc4f](https://github.com/snapif/snapif/commit/6e9bc4f4d6b9048728448aeb57e2d71e46626892))
+* report the file line for a bad calibration row ([#193](https://github.com/snapif/snapif/issues/193)) ([89c038f](https://github.com/snapif/snapif/commit/89c038f8e5087880b8d09bc583ad421a12b46fc3))
+
 ## [0.2.0](https://github.com/snapif/snapif/compare/snapif-v0.1.2...snapif-v0.2.0) (2026-09-30)
 
 
