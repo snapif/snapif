@@ -1075,6 +1075,9 @@ fn hook_command(value: &Value) -> HookCommand {
     if let Some(text) = input.as_str() {
         return hook_command_text(text);
     }
+    if let Some(items) = input.as_array() {
+        return hook_command_words(items);
+    }
     let Some(command) = input.get("command") else {
         return HookCommand::Absent;
     };
@@ -1084,6 +1087,10 @@ fn hook_command(value: &Value) -> HookCommand {
     let Some(items) = command.as_array() else {
         return HookCommand::Invalid;
     };
+    hook_command_words(items)
+}
+
+fn hook_command_words(items: &[Value]) -> HookCommand {
     let mut words = Vec::new();
     for item in items {
         let Some(text) = item.as_str() else {
