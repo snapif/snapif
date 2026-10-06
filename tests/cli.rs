@@ -1742,6 +1742,53 @@ fn hook_asks_when_rm_is_scored_as_a_read() {
 }
 
 #[test]
+fn hook_asks_when_tool_input_is_an_argv_array() {
+    let hidden = hook_output(
+        br#"{"tool_name":"Bash","tool_input":["rm","-rf","/tmp"],"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&hidden.stdout);
+    assert_eq!(hidden.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let echoed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":["echo","rm"],"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_out = String::from_utf8_lossy(&echoed.stdout);
+    assert!(
+        echoed_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_out}"
+    );
+    for shadow in [false, true] {
+        let denied = hook_output(
+            br#"{"tool_name":"Bash","tool_input":["rm",1],"script":{"harm":"read","confidence":1.0}}"#,
+            shadow,
+        );
+        let denied_out = String::from_utf8_lossy(&denied.stdout);
+        assert_eq!(denied.status.code(), Some(0), "{shadow} {denied_out}");
+        assert!(
+            denied_out.contains("\"permissionDecision\":\"deny\""),
+            "{shadow} {denied_out}"
+        );
+        assert!(
+            denied_out.contains("command must be a string"),
+            "{shadow} {denied_out}"
+        );
+        assert!(
+            !denied_out.contains("\"permissionDecision\":\"allow\""),
+            "{shadow} {denied_out}"
+        );
+    }
+}
+
+#[test]
 fn hook_asks_when_rm_is_an_argv_array() {
     let hidden = hook_output(
         br#"{"tool_name":"Bash","tool_input":{"command":["rm","-rf","/tmp"]},"script":{"harm":"read","confidence":1.0}}"#,
