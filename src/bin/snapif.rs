@@ -426,6 +426,20 @@ fn backend_code(err: &snapif::error::BackendError) -> u8 {
     }
 }
 
+fn extension_eq(path: &std::path::Path, expected: &str) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+}
+
+fn is_json_ext(path: &std::path::Path) -> bool {
+    extension_eq(path, "json")
+}
+
+fn is_calibration_file(path: &std::path::Path) -> bool {
+    is_json_ext(path) || extension_eq(path, "jsonl")
+}
+
 fn each_vector(
     vectors: &PathBuf,
     mut visit: impl FnMut(&std::path::Path, &[u8]) -> Result<(), u8>,
@@ -447,7 +461,7 @@ fn each_vector(
             }
         };
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+        if !is_json_ext(&path) {
             continue;
         }
         let bytes = match fs::read(&path) {
@@ -1652,12 +1666,7 @@ fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<(PathBuf, usize, String)>, 
             })?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
-            .filter(|entry| {
-                entry
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext == "json" || ext == "jsonl")
-            })
+            .filter(|entry| is_calibration_file(entry))
             .collect();
         names.sort();
         if names.is_empty() {
@@ -1682,10 +1691,7 @@ fn push_calibrate_rows(
             format!("{}: {}", path.display(), io_text(&err)),
         ))
     })?;
-    let json_doc = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext == "json");
+    let json_doc = is_json_ext(path);
     if json_doc {
         let value: Value = serde_json::from_str(&text)
             .map_err(|err| Error::Wire(WireError::Json(format!("{}: {err}", path.display()))))?;
