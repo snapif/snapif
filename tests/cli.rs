@@ -2886,7 +2886,29 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
         let err = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(code), "{name} {err}");
         assert!(err.contains(needle), "{name} {err}");
+        if code == 2 {
+            assert!(
+                err.contains(&format!("{}: line 1:", path.display())),
+                "{name} {err}"
+            );
+        }
     }
+    let padded = dir.join("blank-questions.jsonl");
+    fs::write(&padded, "\n{\"questions\":[]}\n").expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&padded)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains(&format!("{}: line 2:", padded.display())),
+        "{err}"
+    );
+    assert!(err.contains("questions must be an object"), "{err}");
     let gated = dir.join("blank-gate.jsonl");
     fs::write(&gated, "\n\nnot-json\n").expect("write");
     let output = bin()
