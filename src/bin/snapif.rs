@@ -1002,7 +1002,14 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
             return 0;
         }
     };
-    let command = hook_command(&value);
+    let command = match hook_command(&value) {
+        HookCommand::Absent => None,
+        HookCommand::Text(text) => Some(text),
+        HookCommand::Invalid => {
+            hook_decision("deny", "command must be a string");
+            return 0;
+        }
+    };
     let action_id = snapif::policy::matched_action(&loaded, name, command.as_deref())
         .cloned()
         .unwrap_or_else(|| ActionId::new(name));
@@ -1041,18 +1048,52 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
     }
 }
 
-fn hook_command(value: &Value) -> Option<String> {
-    let input = value.get("tool_input")?;
+enum HookCommand {
+    Absent,
+    Text(String),
+    Invalid,
+}
+
+fn hook_command(value: &Value) -> HookCommand {
+    let Some(input) = value.get("tool_input") else {
+        return HookCommand::Absent;
+    };
     if let Some(text) = input.as_str() {
-        let text = text.trim();
-        return (!text.is_empty()).then(|| text.to_string());
+        return hook_command_text(text);
     }
-    input
-        .get("command")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
+    let Some(command) = input.get("command") else {
+        return HookCommand::Absent;
+    };
+    if let Some(text) = command.as_str() {
+        return hook_command_text(text);
+    }
+    let Some(items) = command.as_array() else {
+        return HookCommand::Invalid;
+    };
+    let mut words = Vec::new();
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return HookCommand::Invalid;
+        };
+        let text = text.trim();
+        if !text.is_empty() {
+            words.push(text);
+        }
+    }
+    if words.is_empty() {
+        HookCommand::Absent
+    } else {
+        HookCommand::Text(words.join(" "))
+    }
+}
+
+fn hook_command_text(text: &str) -> HookCommand {
+    let text = text.trim();
+    if text.is_empty() {
+        HookCommand::Absent
+    } else {
+        HookCommand::Text(text.to_string())
+    }
 }
 
 fn hook_reason(verdict: &Verdict) -> String {
