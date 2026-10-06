@@ -222,27 +222,32 @@ fn host_line(text: &str) -> String {
 }
 
 fn safe_location(raw: &str) -> String {
-    let Ok(mut url) = url::Url::parse(raw) else {
-        let stripped = strip_userinfo(raw);
-        let cut = stripped.split(['?', '#']).next().unwrap_or(&stripped);
-        return host_line(cut);
-    };
-    let _ = url.set_username("");
-    let _ = url.set_password(None);
-    url.set_query(None);
-    url.set_fragment(None);
-    host_line(url.as_str())
+    if let Ok(mut url) = url::Url::parse(raw) {
+        let cleared = url.set_username("").is_ok() && url.set_password(None).is_ok();
+        if cleared {
+            url.set_query(None);
+            url.set_fragment(None);
+            return host_line(url.as_str());
+        }
+    }
+    let stripped = strip_userinfo(raw);
+    let cut = stripped.split(['?', '#']).next().unwrap_or(&stripped);
+    host_line(cut)
 }
 
-/// Drop `user:password@` from an authority `Url::parse` rejected.
+/// Drop `user:password@` from a redirect target.
 /// The last `@` is the separator, so a `/`, `?`, or `#` inside the password
 /// still drops. `//user:pw@host/path` becomes `//host/path`. An empty host
-/// keeps the path.
+/// keeps the path. A scheme without `://`, such as `alice:secret@host/path`,
+/// drops the same way. `Url::parse` accepts that form and then refuses
+/// `set_username`, which would otherwise leave the secret in the error text.
 fn strip_userinfo(raw: &str) -> String {
-    let (prefix, rest) = if let Some(rest) = raw.strip_prefix("//") {
-        ("//", rest)
+    let (prefix, rest, hierarchical) = if let Some(rest) = raw.strip_prefix("//") {
+        ("//", rest, true)
     } else if let Some(index) = scheme_slashes(raw) {
-        (&raw[..index], &raw[index..])
+        (&raw[..index], &raw[index..], true)
+    } else if let Some(index) = scheme_colon(raw) {
+        ("", &raw[index..], false)
     } else {
         return raw.to_string();
     };
@@ -250,7 +255,7 @@ fn strip_userinfo(raw: &str) -> String {
         return raw.to_string();
     };
     let userinfo = &rest[..at];
-    if !userinfo.contains(':') && userinfo.contains('/') {
+    if hierarchical && !userinfo.contains(':') && userinfo.contains('/') {
         return raw.to_string();
     }
     let host = &rest[at + 1..];
@@ -265,15 +270,25 @@ fn strip_userinfo(raw: &str) -> String {
 
 fn scheme_slashes(cut: &str) -> Option<usize> {
     let index = cut.find("://")?;
-    let scheme = &cut[..index];
-    if scheme.is_empty()
-        || !scheme
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
-    {
+    if !is_scheme(&cut[..index]) {
         return None;
     }
     Some(index + 3)
+}
+
+fn scheme_colon(raw: &str) -> Option<usize> {
+    let index = raw.find(':')?;
+    if !is_scheme(&raw[..index]) {
+        return None;
+    }
+    Some(index + 1)
+}
+
+fn is_scheme(scheme: &str) -> bool {
+    !scheme.is_empty()
+        && scheme
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.'))
 }
 
 fn status_error(status: u16, body: &[u8]) -> BackendError {
@@ -569,5 +584,15 @@ mod tests {
             assert!(!text.contains("sec/ret"), "{raw} -> {text}");
             assert!(!text.contains("user:"), "{raw} -> {text}");
         }
+        let http = safe_location("http://alice:secret@127.0.0.1/hidden?x=1");
+        assert_eq!(http, "http://127.0.0.1/hidden");
+        let opaque = safe_location("alice:secret@evil.example/hidden?access_token=secret");
+        assert!(opaque.contains("evil.example/hidden"), "{opaque}");
+        assert!(!opaque.contains("secret"), "{opaque}");
+        assert!(!opaque.contains('@'), "{opaque}");
+        let slashed = safe_location("alice:sec/ret@evil.example/hidden");
+        assert!(slashed.contains("evil.example/hidden"), "{slashed}");
+        assert!(!slashed.contains("sec/ret"), "{slashed}");
+        assert!(!slashed.contains('@'), "{slashed}");
     }
 }
