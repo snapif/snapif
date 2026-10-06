@@ -50,6 +50,27 @@ fn test_invalid_json_names_the_file_without_debug_quotes() {
 }
 
 #[test]
+fn test_uppercase_json_extension_is_checked() {
+    let dir = std::env::temp_dir().join(format!("snapif-upper-json-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("Bad.JSON");
+    fs::write(&path, "not-json").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains(&format!("{}: invalid json", path.display())),
+        "{err}"
+    );
+    assert!(!err.contains("no conformance vectors"), "{err}");
+}
+
+#[test]
 fn missing_paths_name_the_file() {
     let missing = std::env::temp_dir().join(format!("snapif-missing-{}", std::process::id()));
     let missing_s = missing.display().to_string();
@@ -2618,6 +2639,46 @@ fn calibrate_directory_names_the_bad_file() {
         "{err}"
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn calibrate_uppercase_extension_names_the_file() {
+    let dir = std::env::temp_dir().join(format!("snapif-upper-cal-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("Bad.JSONL");
+    fs::write(&path, "\n\nnot-json\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&dir)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(&format!("{}: line 3:", path.display())),
+        "{err}"
+    );
+    assert!(!err.contains("no calibration rows"), "{err}");
+    let doc = dir.join("Rows.JSON");
+    fs::write(&doc, r#"[{"expected":"Auto"}]"#).expect("write");
+    let _ = fs::remove_file(&path);
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&doc)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(&format!("{}: line 1:", doc.display())),
+        "{err}"
+    );
+    assert!(err.contains("gate_request"), "{err}");
 }
 
 #[test]
