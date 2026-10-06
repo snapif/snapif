@@ -464,18 +464,19 @@ fn each_vector(
         if !is_json_ext(&path) {
             continue;
         }
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
+        let raw = match fs::read(&path) {
+            Ok(raw) => raw,
             Err(err) => {
                 eprintln!("{}: {err}", path.display());
                 return Err(1);
             }
         };
-        if serde_json::from_slice::<Value>(&bytes).is_err() {
+        let bytes = without_bom_bytes(&raw);
+        if serde_json::from_slice::<Value>(bytes).is_err() {
             eprintln!("{}: invalid json", path.display());
             return Err(2);
         }
-        visit(&path, &bytes)?;
+        visit(&path, bytes)?;
         checked += 1;
     }
     Ok(checked)
@@ -502,13 +503,14 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
         eprintln!("{}: replay path must be a file", path.display());
         return 1;
     }
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
         Err(err) => {
             eprintln!("{}: {}", path.display(), io_text(&err));
             return 1;
         }
     };
+    let text = without_bom_str(&raw);
     let mut checked = 0usize;
     let mut failed = false;
     let mut counts: std::collections::BTreeMap<(String, String), [usize; 3]> =
@@ -1692,12 +1694,13 @@ fn push_calibrate_rows(
     rows: &mut Vec<(PathBuf, usize, String)>,
     path: &std::path::Path,
 ) -> Result<(), Error> {
-    let text = fs::read_to_string(path).map_err(|err| {
+    let raw = fs::read_to_string(path).map_err(|err| {
         Error::Io(std::io::Error::new(
             err.kind(),
             format!("{}: {}", path.display(), io_text(&err)),
         ))
     })?;
+    let text = without_bom_str(&raw).to_string();
     let json_doc = is_json_ext(path);
     if json_doc {
         let value: Value = serde_json::from_str(&text)
@@ -1803,6 +1806,14 @@ fn expects_reject(bytes: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
+fn without_bom_str(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
+fn without_bom_bytes(bytes: &[u8]) -> &[u8] {
+    bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(bytes)
+}
+
 fn io_text(err: &std::io::Error) -> String {
     let text = err.to_string();
     match text.split_once(" (os error") {
@@ -1818,7 +1829,7 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &PathBuf) -> Result<T, Error> {
             format!("{}: {}", path.display(), io_text(&err)),
         ))
     })?;
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text).to_string();
+    let text = without_bom_str(&text).to_string();
     serde_json::from_str(&text).map_err(|err| Error::Wire(WireError::Json(err.to_string())))
 }
 
