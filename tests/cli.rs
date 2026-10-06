@@ -31,6 +31,28 @@ fn test_empty_directory_exits_1() {
 }
 
 #[test]
+fn test_leading_bom_is_still_json() {
+    let dir = std::env::temp_dir().join(format!("snapif-bom-test-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::write(
+        dir.join("boolean_reject.json"),
+        "\u{feff}{\"expect\":\"reject\",\"state\":\"x\",\"model\":\"jev-latest\",\"questions\":{\"flag\":{\"type\":\"boolean\",\"instructions\":\"yes?\"}}}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(0), "{err} {out}");
+    assert_eq!(out.trim(), "ok", "{out}");
+}
+
+#[test]
 fn test_invalid_json_names_the_file_without_debug_quotes() {
     let dir = std::env::temp_dir().join(format!("snapif-bad-json-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
@@ -291,6 +313,28 @@ fn replay_blank_file_exits_1() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("no replay rows"));
+}
+
+#[test]
+fn replay_ignores_a_leading_bom() {
+    let path = std::env::temp_dir().join(format!("snapif-replay-bom-{}.jsonl", std::process::id()));
+    let row = concat!(
+        r#"{"id":"row-a","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Auto"}"#,
+        "\n",
+    );
+    fs::write(&path, format!("\u{feff}{row}")).expect("write");
+    let output = bin()
+        .arg("replay")
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    let _ = fs::remove_file(&path);
+    assert_eq!(output.status.code(), Some(0), "{err} {out}");
+    assert!(out.contains("\"got\":\"auto\""), "{out}");
 }
 
 #[test]
@@ -2620,6 +2664,7 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
     let cases = [
         ("not-json.jsonl", "not-json\n", 1, "line 1:"),
         ("blank-padded.jsonl", "\n\nnot-json\n", 1, "line 3:"),
+        ("bom.jsonl", "\u{feff}\n\nnot-json\n", 1, "line 3:"),
         ("array.jsonl", "[]\n", 2, "state must be an object"),
         (
             "questions.jsonl",
