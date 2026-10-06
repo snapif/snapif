@@ -1836,6 +1836,83 @@ fn hook_asks_when_rm_is_scored_as_a_read() {
 }
 
 #[test]
+fn hook_does_not_auto_a_windows_image_suffix() {
+    for (harm, command) in [
+        ("none", "git.exe push"),
+        ("read", "git.exe push"),
+        ("none", "rm.exe -rf /tmp/x"),
+        ("read", "rm.exe -rf /tmp/x"),
+        ("read", "timeout.exe 1 rm.exe -rf /tmp/x"),
+        ("read", "GIT.EXE push origin"),
+    ] {
+        let body = format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"{command}"}},"script":{{"harm":"{harm}","confidence":1.0}}}}"#
+        );
+        let out = hook_output(body.as_bytes(), false);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(out.status.code(), Some(0), "{harm} {command} {stdout}");
+        assert!(
+            stdout.contains("\"permissionDecision\":\"ask\""),
+            "{harm} {command} {stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"allow\""),
+            "{harm} {command} {stdout}"
+        );
+    }
+    let shadowed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"git.exe push"},"script":{"harm":"read","confidence":1.0}}"#,
+        true,
+    );
+    let shadowed_out = String::from_utf8_lossy(&shadowed.stdout);
+    assert!(
+        shadowed_out.contains("\"permissionDecision\":\"allow\""),
+        "{shadowed_out}"
+    );
+    assert!(
+        shadowed_out.contains("\"permissionDecisionReason\":\"review\""),
+        "{shadowed_out}"
+    );
+    assert!(
+        !shadowed_out.contains("\"permissionDecisionReason\":\"auto\""),
+        "{shadowed_out}"
+    );
+    let words = hook_output(
+        br#"{"tool_name":"Bash","tool_input":["rm.exe","-rf","/tmp"],"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let words_out = String::from_utf8_lossy(&words.stdout);
+    assert!(
+        words_out.contains("\"permissionDecision\":\"ask\""),
+        "{words_out}"
+    );
+    let unmatched = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm.exe.bak -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let unmatched_out = String::from_utf8_lossy(&unmatched.stdout);
+    assert!(
+        unmatched_out.contains("\"permissionDecision\":\"allow\""),
+        "{unmatched_out}"
+    );
+    let explained = bin()
+        .args(["explain", "--action", "Bash", "--command", "git.exe push"])
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let explained_out = String::from_utf8_lossy(&explained.stdout);
+    assert_eq!(explained.status.code(), Some(0), "{explained_out}");
+    assert!(
+        explained_out.contains("matched git.push"),
+        "{explained_out}"
+    );
+    assert!(
+        !explained_out.contains("source default_action"),
+        "{explained_out}"
+    );
+}
+
+#[test]
 fn hook_asks_when_tool_input_is_an_argv_array() {
     let hidden = hook_output(
         br#"{"tool_name":"Bash","tool_input":["rm","-rf","/tmp"],"script":{"harm":"read","confidence":1.0}}"#,

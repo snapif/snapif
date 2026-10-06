@@ -4,9 +4,12 @@ Report a vulnerability in Snapif through [GitHub Security Advisories](https://gi
 
 ## Supported versions
 
+Fixes land on the 0.2 line. The 0.1 line does not receive them.
+
 | Version | Supported |
 | --- | --- |
-| 0.1.x | yes |
+| 0.2.x | yes |
+| 0.1.x | no |
 
 ## What to include
 
