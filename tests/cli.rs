@@ -2005,6 +2005,24 @@ fn hook_asks_when_rm_is_scored_as_a_read() {
 }
 
 #[test]
+fn hook_asks_when_rm_is_inside_if() {
+    let asked = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"if true; then rm -rf /tmp/x; fi"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(asked.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn hook_does_not_auto_a_windows_image_suffix() {
     for (harm, command) in [
         ("none", "git.exe push"),
