@@ -368,10 +368,16 @@ fn check_action(
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
 /// `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm`.
 /// `git push` matches `git push`, `git\tpush`, `/usr/bin/git push`, and
-/// `git -C repo push`.
+/// `git -C repo push`. `git.exe push` and `rm.exe` match those rows too.
+/// One trailing `.exe`, `.cmd`, `.bat`, or `.com` is ignored, in any
+/// ASCII case, including on `timeout.exe` and `busybox.exe`. Dots after
+/// that suffix are ignored (`git.exe.`), and a quoted trailing space is
+/// ignored (`"rm.exe "`).
 /// A later command does not replace an earlier hit: `git push && rm` stays
 /// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
-/// `command -v rm`, `sudo -l`, an empty word, and a heredoc body do not match.
+/// `command -v rm`, `sudo -l`, an empty word, a heredoc body, `rmdir.exe`,
+/// `rm.exe.bak`, `rm.`, and `git.exe.exe` do not match. `cmd /c` is not
+/// unwrapped.
 pub fn matched_action<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -813,10 +819,40 @@ fn is_assignment(token: &str) -> bool {
 }
 
 fn command_basename(token: &str) -> &str {
-    token
+    let base = token
         .rsplit(['/', '\\'])
         .find(|part| !part.is_empty())
-        .unwrap_or(token)
+        .unwrap_or(token);
+    // A quoted image can keep a trailing space (`"rm.exe "`). Windows
+    // ignores that space. The suffix check has to see `.exe`.
+    strip_image_suffix(base.trim_end_matches([' ', '\t']))
+}
+
+/// One Windows image suffix. The extension has to be the whole tail, so
+/// `rm.exe.bak` stays `rm.exe.bak` and `git.exe.exe` stays `git.exe`.
+/// Trailing dots are removed only when that suffix is under them
+/// (`git.exe.` is `git`, `rm.` stays `rm.`).
+fn strip_image_suffix(name: &str) -> &str {
+    const SUFFIXES: &[&str] = &[".exe", ".cmd", ".bat", ".com"];
+    let candidate = name.trim_end_matches('.');
+    if candidate.is_empty() {
+        return name;
+    }
+    for suffix in SUFFIXES {
+        if candidate.len() <= suffix.len() {
+            continue;
+        }
+        let end = candidate.len() - suffix.len();
+        // `你好` is longer than `.exe`, but byte 2 is inside a character.
+        // `split_at` would panic and hide a later `rm`.
+        let (Some(stem), Some(tail)) = (candidate.get(..end), candidate.get(end..)) else {
+            continue;
+        };
+        if tail.eq_ignore_ascii_case(suffix) {
+            return stem;
+        }
+    }
+    name
 }
 
 fn same_word(left: &str, right: &str) -> bool {
@@ -1618,6 +1654,104 @@ mod tests {
             "echo grm",
             "gfalse rm --version",
             "grmdir /tmp",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_image_suffix_uses_the_same_row() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "rm.exe -rf /tmp/x",
+            "RM.EXE -rf /tmp/x",
+            "rm.cmd -rf /tmp/x",
+            "rm.bat -rf /tmp/x",
+            "rm.com -rf /tmp/x",
+            "rm.ExE -rf /tmp/x",
+            "./rm.exe -rf /tmp/x",
+            "C:/Windows/rm.exe -rf C:/temp",
+            "'C:\\Windows\\rm.exe' -rf /tmp/x",
+            "\"C:/Program Files/rm.exe\" -rf /tmp/x",
+            "\"rm.exe \" -rf /tmp/x",
+            "rm.exe. -rf /tmp/x",
+            "rm.exe... -rf /tmp/x",
+            "\"rm.exe. \" -rf /tmp/x",
+            "FOO=1 rm.exe -rf /tmp/x",
+            "FOO+=1 rm.exe -rf /tmp/x",
+            "sudo.exe rm.exe -rf /tmp/x",
+            "sudo.exe -nu root rm.cmd -rf /tmp/x",
+            "timeout.exe 1 rm -rf /tmp/x",
+            "timeout.EXE 1 rm.exe -rf /tmp/x",
+            "timeout.exe --foreground 1 rm.CMD -rf /tmp/x",
+            "timeout.exe -- 1 rm.exe --version",
+            "busybox.exe rm -rf /tmp/x",
+            "busybox.cmd rm.exe -rf /tmp/x",
+            "xargs.exe rm.exe --version",
+            "gtimeout.exe 1 grm.exe --version",
+            "GRM.EXE --version",
+            "bash.exe -c 'rm.exe -rf /'",
+            "bash.CMD -c 'rm.bat -rf /'",
+            "eval.exe 'rm.exe --version'",
+            "exec.exe rm.exe --version",
+            "env.exe -S 'rm.exe -rf /'",
+            "你好 && rm -rf /tmp/x",
+            "héllo && rm -rf /tmp/x",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = [
+            "git.exe push",
+            "GIT.EXE push origin",
+            "git.cmd push",
+            "git.bat push",
+            "git.com push",
+            "git.Exe push origin",
+            "\"C:/Program Files/Git/cmd/git.exe\" push",
+            "'C:\\Program Files\\Git\\cmd\\git.exe' push",
+            "git.exe\tpush",
+            "git.exe. push",
+            "git.EXE... push origin",
+            "timeout.exe 1 git.exe push",
+            "sudo.exe git.cmd push",
+            "bash.exe -c 'git.exe push'",
+            "git.exe push && rm.exe -rf /",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "rmdir.exe /tmp",
+            "git.exe push-all",
+            "rm.exe.bak -rf /tmp",
+            "rm.executable -rf /tmp",
+            "rm. -rf /tmp",
+            "rm.exe.bak. -rf /tmp",
+            "git.exe.bak push",
+            "gitexe push",
+            "git.exe.exe push",
+            "echo.exe rm -rf /",
+            "echo rm.exe",
+            "grmdir.exe /tmp",
+            "timeout.exe 1 rmdir.exe /tmp",
+            "timeout.exe -- rm.exe --version",
+            "C:/Program Files/Git/cmd/git.exe push",
+            "你好",
+            "héllo",
+            "\u{1F600}x",
         ];
         for command in neither {
             assert!(
