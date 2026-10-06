@@ -1833,6 +1833,46 @@ fn hook_asks_when_tool_input_is_an_argv_array() {
 }
 
 #[test]
+fn hook_denies_a_tool_input_that_is_not_an_object() {
+    for (body, shadow) in [
+        (
+            &br#"{"tool_name":"Bash","tool_input":1,"script":{"harm":"read","confidence":1.0}}"#[..],
+            false,
+        ),
+        (
+            &br#"{"tool_name":"Bash","tool_input":true,"script":{"harm":"read","confidence":1.0}}"#
+                [..],
+            true,
+        ),
+    ] {
+        let denied = hook_output(body, shadow);
+        let denied_out = String::from_utf8_lossy(&denied.stdout);
+        assert_eq!(denied.status.code(), Some(0), "{shadow} {denied_out}");
+        assert!(
+            denied_out.contains("\"permissionDecision\":\"deny\""),
+            "{shadow} {denied_out}"
+        );
+        assert!(
+            denied_out.contains("command must be a string"),
+            "{shadow} {denied_out}"
+        );
+        assert!(
+            !denied_out.contains("\"permissionDecision\":\"allow\""),
+            "{shadow} {denied_out}"
+        );
+    }
+    let empty = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let empty_out = String::from_utf8_lossy(&empty.stdout);
+    assert!(
+        empty_out.contains("\"permissionDecision\":\"allow\""),
+        "{empty_out}"
+    );
+}
+
+#[test]
 fn hook_asks_when_rm_is_an_argv_array() {
     let hidden = hook_output(
         br#"{"tool_name":"Bash","tool_input":{"command":["rm","-rf","/tmp"]},"script":{"harm":"read","confidence":1.0}}"#,

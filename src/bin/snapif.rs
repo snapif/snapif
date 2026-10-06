@@ -1074,11 +1074,17 @@ fn hook_command(value: &Value) -> HookCommand {
     let Some(input) = value.get("tool_input") else {
         return HookCommand::Absent;
     };
+    if input.is_null() {
+        return HookCommand::Absent;
+    }
     if let Some(text) = input.as_str() {
         return hook_command_text(text);
     }
     if let Some(items) = input.as_array() {
         return hook_command_words(items);
+    }
+    if !input.is_object() {
+        return HookCommand::Invalid;
     }
     let Some(command) = input.get("command") else {
         return HookCommand::Absent;
