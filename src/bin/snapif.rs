@@ -33,7 +33,7 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
-        /// Call JSON file. `action_id` selects the policy row. When it is omitted, `name` is the action. Also `args`, `trusted`, and `untrusted`, or nested `prepared` and `state`. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
+        /// Call JSON file. `action_id` selects the policy row. When it is omitted, a host tool name plus `args.command` selects a prefix row, and otherwise `name` is the action. Also `args`, `trusted`, and `untrusted`, or nested `prepared` and `state`. With `SNAPIF_BACKEND=fake`, optional `script` sets harm and confidence.
         #[arg(long)]
         call: PathBuf,
         /// Return the real verdict. The exit code stays the same.
@@ -241,7 +241,13 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
             .unwrap_or(Value::Null)
     };
     let action_id = if file.action_id.is_empty() {
-        name.clone()
+        match action_id_from_tool(policy, &name, &args) {
+            Ok(id) => id,
+            Err(err) => {
+                eprintln!("{err}");
+                return 1;
+            }
+        }
     } else {
         file.action_id.clone()
     };
@@ -1068,6 +1074,25 @@ enum HookCommand {
     Absent,
     Text(String),
     Invalid,
+}
+
+fn action_id_from_tool(policy: Option<&str>, name: &str, args: &Value) -> Result<String, String> {
+    let loaded = load_policy(policy).map_err(|err| err.to_string())?;
+    let command = match hook_command(&serde_json::json!({ "tool_input": args })) {
+        HookCommand::Absent => None,
+        HookCommand::Text(text) => Some(text),
+        HookCommand::Invalid => {
+            if let Some(id) = snapif::policy::matched_action(&loaded, name, None) {
+                return Ok(id.0.clone());
+            }
+            return Err("command must be a string".to_string());
+        }
+    };
+    Ok(
+        snapif::policy::matched_action(&loaded, name, command.as_deref())
+            .map(|id| id.0.clone())
+            .unwrap_or_else(|| name.to_string()),
+    )
 }
 
 fn hook_command(value: &Value) -> HookCommand {

@@ -82,7 +82,7 @@ SNAPIF_BACKEND=fake snapif gate --call call.json
 | `0.95` | `review` | 10 |
 | `0.50` | `escalate` | 11 |
 
-Auto on this row needs confidence `1.0` and harm `exec`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates. A lower label does not auto: `rm` scored as `read` at confidence `1.0` asks.
+Auto on this row needs confidence `1.0` and harm `exec`. `0.95` is high enough to review and not high enough to pass. `0.50` is below the floor, so the row escalates. A lower label does not auto: `rm` scored as `read` at confidence `1.0` asks. Omitting `action_id` still selects that row when `name` is `bash` and `args.command` is `rm`.
 
 ### Shadow, then enforce
 
@@ -211,7 +211,7 @@ With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIME
 
 | Field | Role |
 | --- | --- |
-| `action_id` | Selects the policy row. When it is omitted, `name` is the action. |
+| `action_id` | Selects the policy row. When it is omitted, a host tool name plus `args.command` selects a prefix row such as `bash.rm` or `git.push`. Otherwise `name` is the action. |
 | `name` | Tool name, such as `list_files`. |
 | `args` | The tool arguments. |
 | `trusted` | Text the host wrote, such as `user_request`. |

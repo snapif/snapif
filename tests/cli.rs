@@ -498,6 +498,110 @@ fn gate_fake_script_prints_auto_and_refuses_other_backends() {
 }
 
 #[test]
+fn gate_call_without_action_id_matches_a_command_prefix() {
+    let dir = std::env::temp_dir().join(format!("snapif-prefix-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let cases = [
+        (
+            "rm-read",
+            r#"{"name":"bash","args":{"command":"rm -rf /tmp/demo"},"trusted":{"user_request":"clean"},"untrusted":null,"script":{"harm":"read","confidence":1.0}}"#,
+            10,
+            "review",
+        ),
+        (
+            "git-read",
+            r#"{"name":"Bash","args":{"command":"git push origin main"},"trusted":{"user_request":"ship"},"untrusted":null,"script":{"harm":"read","confidence":1.0}}"#,
+            10,
+            "review",
+        ),
+        (
+            "git-exe",
+            r#"{"name":"bash","args":{"command":"git.exe push"},"trusted":{"user_request":"ship"},"untrusted":null,"script":{"harm":"network","confidence":1.0}}"#,
+            10,
+            "review",
+        ),
+        (
+            "rm-argv",
+            r#"{"prepared":{"name":"bash","args":{"command":["rm","-rf","/tmp"]}},"script":{"harm":"read","confidence":1.0}}"#,
+            10,
+            "review",
+        ),
+        (
+            "rm-exec",
+            r#"{"name":"bash","args":{"command":"rm.exe -rf /tmp/demo"},"script":{"harm":"exec","confidence":1.0}}"#,
+            0,
+            "auto",
+        ),
+        (
+            "ls",
+            r#"{"name":"bash","args":{"command":"ls"},"script":{"harm":"read","confidence":1.0}}"#,
+            0,
+            "auto",
+        ),
+        (
+            "explicit-tag",
+            r#"{"action_id":"tag","name":"bash","args":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+            0,
+            "auto",
+        ),
+        (
+            "tag-command",
+            r#"{"name":"tag","args":{"command":1},"script":{"harm":"read","confidence":0.91}}"#,
+            0,
+            "auto",
+        ),
+    ];
+    for (name, body, code, word) in cases {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(code), "{name} {out}{err}");
+        assert_eq!(out.trim(), word, "{name} {out}{err}");
+    }
+    let git_exe = dir.join("git-exe.json");
+    let json = bin()
+        .args(["gate", "--json", "--call"])
+        .arg(&git_exe)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("json");
+    let body = String::from_utf8_lossy(&json.stdout);
+    assert_eq!(json.status.code(), Some(10), "{body}");
+    assert!(body.contains("\"verdict\":\"review\""), "{body}");
+    assert!(
+        !body.contains("harm_class_bump"),
+        "git.exe push used the read default: {body}"
+    );
+    let bad = dir.join("bad-command.json");
+    fs::write(
+        &bad,
+        r#"{"name":"bash","args":{"command":1},"script":{"harm":"read","confidence":1.0}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&bad)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("command must be a string"), "{err}");
+    assert!(String::from_utf8_lossy(&output.stdout).trim().is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn gate_call_without_action_id_uses_name() {
     let dir = std::env::temp_dir().join(format!("snapif-name-action-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
