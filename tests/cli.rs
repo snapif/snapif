@@ -2929,6 +2929,40 @@ fn replay_of_score_zero_stays_auto() {
 }
 
 #[test]
+fn calibrate_ask_error_names_the_file() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-ask-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let first = dir.join("a.jsonl");
+    fs::write(
+        &first,
+        "{\"trusted\":{\"user_request\":\"hello\"},\"untrusted\":null,\"labels\":{\"sensitive\":false}}\n",
+    )
+    .expect("write");
+    fs::write(
+        dir.join("b.jsonl"),
+        "{\"trusted\":{\"user_request\":\"secret\"},\"untrusted\":null,\"labels\":{\"needs_person\":true}}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&dir)
+        .args(["--policy", "screen"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains(&format!("{}: line 1:", first.display())),
+        "{err}"
+    );
+    assert!(err.contains("missing answer sensitive"), "{err}");
+    assert!(!err.contains("b.jsonl"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_empty_file_names_the_path() {
     let path = std::env::temp_dir().join(format!("snapif-cal-{}.jsonl", std::process::id()));
     fs::write(&path, "\n").expect("write");

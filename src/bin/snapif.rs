@@ -1648,7 +1648,7 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
         let out = match block_on(client.ask(state, questions)) {
             Ok(out) => out,
             Err(err) => {
-                eprintln!("{err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 return ask_code(&err);
             }
         };
