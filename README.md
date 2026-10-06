@@ -240,7 +240,7 @@ The default features are empty. `cargo add snapif` does not build the binary or 
 
 ```toml
 [dependencies]
-snapif = "0.1"
+snapif = "0.2"
 ```
 
 ```bash
