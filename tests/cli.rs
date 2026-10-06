@@ -2504,6 +2504,7 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
     fs::create_dir_all(&dir).expect("dir");
     let cases = [
         ("not-json.jsonl", "not-json\n", 1, "line 1:"),
+        ("blank-padded.jsonl", "\n\nnot-json\n", 1, "line 3:"),
         ("array.jsonl", "[]\n", 2, "state must be an object"),
         (
             "questions.jsonl",
@@ -2526,6 +2527,18 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
         assert_eq!(output.status.code(), Some(code), "{name} {err}");
         assert!(err.contains(needle), "{name} {err}");
     }
+    let gated = dir.join("blank-gate.jsonl");
+    fs::write(&gated, "\n\nnot-json\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&gated)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("line 3:"), "{err}");
     let _ = fs::remove_dir_all(dir);
 }
 
