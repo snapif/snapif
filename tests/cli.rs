@@ -1384,6 +1384,56 @@ fn ask_decisions_flag_prints_json_and_screen_loads_the_pack() {
 }
 
 #[test]
+fn explain_reads_an_uppercase_toml_suffix() {
+    let dir = std::env::temp_dir().join(format!("snapif-toml-case-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("Policy.TOML");
+    fs::write(
+        &path,
+        r#"
+schema_version = 1
+fail = "closed"
+cascade_min = 0.99
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 0.99
+signal = "top_prob"
+[default_action]
+auto = 0.99
+review = 0.8
+when_unsure = "review_guess"
+class = "read"
+"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["explain", "--action", "tag", "--policy"])
+        .arg(&path)
+        .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{err} {stdout}");
+    assert!(stdout.contains("source default_action"), "{stdout}");
+    let bak = dir.join("Policy.toml.bak");
+    fs::write(&bak, fs::read_to_string(&path).expect("read")).expect("write");
+    let skipped = bin()
+        .args(["explain", "--action", "tag", "--policy"])
+        .arg(&bak)
+        .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let skipped_err = String::from_utf8_lossy(&skipped.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(skipped.status.code(), Some(1), "{skipped_err}");
+    assert!(skipped_err.contains("unknown policy"), "{skipped_err}");
+}
+
+#[test]
 fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
     let output = bin()
         .args(["explain", "--action", "git.push"])
