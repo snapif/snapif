@@ -1612,7 +1612,7 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
         let (state, questions) = match questions_from_state(&row, pack) {
             Ok(parsed) => parsed,
             Err(err) => {
-                eprintln!("{err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 return ask_code(&err);
             }
         };
