@@ -602,6 +602,71 @@ fn gate_call_without_action_id_matches_a_command_prefix() {
 }
 
 #[test]
+fn gate_trims_the_tool_name_before_matching() {
+    let dir = std::env::temp_dir().join(format!("snapif-trim-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let review = [
+        (
+            "space",
+            "{\"name\":\"bash \",\"args\":{\"command\":\"rm -rf /tmp/demo\"},\"script\":{\"harm\":\"read\",\"confidence\":1.0}}",
+        ),
+        (
+            "tab",
+            "{\"name\":\"bash\\t\",\"args\":{\"command\":\"rm -rf /tmp/demo\"},\"script\":{\"harm\":\"read\",\"confidence\":1.0}}",
+        ),
+        (
+            "prepared",
+            "{\"prepared\":{\"name\":\" bash\",\"args\":{\"command\":\"rm -rf /tmp/demo\"}},\"script\":{\"harm\":\"read\",\"confidence\":1.0}}",
+        ),
+        (
+            "action-id",
+            "{\"action_id\":\" bash.rm \",\"name\":\"other\",\"args\":{\"command\":\"ls\"},\"script\":{\"harm\":\"read\",\"confidence\":1.0}}",
+        ),
+    ];
+    for (name, body) in review {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(10), "{name} {out}{err}");
+        assert_eq!(out.trim(), "review", "{name} {out}{err}");
+    }
+    for (name, body) in [
+        (
+            "blank",
+            "{\"name\":\"   \",\"args\":{\"command\":\"rm -rf /tmp/demo\"},\"script\":{\"harm\":\"read\",\"confidence\":1.0}}",
+        ),
+        (
+            "empty",
+            "{\"name\":\"\",\"args\":{\"command\":\"rm -rf /tmp/demo\"},\"script\":{\"harm\":\"read\",\"confidence\":1.0}}",
+        ),
+    ] {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains("name must not be blank"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn gate_call_without_action_id_uses_name() {
     let dir = std::env::temp_dir().join(format!("snapif-name-action-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
