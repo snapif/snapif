@@ -1374,23 +1374,26 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         std::collections::BTreeMap::new();
     let mut matched = 0usize;
     let mut missed = 0usize;
-    for (line_no, line) in &rows {
+    for (path, line_no, line) in &rows {
         let row: GateCalRow = match serde_json::from_str(line) {
             Ok(row) => row,
             Err(err) => {
-                eprintln!("line {line_no}: {err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 eprintln!("a gate calibration row needs gate_request and script");
                 return 1;
             }
         };
         if row.expected.is_none() && row.labels.is_empty() {
-            eprintln!("line {line_no}: needs expected or labels");
+            eprintln!(
+                "{}: line {line_no}: needs expected or labels",
+                path.display()
+            );
             return 1;
         }
         let extras = match wire_questions(&row.gate_request.extra_questions) {
             Ok(extras) => extras,
             Err(err) => {
-                eprintln!("line {line_no}: {err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 return 1;
             }
         };
@@ -1408,7 +1411,7 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         ) {
             Ok(backend) => backend,
             Err(err) => {
-                eprintln!("line {line_no}: {err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 return 1;
             }
         };
@@ -1427,7 +1430,7 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         })) {
             Ok(verdict) => verdict,
             Err(err) => {
-                eprintln!("line {line_no}: {err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 return 1;
             }
         };
@@ -1456,11 +1459,17 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 continue;
             }
             let Some(score) = hint.facts.scores.get(id) else {
-                eprintln!("line {line_no}: label {id} was not scored");
+                eprintln!(
+                    "{}: line {line_no}: label {id} was not scored",
+                    path.display()
+                );
                 return 1;
             };
             let Some(truth) = label.as_bool() else {
-                eprintln!("line {line_no}: label {id} must be a bool");
+                eprintln!(
+                    "{}: line {line_no}: label {id} must be a bool",
+                    path.display()
+                );
                 return 1;
             };
             card.add_noul(*score, truth);
@@ -1506,11 +1515,11 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
     let pack = client.battery_id();
     let mut card = snapif::scorecard::Scorecard::default();
     let mut unused_labels = Vec::new();
-    for (line_no, line) in &rows {
+    for (path, line_no, line) in &rows {
         let row: Value = match serde_json::from_str(line) {
             Ok(row) => row,
             Err(err) => {
-                eprintln!("line {line_no}: {err}");
+                eprintln!("{}: line {line_no}: {err}", path.display());
                 return 1;
             }
         };
@@ -1534,7 +1543,7 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
         };
         let labels = row.get("labels").and_then(Value::as_object);
         let Some(labels) = labels else {
-            eprintln!("line {line_no}: missing labels");
+            eprintln!("{}: line {line_no}: missing labels", path.display());
             return 1;
         };
         for (id, score) in &out.scores {
@@ -1546,13 +1555,19 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
                 .find(|(asked_id, _)| asked_id == id)
                 .map(|(_, kind)| *kind)
             else {
-                eprintln!("line {line_no}: label {id} was not asked");
+                eprintln!(
+                    "{}: line {line_no}: label {id} was not asked",
+                    path.display()
+                );
                 return 1;
             };
             if let Err(expected) =
                 apply_asked_label(&mut card, id, *score, label, &out.decisions, kind)
             {
-                eprintln!("line {line_no}: label {id} must be a {expected}");
+                eprintln!(
+                    "{}: line {line_no}: label {id} must be a {expected}",
+                    path.display()
+                );
                 return 1;
             }
         }
@@ -1584,7 +1599,7 @@ fn choice_guess(decision: &snapif::verdict::UntypedDecision) -> Option<&str> {
     }
 }
 
-fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<(usize, String)>, Error> {
+fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<(PathBuf, usize, String)>, Error> {
     let mut rows = Vec::new();
     if path.is_dir() {
         let mut names: Vec<_> = fs::read_dir(path)
@@ -1617,7 +1632,7 @@ fn read_calibrate_rows(path: &PathBuf) -> Result<Vec<(usize, String)>, Error> {
 }
 
 fn push_calibrate_rows(
-    rows: &mut Vec<(usize, String)>,
+    rows: &mut Vec<(PathBuf, usize, String)>,
     path: &std::path::Path,
 ) -> Result<(), Error> {
     let text = fs::read_to_string(path).map_err(|err| {
@@ -1636,17 +1651,17 @@ fn push_calibrate_rows(
         match value {
             Value::Array(items) => {
                 for (index, item) in items.into_iter().enumerate() {
-                    rows.push((index + 1, item.to_string()));
+                    rows.push((path.to_path_buf(), index + 1, item.to_string()));
                 }
             }
-            other => rows.push((1, other.to_string())),
+            other => rows.push((path.to_path_buf(), 1, other.to_string())),
         }
         return Ok(());
     }
     // Keep the file line. Blank lines are not rows, but they still count.
     for (index, line) in text.lines().enumerate() {
         if !line.trim().is_empty() {
-            rows.push((index + 1, line.to_string()));
+            rows.push((path.to_path_buf(), index + 1, line.to_string()));
         }
     }
     Ok(())

@@ -2543,6 +2543,37 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
 }
 
 #[test]
+fn calibrate_directory_names_the_bad_file() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-files-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let good = dir.join("a.jsonl");
+    fs::write(
+        &good,
+        concat!(
+            r#"{"gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Auto"}"#,
+            "\n",
+        ),
+    )
+    .expect("write");
+    let bad = dir.join("b.jsonl");
+    fs::write(&bad, "\n\nnot-json\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&dir)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(&format!("{}: line 3:", bad.display())),
+        "{err}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_empty_directory_is_not_an_io_error() {
     let path = std::env::temp_dir().join(format!("snapif-cal-dir-{}", std::process::id()));
     fs::create_dir(&path).expect("dir");
