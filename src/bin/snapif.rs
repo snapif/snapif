@@ -1106,7 +1106,10 @@ fn hook_command_words(items: &[Value]) -> HookCommand {
         };
         let text = text.trim();
         if !text.is_empty() {
-            words.push(text);
+            // A raw join splits `C:/Program Files/Git/cmd/git.exe` into
+            // `C:/Program`, and that push can Auto. Quote each word so
+            // the bash split keeps the path as one token.
+            words.push(shell_quote(text));
         }
     }
     if words.is_empty() {
@@ -1114,6 +1117,19 @@ fn hook_command_words(items: &[Value]) -> HookCommand {
     } else {
         HookCommand::Text(words.join(" "))
     }
+}
+
+fn shell_quote(word: &str) -> String {
+    let mut quoted = String::from("'");
+    for ch in word.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn hook_command_text(text: &str) -> HookCommand {

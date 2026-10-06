@@ -2047,6 +2047,39 @@ fn hook_asks_when_rm_is_an_argv_array() {
 }
 
 #[test]
+fn hook_asks_when_an_argv_word_contains_a_space() {
+    let asks = [
+        br#"{"tool_name":"Bash","tool_input":["C:/Program Files/Git/cmd/git.exe","push"],"script":{"harm":"read","confidence":1.0}}"#.as_slice(),
+        br#"{"tool_name":"Bash","tool_input":{"command":["C:\\Program Files\\Git\\cmd\\git.exe","push"]},"script":{"harm":"read","confidence":1.0}}"#.as_slice(),
+        br#"{"tool_name":"Bash","tool_input":["C:/Program Files/rm.exe","-rf","/tmp/x"],"script":{"harm":"read","confidence":1.0}}"#.as_slice(),
+        br#"{"tool_name":"Bash","tool_input":{"command":["bash","-c","rm -rf /tmp"]},"script":{"harm":"read","confidence":1.0}}"#.as_slice(),
+        br#"{"tool_name":"Bash","tool_input":["rm","it's"],"script":{"harm":"read","confidence":1.0}}"#.as_slice(),
+    ];
+    for body in asks {
+        let hidden = hook_output(body, false);
+        let stdout = String::from_utf8_lossy(&hidden.stdout);
+        assert_eq!(hidden.status.code(), Some(0), "{stdout}");
+        assert!(
+            stdout.contains("\"permissionDecision\":\"ask\""),
+            "{stdout}"
+        );
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"allow\""),
+            "{stdout}"
+        );
+    }
+    let echoed = hook_output(
+        br#"{"tool_name":"Bash","tool_input":["echo","rm -rf /tmp"],"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let echoed_out = String::from_utf8_lossy(&echoed.stdout);
+    assert!(
+        echoed_out.contains("\"permissionDecision\":\"allow\""),
+        "{echoed_out}"
+    );
+}
+
+#[test]
 fn hook_asks_when_ansi_c_quotes_hide_rm() {
     let hidden = hook_output(
         br#"{"tool_name":"Bash","tool_input":{"command":"$'rm' --version"},"script":{"harm":"read","confidence":1.0}}"#,
@@ -3358,4 +3391,25 @@ fn hook_print_settings_does_not_read_stdin() {
     let here = std::env::current_dir().expect("cwd");
     assert!(stdout.contains(&here.display().to_string()), "{stdout}");
     assert!(!stdout.contains("permissionDecision"), "{stdout}");
+}
+
+#[test]
+fn readme_library_requirement_matches_the_crate_line() {
+    let cargo = fs::read_to_string(manifest("Cargo.toml")).expect("cargo");
+    let version = cargo
+        .lines()
+        .find(|line| line.starts_with("version = \""))
+        .expect("version")
+        .split('"')
+        .nth(1)
+        .expect("version string");
+    let mut parts = version.split('.');
+    let major = parts.next().expect("major");
+    let minor = parts.next().expect("minor");
+    let requirement = format!("snapif = \"{major}.{minor}\"");
+    let readme = fs::read_to_string(manifest("README.md")).expect("readme");
+    assert!(
+        readme.contains(&requirement),
+        "README should require {requirement}; Cargo.toml is {version}"
+    );
 }
