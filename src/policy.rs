@@ -458,9 +458,14 @@ fn matched_in<'a>(
                 return Some(id);
             }
         }
-        for script in [ssh_remote_command(&argv), flock_command(&argv)]
-            .into_iter()
-            .flatten()
+        for script in [
+            ssh_remote_command(&argv),
+            flock_command(&argv),
+            docker_command(&argv),
+            parallel_command(&argv),
+        ]
+        .into_iter()
+        .flatten()
         {
             if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
                 return Some(id);
@@ -631,6 +636,103 @@ fn flock_opt_takes_value(token: &str) -> bool {
     matches!(
         name,
         "-w" | "-E" | "wait" | "conflict-exit-code" | "timeout"
+    )
+}
+
+fn docker_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("docker") {
+        return None;
+    }
+    let sub = argv.get(1)?;
+    if sub != "exec" && sub != "run" {
+        return None;
+    }
+    let mut index = 2;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if token.starts_with('-') {
+            let takes_next = docker_opt_takes_value(token) && !token.contains('=');
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn docker_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-u" | "-w"
+            | "-e"
+            | "-n"
+            | "--user"
+            | "user"
+            | "workdir"
+            | "env"
+            | "name"
+            | "entrypoint"
+            | "hostname"
+            | "network"
+            | "volume"
+            | "mount"
+    ) || name == "-v"
+}
+
+fn parallel_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("parallel") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == ":::" || token == "::::" {
+            break;
+        }
+        if token.starts_with('-') {
+            let takes_next = parallel_opt_takes_value(token)
+                && !token.contains('=')
+                && (token.starts_with("--") || token.len() == 2);
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    let start = index;
+    while index < argv.len() && argv[index] != ":::" && argv[index] != "::::" {
+        index += 1;
+    }
+    if start == index {
+        return None;
+    }
+    Some(argv[start..index].join(" "))
+}
+
+fn parallel_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-j" | "-S" | "-a" | "-C" | "jobs" | "sshlogin" | "arg-file" | "colsep" | "timeout"
     )
 }
 
@@ -1758,6 +1860,13 @@ mod tests {
             "flock -w 2 /tmp/lock rm -rf /tmp",
             "flock /tmp/lock -c 'rm -rf /tmp'",
             "flock -c 'rm -rf /tmp' /tmp/lock",
+            "docker exec box rm -rf /tmp",
+            "docker exec -it box rm -rf /tmp",
+            "docker exec -u root box rm -rf /tmp",
+            "docker run --rm ubuntu rm -rf /tmp",
+            "parallel rm ::: /tmp/x",
+            "parallel -j 4 rm -rf /tmp ::: x",
+            "parallel --jobs=4 rm ::: x",
         ];
         for command in rm {
             assert_eq!(
@@ -1809,6 +1918,10 @@ mod tests {
             "ssh host ls",
             "flock /tmp/lock",
             "flock -w 2 /tmp/lock",
+            "docker exec box",
+            "docker run ubuntu",
+            "docker ps",
+            "parallel echo rm ::: a",
             "git status",
             "git -C repo status",
             "git -C push status",
