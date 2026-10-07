@@ -228,16 +228,32 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
                 }
             }
         }
+    } else if has("tool_name") || has("tool_input") {
+        match value
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .and_then(nonempty_trim)
+        {
+            Some(name) => name.to_string(),
+            None => {
+                eprintln!("tool_name is required");
+                return 1;
+            }
+        }
     } else {
         default_name()
     };
     let args = if has("args") {
         file.args.unwrap_or(Value::Null)
-    } else {
+    } else if has("prepared") {
         file.prepared
             .as_ref()
             .map(|prepared| prepared.args.clone())
             .unwrap_or(Value::Null)
+    } else if has("tool_input") {
+        value.get("tool_input").cloned().unwrap_or(Value::Null)
+    } else {
+        Value::Null
     };
     let trusted = if has("trusted") {
         file.trusted.unwrap_or(Value::Null)
@@ -406,6 +422,13 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
             return 1;
         }
     };
+    // A closed port must not hide a file that is not JSON. Directory
+    // order would otherwise post the first valid vector and return.
+    if let Err(code) = each_vector(vectors, |path, bytes| {
+        vector_request(path, bytes).map(|_| ())
+    }) {
+        return code;
+    }
     let result = each_vector(vectors, |path, bytes| {
         let Some(request) = vector_request(path, bytes)? else {
             return Ok(());
@@ -473,6 +496,7 @@ fn each_vector(
             return Err(1);
         }
     };
+    let mut paths = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -482,10 +506,13 @@ fn each_vector(
             }
         };
         let path = entry.path();
-        if !is_json_ext(&path) {
-            continue;
+        if is_json_ext(&path) {
+            paths.push(path);
         }
-        let raw = match fs::read(&path) {
+    }
+    paths.sort();
+    for path in &paths {
+        let raw = match fs::read(path) {
             Ok(raw) => raw,
             Err(err) => {
                 eprintln!("{}: {err}", path.display());
@@ -493,11 +520,11 @@ fn each_vector(
             }
         };
         let bytes = without_bom_bytes(&raw);
-        if serde_json::from_slice::<Value>(bytes).is_err() {
-            eprintln!("{}: invalid json", path.display());
+        if let Err(err) = serde_json::from_slice::<Value>(bytes) {
+            eprintln!("{}: invalid json: {err}", path.display());
             return Err(2);
         }
-        visit(&path, bytes)?;
+        visit(path, bytes)?;
         checked += 1;
     }
     Ok(checked)
@@ -513,13 +540,15 @@ fn finish_checked(count: usize, what: &str) -> u8 {
 }
 
 fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool) -> u8 {
-    let policy = match load_policy(policy) {
+    let spec = policy;
+    let policy = match load_policy(spec) {
         Ok(policy) => policy,
         Err(err) => {
             eprintln!("{err}");
             return 1;
         }
     };
+    let active_policy = replayed_policy_name(&policy);
     if path.is_dir() {
         eprintln!("{}: replay path must be a file", path.display());
         return 1;
@@ -534,6 +563,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
     let text = without_bom_str(&raw);
     let mut checked = 0usize;
     let mut failed = false;
+    let mut replayed_elsewhere = false;
     let mut counts: std::collections::BTreeMap<(String, String), [usize; 3]> =
         std::collections::BTreeMap::new();
     let mut reason_counts: std::collections::BTreeMap<String, usize> =
@@ -624,6 +654,9 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             for reason in &row.reasons {
                 *reason_counts.entry(reason.clone()).or_insert(0) += 1;
             }
+            if !row.policy.is_empty() && row.policy != active_policy {
+                replayed_elsewhere = true;
+            }
         }
     }
     if summary {
@@ -645,12 +678,25 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
         for (tag, count) in reasons.into_iter().take(5) {
             eprintln!("reason {tag} {count}");
         }
+        if replayed_elsewhere {
+            eprintln!("replayed with {active_policy}");
+        }
     }
     if checked == 0 {
         eprintln!("no replay rows checked");
         return 1;
     }
     if failed { 1 } else { 0 }
+}
+
+fn replayed_policy_name(loaded: &Policy) -> String {
+    if let Some(id) = loaded.shipped_id.as_deref() {
+        return id.to_string();
+    }
+    if let Some(path) = loaded.source_path.as_deref() {
+        return path.to_string();
+    }
+    "tool-gate".to_string()
 }
 
 fn block_on<T>(future: impl std::future::Future<Output = Result<T, Error>>) -> Result<T, Error> {
@@ -986,7 +1032,7 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
         hook_decision("deny", "invalid json");
         return 0;
     }
-    let value: Value = match serde_json::from_str::<Value>(&input) {
+    let value: Value = match serde_json::from_str::<Value>(without_bom_str(&input)) {
         Ok(value) if value.is_object() => value,
         _ => {
             hook_decision("deny", "invalid json");
@@ -1352,7 +1398,8 @@ fn transcript_file_tail(path: &str) -> Option<String> {
         let pos = bytes.iter().position(|byte| *byte == b'\n')?;
         bytes.drain(..=pos);
     }
-    let text = String::from_utf8_lossy(&bytes);
+    let raw = String::from_utf8_lossy(&bytes);
+    let text = without_bom_str(&raw);
     for line in text.lines().rev().take(TAIL_LINES) {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -1587,9 +1634,16 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             None => true,
         };
         for (id, label) in &row.labels {
-            if id == "harm_class" && label.is_string() {
+            if id == "harm_class" {
+                let Some(expected) = label.as_str() else {
+                    eprintln!(
+                        "{}: line {line_no}: label harm_class must be a string",
+                        path.display()
+                    );
+                    return 1;
+                };
                 let guess = hint.guess.as_deref().unwrap_or("");
-                card.add_choice_compared(label.as_str() == Some(guess), harm_guess);
+                card.add_choice_compared(expected == guess, harm_guess);
                 continue;
             }
             let Some(score) = hint.facts.scores.get(id) else {

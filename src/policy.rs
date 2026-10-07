@@ -391,6 +391,9 @@ fn check_action(
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
 /// body in the same shell. `cat` and `bash -c` do not. An unquoted
 /// `#` comment does not run `$(rm)`. `<(rm)` and `>(rm)` do.
+/// A redirect is not a word. `rm>/dev/null`, `>/dev/null rm`, and
+/// `2>/dev/null rm` match. `echo rm>/tmp/x` does not, because `rm` is
+/// only an argument. `2&>file rm` runs `2`, not `rm`.
 /// `f() { rm; }; f`
 /// matches. The same definition with no call does not. `cmd /c rm` and
 /// `powershell -Command rm` match. `rmdir`, `git push-all`, `echo rm`,
@@ -1952,6 +1955,23 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     });
                 }
             }
+            '<' | '>' => {
+                consume_redirect_tail(&mut chars, ch);
+                if !quoted && is_fd_word(&token) {
+                    token.clear();
+                } else {
+                    push_token(&mut token, &mut current, &mut quoted);
+                }
+                skip_redirect_word(&mut chars, &mut substitutions);
+            }
+            '&' if chars.peek() == Some(&'>') => {
+                chars.next();
+                if chars.peek() == Some(&'>') {
+                    chars.next();
+                }
+                push_token(&mut token, &mut current, &mut quoted);
+                skip_redirect_word(&mut chars, &mut substitutions);
+            }
             ' ' | '\t' | '\r' => push_token(&mut token, &mut current, &mut quoted),
             '\n' => {
                 push_token(&mut token, &mut current, &mut quoted);
@@ -2189,6 +2209,104 @@ fn push_token(token: &mut String, current: &mut Vec<String>, quoted: &mut bool) 
         current.push(std::mem::take(token));
     }
     *quoted = false;
+}
+
+fn is_fd_word(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// `>>`, `>&`, `>|`, `<>`, and `<&`. The first character is already consumed.
+fn consume_redirect_tail<I>(chars: &mut std::iter::Peekable<I>, first: char)
+where
+    I: Iterator<Item = char>,
+{
+    let second = chars.peek().copied();
+    let take = matches!(
+        (first, second),
+        ('>', Some('>' | '&' | '|')) | ('<', Some('>' | '&'))
+    );
+    if take {
+        chars.next();
+    }
+}
+
+/// The filename after a redirect. `$(...)` and backticks in that word still run.
+fn skip_redirect_word<I>(chars: &mut std::iter::Peekable<I>, substitutions: &mut Vec<String>)
+where
+    I: Iterator<Item = char>,
+{
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+    match chars.peek().copied() {
+        Some('\'') => {
+            chars.next();
+            for ch in chars.by_ref() {
+                if ch == '\'' {
+                    break;
+                }
+            }
+        }
+        Some('"') => {
+            chars.next();
+            skip_double_quoted_target(chars, substitutions);
+        }
+        Some(_) => skip_unquoted_target(chars, substitutions),
+        None => {}
+    }
+}
+
+fn skip_unquoted_target<I>(chars: &mut std::iter::Peekable<I>, substitutions: &mut Vec<String>)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
+            break;
+        }
+        chars.next();
+        if ch == '\0' {
+            continue;
+        }
+        if ch == '\\' {
+            chars.next();
+            continue;
+        }
+        if ch == '`' {
+            substitutions.push(read_backtick(chars));
+            continue;
+        }
+        if ch == '$' && chars.peek() == Some(&'(') {
+            chars.next();
+            substitutions.push(read_balanced_parens(chars));
+        }
+    }
+}
+
+fn skip_double_quoted_target<I>(chars: &mut std::iter::Peekable<I>, substitutions: &mut Vec<String>)
+where
+    I: Iterator<Item = char>,
+{
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if ch == '"' {
+            return;
+        }
+        if ch == '\\' {
+            chars.next();
+            continue;
+        }
+        if ch == '`' {
+            substitutions.push(read_backtick(chars));
+            continue;
+        }
+        if ch == '$' && chars.peek() == Some(&'(') {
+            chars.next();
+            substitutions.push(read_balanced_parens(chars));
+        }
+    }
 }
 
 fn read_here_string<I: Iterator<Item = char>>(
@@ -2734,6 +2852,52 @@ mod tests {
             "$\"r\\m\" --version",
             "$\"rm --version\"",
             "$'rm\\n--version'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn redirection_does_not_hide_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "rm>/dev/null",
+            "rm>/dev/null --version",
+            ">/dev/null rm -rf /tmp/x",
+            "2>/dev/null rm -rf /tmp/x",
+            "&>/dev/null rm -rf /tmp/x",
+            "rm -rf /tmp/x>/dev/null",
+            "rm -rf /tmp/x 2>&1",
+            "rm>/tmp/$(rm -rf /tmp/y)",
+            "rm>\"$(rm -rf /tmp/y)\"",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = [
+            "git push origin main 2>&1",
+            "git push origin main>/tmp/log",
+            "git push origin main 2>&1 | tail -5",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "echo rm>/tmp/x",
+            "echo >/tmp/x",
+            "2&>/dev/null rm -rf /tmp/x",
         ];
         for command in neither {
             assert!(
