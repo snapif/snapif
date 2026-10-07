@@ -2192,6 +2192,36 @@ fn read_here_string<I: Iterator<Item = char>>(
     while matches!(chars.peek(), Some(' ' | '\t')) {
         chars.next();
     }
+    if chars.peek() == Some(&'$') {
+        chars.next();
+        match chars.peek().copied() {
+            Some('\'') => {
+                chars.next();
+                let mut body = String::new();
+                read_ansi_c(chars, &mut body);
+                return Some(body);
+            }
+            Some('"') => {
+                chars.next();
+                let mut body = String::new();
+                read_dollar_double(chars, &mut body);
+                return Some(body);
+            }
+            _ => {
+                let mut body = String::from("$");
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
+                        break;
+                    }
+                    chars.next();
+                    if ch != '\0' {
+                        body.push(ch);
+                    }
+                }
+                return Some(body);
+            }
+        }
+    }
     let quote = chars.peek().copied();
     if matches!(quote, Some('\'' | '"')) {
         let quote = chars.next().unwrap_or('"');
@@ -2957,6 +2987,8 @@ mod tests {
             "cd x && git push && rm -rf /",
             "git.exe push && rm.exe -rf /",
             "bash <<< 'rm -rf /tmp/x'",
+            "bash <<< $'rm -rf /tmp/x'",
+            "bash <<< \"$(rm -rf /tmp/x)\"",
             "zsh <<< 'rm -rf /tmp/x'",
             "bash -s <<< 'rm -rf /tmp/x'",
             "bash /dev/stdin <<'EOF'\nrm -rf /tmp/x\nEOF",
