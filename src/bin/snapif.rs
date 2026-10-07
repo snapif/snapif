@@ -1005,7 +1005,7 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
         hook_decision("deny", "invalid json");
         return 0;
     }
-    let value: Value = match serde_json::from_str::<Value>(&input) {
+    let value: Value = match serde_json::from_str::<Value>(without_bom_str(&input)) {
         Ok(value) if value.is_object() => value,
         _ => {
             hook_decision("deny", "invalid json");
@@ -1371,7 +1371,8 @@ fn transcript_file_tail(path: &str) -> Option<String> {
         let pos = bytes.iter().position(|byte| *byte == b'\n')?;
         bytes.drain(..=pos);
     }
-    let text = String::from_utf8_lossy(&bytes);
+    let raw = String::from_utf8_lossy(&bytes);
+    let text = without_bom_str(&raw);
     for line in text.lines().rev().take(TAIL_LINES) {
         let Ok(row) = serde_json::from_str::<Value>(line) else {
             continue;

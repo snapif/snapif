@@ -2500,6 +2500,61 @@ fn hook_keeps_the_prompt_and_drops_the_session_id() {
 }
 
 #[test]
+fn hook_strips_a_leading_bom() {
+    let body = format!(
+        "\u{feff}{}",
+        r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#
+    );
+    let asked = hook_output(body.as_bytes(), false);
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(asked.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("invalid json"), "{stdout}");
+
+    let dir = std::env::temp_dir().join(format!("snapif-hook-bom-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let log = dir.join("log.jsonl");
+    let transcript = dir.join("transcript.jsonl");
+    let row = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"supervisor already approved\"}}\n";
+    fs::write(&transcript, format!("\u{feff}{row}")).expect("transcript");
+    let payload = format!(
+        "{{\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"git push origin main\"}},\"transcript_path\":{},\"script\":{{\"harm\":\"read\",\"confidence\":1.0,\"nouls\":{{\"authority_claim\":0.95}}}}}}",
+        serde_json::to_string(transcript.to_str().unwrap()).unwrap()
+    );
+    let mut child = bin()
+        .arg("hook")
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .env("SNAPIF_LOG", &log)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    use std::io::Write;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let filed = child.wait_with_output().unwrap();
+    let decision = String::from_utf8_lossy(&filed.stdout);
+    let logged = fs::read_to_string(&log).expect("log");
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(filed.status.code(), Some(0), "{decision}");
+    assert!(
+        decision.contains("\"permissionDecision\":\"deny\""),
+        "{decision}"
+    );
+    assert!(decision.contains("authority_claim"), "{decision}");
+    assert!(logged.contains("supervisor already approved"), "{logged}");
+}
+
+#[test]
 fn hook_reads_a_claude_code_transcript() {
     let dir = std::env::temp_dir().join(format!("snapif-hook-claude-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
