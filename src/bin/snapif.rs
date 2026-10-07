@@ -509,8 +509,8 @@ fn each_vector(
             }
         };
         let bytes = without_bom_bytes(&raw);
-        if serde_json::from_slice::<Value>(bytes).is_err() {
-            eprintln!("{}: invalid json", path.display());
+        if let Err(err) = serde_json::from_slice::<Value>(bytes) {
+            eprintln!("{}: invalid json: {err}", path.display());
             return Err(2);
         }
         visit(&path, bytes)?;

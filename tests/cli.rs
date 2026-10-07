@@ -68,6 +68,7 @@ fn test_invalid_json_names_the_file_without_debug_quotes() {
     assert_eq!(output.status.code(), Some(2), "{err}");
     let shown = format!("{}: invalid json", path.display());
     assert!(err.contains(&shown), "{err}");
+    assert!(err.contains("line 1 column"), "{err}");
     assert!(!err.contains(&format!("{path:?}")), "{err}");
 }
 
