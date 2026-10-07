@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.2](https://github.com/snapif/snapif/compare/snapif-v0.2.1...snapif-v0.2.2) (2026-10-07)
+
+
+### Bug Fixes
+
+* match a command prefix when gate omits action_id ([#207](https://github.com/snapif/snapif/issues/207)) ([86f0f9b](https://github.com/snapif/snapif/commit/86f0f9bc225108f9c399594a1f4daa8ef91bbff5))
+* match a Windows image suffix on a tool-gate command ([#203](https://github.com/snapif/snapif/issues/203)) ([75158fd](https://github.com/snapif/snapif/commit/75158fde024e934bed7e79179c6200e102809b8f))
+* match rm inside if, substitution, and bash -O ([#210](https://github.com/snapif/snapif/issues/210)) ([668c463](https://github.com/snapif/snapif/commit/668c4637ae5a8f58f26743d5cbc153501b5f095f))
+* match rm run by find -exec ([#211](https://github.com/snapif/snapif/issues/211)) ([13c815d](https://github.com/snapif/snapif/commit/13c815d14c4c98b008f4de87ee2ca8b89e8b8823))
+* match rm run by ssh, containers, and service runners ([#212](https://github.com/snapif/snapif/issues/212)) ([6225f95](https://github.com/snapif/snapif/commit/6225f95030460f5f1fcba286bfa27789f39e4af9))
+* name the file and line when a calibration row has the wrong shape ([#206](https://github.com/snapif/snapif/issues/206)) ([283b781](https://github.com/snapif/snapif/commit/283b7819314dd9e64baa2ecf011b50f71c9db70c))
+* name the file when ask calibration cannot score a row ([#208](https://github.com/snapif/snapif/issues/208)) ([5757877](https://github.com/snapif/snapif/commit/5757877e3ca6decea8aa207a8094df6ca306d501))
+* quote hook argv and point the README at 0.2 ([#205](https://github.com/snapif/snapif/issues/205)) ([a04c5e6](https://github.com/snapif/snapif/commit/a04c5e6a1f4e67effe4e414813e1623a192d578e))
+* trim the tool name before a gate prefix match ([#209](https://github.com/snapif/snapif/issues/209)) ([07dd438](https://github.com/snapif/snapif/commit/07dd438f1f59c01420fb4624d9837697bc957ca3))
+
 ## [0.2.1](https://github.com/snapif/snapif/compare/snapif-v0.2.0...snapif-v0.2.1) (2026-10-06)
 
 
