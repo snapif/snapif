@@ -1622,11 +1622,13 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         .output()
         .expect("run");
     let blank_model_err = String::from_utf8_lossy(&blank_model.stderr);
+    let blank_model_out = String::from_utf8_lossy(&blank_model.stdout);
     assert_eq!(blank_model.status.code(), Some(1), "{blank_model_err}");
     assert!(
         blank_model_err.contains("SNAPIF_MODEL must not be blank"),
         "{blank_model_err}"
     );
+    assert!(blank_model_out.trim().is_empty(), "{blank_model_out}");
     assert!(stdout.contains("exfil:yes"), "{stdout}");
     assert!(stdout.contains("class network"), "{stdout}");
     assert!(stdout.contains("when_unsure escalate"), "{stdout}");
@@ -2001,6 +2003,24 @@ fn hook_asks_when_rm_is_scored_as_a_read() {
     assert!(
         same_out.contains("\"permissionDecision\":\"allow\""),
         "{same_out}"
+    );
+}
+
+#[test]
+fn hook_asks_when_rm_is_inside_if() {
+    let asked = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"if true; then rm -rf /tmp/x; fi"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(asked.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
     );
 }
 

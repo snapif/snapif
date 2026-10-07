@@ -363,7 +363,14 @@ fn check_action(
 /// match too, because bash runs those words as `rm`. An ANSI-C null
 /// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
 /// `exec rm` and `eval 'rm ...'` match. `exec -a rm echo` and
-/// `eval echo` do not. `timeout 1 rm` and `xargs rm` match.
+/// `eval echo` do not. `if`, `then`, `else`, `elif`, `do`, `while`,
+/// `until`, `!`, `{`, and `(` are skipped, so `if true; then rm`,
+/// `{ rm; }`, and `(rm)` match. `for`
+/// is not skipped. `$(rm)`, `echo "$(rm)"`, and a backtick `rm` match.
+/// Single quotes do not run `$(rm)`. A command substitution is checked
+/// after the simple commands, so `git push $(rm)` stays `git.push`.
+/// `bash -O extglob -c` and `bash +O extglob -c` match.
+/// `timeout 1 rm` and `xargs rm` match.
 /// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
 /// `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm`.
@@ -405,7 +412,8 @@ fn matched_in<'a>(
     if depth > MAX_SHELL_DEPTH {
         return None;
     }
-    for segment in tokenize_segments(command) {
+    let (segments, substitutions) = tokenize_segments(command);
+    for segment in segments {
         let Some((argv, split_script)) = executed_argv(&segment) else {
             continue;
         };
@@ -442,6 +450,12 @@ fn matched_in<'a>(
             }
         }
     }
+    // A simple command wins over a substitution later in the same text.
+    for script in substitutions {
+        if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+            return Some(id);
+        }
+    }
     None
 }
 
@@ -474,6 +488,11 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
             index += 1;
             continue;
         }
+        // `for rm in a` stays `for`. These words are not the command.
+        if leading_shell_keyword(&tokens[index]) {
+            index += 1;
+            continue;
+        }
         let lowered = command_basename(&tokens[index]).to_ascii_lowercase();
         let base = gnu_alias(&lowered);
         if !is_wrapper(base) {
@@ -489,6 +508,13 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
         index = next;
     }
     Some((tokens[index..].to_vec(), split_script))
+}
+
+fn leading_shell_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "if" | "then" | "else" | "elif" | "do" | "while" | "until" | "!" | "{" | "("
+    )
 }
 
 fn skip_wrapper_flags(
@@ -780,7 +806,8 @@ fn shell_script(tokens: &[String]) -> Option<String> {
 
 fn shell_opt_takes_value(token: &str) -> bool {
     let name = token.strip_prefix("--").unwrap_or(token);
-    matches!(name, "-o" | "rcfile" | "init-file")
+    // Separate `-O` and `+O` take the next word. Glued `-Oextglob` does not.
+    matches!(name, "-o" | "-O" | "+O" | "rcfile" | "init-file")
 }
 
 fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
@@ -1030,7 +1057,7 @@ where
     }
 }
 
-fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
+fn tokenize_segments(command: &str) -> (Vec<Vec<String>>, Vec<String>) {
     let mut segments = Vec::new();
     let mut current = Vec::new();
     let mut token = String::new();
@@ -1038,6 +1065,7 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     let mut quote = None;
     let mut quoted = false;
     let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut substitutions = Vec::new();
     while let Some(ch) = chars.next() {
         // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
         if ch == '\0' {
@@ -1056,21 +1084,33 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
                 }
                 continue;
             }
+            // `echo "$(rm)"` runs rm. Single quotes never reach this branch.
+            if open == '"' && ch == '$' && chars.peek() == Some(&'(') {
+                chars.next();
+                substitutions.push(read_balanced_parens(&mut chars));
+                continue;
+            }
             token.push(ch);
             continue;
         }
         if ch == '$'
             && let Some(&next) = chars.peek()
-            && (next == '\'' || next == '"')
         {
-            chars.next();
-            quoted = true;
-            if next == '\'' {
-                read_ansi_c(&mut chars, &mut token);
-            } else {
-                read_dollar_double(&mut chars, &mut token);
+            if next == '\'' || next == '"' {
+                chars.next();
+                quoted = true;
+                if next == '\'' {
+                    read_ansi_c(&mut chars, &mut token);
+                } else {
+                    read_dollar_double(&mut chars, &mut token);
+                }
+                continue;
             }
-            continue;
+            if next == '(' {
+                chars.next();
+                substitutions.push(read_balanced_parens(&mut chars));
+                continue;
+            }
         }
         match ch {
             '\'' | '"' => {
@@ -1084,6 +1124,11 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
                 {
                     token.push(next);
                 }
+            }
+            '`' => substitutions.push(read_backtick(&mut chars)),
+            '(' | ')' => {
+                push_token(&mut token, &mut current, &mut quoted);
+                current.push(ch.to_string());
             }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
@@ -1115,7 +1160,102 @@ fn tokenize_segments(command: &str) -> Vec<Vec<String>> {
     }
     push_token(&mut token, &mut current, &mut quoted);
     push_segment(&mut current, &mut segments);
-    segments
+    (segments, substitutions)
+}
+
+/// Body of `$(...)`. The opening `(` is already consumed. Quotes hide a `)`.
+fn read_balanced_parens<I>(chars: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut inner = String::new();
+    let mut depth = 1usize;
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if let Some(open) = quote {
+            if open == '"' && ch == '\\' {
+                inner.push(ch);
+                if let Some(next) = chars.next()
+                    && next != '\0'
+                {
+                    inner.push(next);
+                }
+                continue;
+            }
+            inner.push(ch);
+            if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                inner.push(ch);
+            }
+            '\\' => {
+                inner.push(ch);
+                if let Some(next) = chars.next()
+                    && next != '\0'
+                {
+                    inner.push(next);
+                }
+            }
+            '(' => {
+                depth += 1;
+                inner.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                inner.push(ch);
+            }
+            _ => inner.push(ch),
+        }
+    }
+    inner
+}
+
+/// Body of an unquoted backtick command. The opening backtick is consumed.
+fn read_backtick<I>(chars: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut inner = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if ch == '`' {
+            break;
+        }
+        if ch == '\\' {
+            let Some(next) = chars.next() else {
+                inner.push('\\');
+                break;
+            };
+            if next == '\0' {
+                inner.push('\\');
+                continue;
+            }
+            match next {
+                '$' | '`' | '\\' => inner.push(next),
+                '\n' => {}
+                other => {
+                    inner.push('\\');
+                    inner.push(other);
+                }
+            }
+            continue;
+        }
+        inner.push(ch);
+    }
+    inner
 }
 
 fn push_token(token: &mut String, current: &mut Vec<String>, quoted: &mut bool) {
@@ -1415,6 +1555,19 @@ mod tests {
             "command -p rm -rf /",
             "cat <<'EOF'\ntext\nEOF\nrm -rf /tmp",
             "cat <<EOF && rm -rf /\nbody\nEOF",
+            "if true; then rm -rf /tmp/x; fi",
+            "if rm -rf /tmp/x; then true; fi",
+            "! rm -rf /tmp/x",
+            "echo $(rm -rf /tmp/x)",
+            "echo \"$(rm -rf /tmp/x)\"",
+            "echo `rm -rf /tmp/x`",
+            "bash -O extglob -c 'rm -rf /tmp/x'",
+            "bash +O extglob -c 'rm -rf /tmp/x'",
+            "bash -Oextglob -c 'rm -rf /tmp/x'",
+            "{ rm --version; }",
+            "( rm --version )",
+            "(rm --version)",
+            "true && { rm --version; }",
         ];
         for command in rm {
             assert_eq!(
@@ -1433,6 +1586,7 @@ mod tests {
             "/usr/bin/git --no-pager push",
             "git --git-dir=/repo push",
             "git push && rm -rf /",
+            "git push $(rm -rf /)",
             "env -S 'git push'",
             "cd x && git push && rm -rf /",
         ];
@@ -1449,6 +1603,10 @@ mod tests {
             "echo rm -rf /",
             "FOO+1 rm -rf /",
             "echo 'rm -rf /'",
+            "echo '$(rm -rf /tmp)'",
+            "for rm in a",
+            "{rm --version;}",
+            "f() { rm --version; }",
             "env -S 'echo rm'",
             "sudo -nu root rmdir /tmp",
             "bash -c 'echo rm'",
