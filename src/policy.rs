@@ -372,6 +372,8 @@ fn check_action(
 /// `bash -O extglob -c` and `bash +O extglob -c` match.
 /// `find -exec rm`, `find -execdir rm`, and `find -ok rm` match.
 /// `find -delete`, `find -name rm`, and `find -exec echo rm` do not.
+/// `ssh host rm` and `flock file rm` match. `ssh host` and `ssh -p 22 rm`
+/// do not: the word after the options is the destination, not the command.
 /// `timeout 1 rm` and `xargs rm` match.
 /// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
@@ -456,6 +458,14 @@ fn matched_in<'a>(
                 return Some(id);
             }
         }
+        for script in [ssh_remote_command(&argv), flock_command(&argv)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+                return Some(id);
+            }
+        }
     }
     // A simple command wins over a substitution later in the same text.
     for script in substitutions {
@@ -495,6 +505,133 @@ fn find_exec_commands(argv: &[String]) -> Vec<String> {
 
 fn is_find_terminator(token: &str) -> bool {
     matches!(token, ";" | "+" | "\\;")
+}
+
+fn ssh_remote_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("ssh") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if token.starts_with('-') {
+            let takes_next =
+                ssh_opt_takes_value(token) && !token.contains('=') && !ssh_value_is_glued(token);
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn ssh_value_is_glued(token: &str) -> bool {
+    let flags = token.strip_prefix('-').unwrap_or(token);
+    flags.len() > 1 && !flags.starts_with('-')
+}
+
+fn ssh_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-b" | "-c"
+            | "-D"
+            | "-E"
+            | "-e"
+            | "-F"
+            | "-i"
+            | "-J"
+            | "-L"
+            | "-l"
+            | "-m"
+            | "-O"
+            | "-o"
+            | "-p"
+            | "-Q"
+            | "-R"
+            | "-S"
+            | "-W"
+            | "-w"
+            | "bind_address"
+            | "cipher"
+            | "dynamic"
+            | "logfile"
+            | "escape"
+            | "config"
+            | "identity"
+            | "jump"
+            | "local"
+            | "login"
+            | "mac"
+            | "option"
+            | "port"
+            | "query"
+            | "remote"
+            | "session"
+            | "stdio"
+            | "tunnel"
+    )
+}
+
+fn flock_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("flock") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if token == "-c" || token == "--command" {
+            return argv.get(index + 1).cloned();
+        }
+        if token.starts_with('-') {
+            let takes_next = flock_opt_takes_value(token) && !token.contains('=');
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    if argv[index] == "-c" || argv[index] == "--command" {
+        return argv.get(index + 1).cloned();
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn flock_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-w" | "-E" | "wait" | "conflict-exit-code" | "timeout"
+    )
 }
 
 fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
@@ -1612,6 +1749,15 @@ mod tests {
             "find . -ok rm {} \\;",
             "find . -exec echo {} \\; -exec rm {} \\;",
             "gfind . -exec rm {} +",
+            "ssh host rm -rf /tmp",
+            "ssh -n host rm -rf /tmp",
+            "ssh -p 22 host rm -rf /tmp",
+            "ssh -o StrictHostKeyChecking=no host rm -rf /tmp",
+            "flock /tmp/lock rm -rf /tmp",
+            "flock -n /tmp/lock rm -rf /tmp",
+            "flock -w 2 /tmp/lock rm -rf /tmp",
+            "flock /tmp/lock -c 'rm -rf /tmp'",
+            "flock -c 'rm -rf /tmp' /tmp/lock",
         ];
         for command in rm {
             assert_eq!(
@@ -1658,6 +1804,11 @@ mod tests {
             "find . -delete",
             "find . -name rm",
             "find . -exec echo rm \\;",
+            "ssh host",
+            "ssh -p 22 rm",
+            "ssh host ls",
+            "flock /tmp/lock",
+            "flock -w 2 /tmp/lock",
             "git status",
             "git -C repo status",
             "git -C push status",
