@@ -386,9 +386,12 @@ fn check_action(
 /// ASCII case, including on `timeout.exe` and `busybox.exe`. Dots after
 /// that suffix are ignored (`git.exe.`), and a quoted trailing space is
 /// ignored (`"rm.exe "`).
-/// A shell that reads its script from stdin runs the heredoc body, so
-/// `bash <<EOF` followed by `rm` matches. `cat <<EOF` followed by `rm`
-/// does not, and `bash -c` does not run that body. `f() { rm; }; f`
+/// A shell that reads its script from stdin runs a heredoc or a
+/// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
+/// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
+/// body in the same shell. `cat` and `bash -c` do not. An unquoted
+/// `#` comment does not run `$(rm)`. `<(rm)` and `>(rm)` do.
+/// `f() { rm; }; f`
 /// matches. The same definition with no call does not. `cmd /c rm` and
 /// `powershell -Command rm` match. `rmdir`, `git push-all`, `echo rm`,
 /// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
@@ -500,6 +503,15 @@ fn consider_segment<'a>(
         scan_isolated(policy, tool_name, &remotes, depth, best);
         if shell_reads_stdin(&argv) {
             scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
+        }
+    }
+    if sourced_stdin(&argv) {
+        for body in &segment.heredocs {
+            prefer(
+                policy,
+                best,
+                matched_in(policy, tool_name, body, depth + 1, functions),
+            );
         }
     }
     scan_subshells(
@@ -1384,6 +1396,10 @@ fn is_shell_name(name: &str) -> bool {
     SHELLS.iter().any(|shell| name.eq_ignore_ascii_case(shell))
 }
 
+fn is_stdin_script(token: &str) -> bool {
+    matches!(token, "/dev/stdin" | "/dev/fd/0" | "-")
+}
+
 fn shell_reads_stdin(argv: &[String]) -> bool {
     let Some(first) = argv.first() else {
         return false;
@@ -1393,32 +1409,58 @@ fn shell_reads_stdin(argv: &[String]) -> bool {
         return false;
     }
     let mut index = 1;
+    let mut saw_s = false;
+    let mut after_dash = false;
     while index < argv.len() {
         let token = &argv[index];
-        if token == "--" {
-            return index + 1 >= argv.len();
+        if !after_dash && token == "--" {
+            after_dash = true;
+            index += 1;
+            continue;
         }
-        if shell_opt_takes_value(token) {
+        if !after_dash && shell_opt_takes_value(token) {
             index += 1;
             if index < argv.len() {
                 index += 1;
             }
             continue;
         }
-        if let Some(flags) = token.strip_prefix('-') {
+        if !after_dash && let Some(flags) = token.strip_prefix('-') {
             if flags.contains('c') {
                 return false;
+            }
+            if flags.contains('s') {
+                saw_s = true;
             }
             index += 1;
             continue;
         }
-        if token.starts_with('+') {
+        if !after_dash && token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if saw_s || is_stdin_script(token) {
             index += 1;
             continue;
         }
         return false;
     }
     true
+}
+
+fn sourced_stdin(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let base = command_basename(first);
+    if base != "source" && base != "." {
+        return false;
+    }
+    let mut index = 1;
+    if argv.get(index).is_some_and(|token| token == "--") {
+        index += 1;
+    }
+    argv.get(index).is_some_and(|token| is_stdin_script(token))
 }
 
 fn cmd_script(argv: &[String]) -> Option<String> {
@@ -1809,6 +1851,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
     let mut quoted = false;
     let mut heredocs: Vec<PendingHeredoc> = Vec::new();
     let mut substitutions = Vec::new();
+    let mut stdin_bodies = Vec::new();
     while let Some(ch) = chars.next() {
         // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
         if ch == '\0' {
@@ -1889,12 +1932,18 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     current.push("{".to_string());
                 }
             }
+            '<' | '>' if chars.peek() == Some(&'(') => {
+                chars.next();
+                substitutions.push(read_balanced_parens(&mut chars));
+            }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
                 push_token(&mut token, &mut current, &mut quoted);
                 if chars.peek() == Some(&'<') {
                     chars.next();
-                    skip_here_word(&mut chars);
+                    if let Some(body) = read_here_string(&mut chars) {
+                        stdin_bodies.push(body);
+                    }
                 } else if let Some((delim, dash)) = read_heredoc_delim(&mut chars) {
                     heredocs.push(PendingHeredoc {
                         owner: parts.len(),
@@ -1906,7 +1955,12 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
             ' ' | '\t' | '\r' => push_token(&mut token, &mut current, &mut quoted),
             '\n' => {
                 push_token(&mut token, &mut current, &mut quoted);
-                push_shell_segment(&mut current, &mut substitutions, &mut parts);
+                push_shell_segment(
+                    &mut current,
+                    &mut substitutions,
+                    &mut stdin_bodies,
+                    &mut parts,
+                );
                 for item in std::mem::take(&mut heredocs) {
                     let body = read_heredoc_body(&mut chars, &item.delim, item.dash);
                     if let Some(ShellPart::Segment(segment)) = parts.get_mut(item.owner) {
@@ -1919,13 +1973,31 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     chars.next();
                 }
                 push_token(&mut token, &mut current, &mut quoted);
-                push_shell_segment(&mut current, &mut substitutions, &mut parts);
+                push_shell_segment(
+                    &mut current,
+                    &mut substitutions,
+                    &mut stdin_bodies,
+                    &mut parts,
+                );
+            }
+            '#' if token.is_empty() => {
+                while let Some(&next) = chars.peek() {
+                    if next == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
             }
             _ => token.push(ch),
         }
     }
     push_token(&mut token, &mut current, &mut quoted);
-    push_shell_segment(&mut current, &mut substitutions, &mut parts);
+    push_shell_segment(
+        &mut current,
+        &mut substitutions,
+        &mut stdin_bodies,
+        &mut parts,
+    );
     parts
 }
 
@@ -2119,25 +2191,67 @@ fn push_token(token: &mut String, current: &mut Vec<String>, quoted: &mut bool) 
     *quoted = false;
 }
 
-fn skip_here_word<I: Iterator<Item = char>>(chars: &mut std::iter::Peekable<I>) {
+fn read_here_string<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+) -> Option<String> {
     while matches!(chars.peek(), Some(' ' | '\t')) {
         chars.next();
     }
-    if matches!(chars.peek(), Some('\'' | '"')) {
+    if chars.peek() == Some(&'$') {
+        chars.next();
+        match chars.peek().copied() {
+            Some('\'') => {
+                chars.next();
+                let mut body = String::new();
+                read_ansi_c(chars, &mut body);
+                return Some(body);
+            }
+            Some('"') => {
+                chars.next();
+                let mut body = String::new();
+                read_dollar_double(chars, &mut body);
+                return Some(body);
+            }
+            _ => {
+                let mut body = String::from("$");
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
+                        break;
+                    }
+                    chars.next();
+                    if ch != '\0' {
+                        body.push(ch);
+                    }
+                }
+                return Some(body);
+            }
+        }
+    }
+    let quote = chars.peek().copied();
+    if matches!(quote, Some('\'' | '"')) {
         let quote = chars.next().unwrap_or('"');
+        let mut body = String::new();
         for ch in chars.by_ref() {
             if ch == quote {
                 break;
             }
+            if ch != '\0' {
+                body.push(ch);
+            }
         }
-        return;
+        return Some(body);
     }
+    let mut body = String::new();
     while let Some(&ch) = chars.peek() {
-        if ch.is_whitespace() {
+        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
             break;
         }
         chars.next();
+        if ch != '\0' {
+            body.push(ch);
+        }
     }
+    if body.is_empty() { None } else { Some(body) }
 }
 
 fn read_heredoc_delim<I: Iterator<Item = char>>(
@@ -2220,14 +2334,15 @@ fn read_heredoc_body<I: Iterator<Item = char>>(
 fn push_shell_segment(
     current: &mut Vec<String>,
     substitutions: &mut Vec<String>,
+    stdin_bodies: &mut Vec<String>,
     parts: &mut Vec<ShellPart>,
 ) {
-    if current.is_empty() && substitutions.is_empty() {
+    if current.is_empty() && substitutions.is_empty() && stdin_bodies.is_empty() {
         return;
     }
     parts.push(ShellPart::Segment(ShellSegment {
         tokens: std::mem::take(current),
-        heredocs: Vec::new(),
+        heredocs: std::mem::take(stdin_bodies),
         substitutions: std::mem::take(substitutions),
     }));
 }
@@ -2876,6 +2991,18 @@ mod tests {
             "git push origin main & rm -rf /tmp/x",
             "cd x && git push && rm -rf /",
             "git.exe push && rm.exe -rf /",
+            "bash <<< 'rm -rf /tmp/x'",
+            "bash <<< $'rm -rf /tmp/x'",
+            "bash <<< \"$(rm -rf /tmp/x)\"",
+            "cat <(rm -rf /tmp/x)",
+            "cat >(rm -rf /tmp/x)",
+            "zsh <<< 'rm -rf /tmp/x'",
+            "bash -s <<< 'rm -rf /tmp/x'",
+            "bash /dev/stdin <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "bash -s -- extra <<'EOF'\nrm -rf /tmp/x\nEOF",
+            ". /dev/stdin <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "echo ok# $(rm -rf /tmp/x)",
+            "echo \"# $(rm -rf /tmp/x)\"",
         ];
         for command in rm {
             assert_eq!(
@@ -2884,7 +3011,12 @@ mod tests {
                 "{command:?}"
             );
         }
-        let push = ["git push origin main", "git push $(echo rm)"];
+        let push = [
+            "git push origin main",
+            "git push $(echo rm)",
+            "bash <<< 'git push origin'",
+            "source /dev/stdin <<'EOF'\ngit push origin\nEOF",
+        ];
         for command in push {
             assert_eq!(
                 matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
@@ -2911,6 +3043,14 @@ mod tests {
             "bash <<'EOF'\nf() { rm -rf /tmp/x; }\nEOF\nf",
             "find . -exec echo -delete \\;",
             "f() { rm -rf /tmp/x; }; find . -exec f \\;",
+            "cat <<< 'rm -rf /tmp/x'",
+            "bash -c 'echo ok' <<< 'rm -rf /tmp/x'",
+            "bash script.sh <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "source file.sh <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "echo ok # $(rm -rf /tmp/x)",
+            "echo ok # `rm -rf /tmp/x`",
+            "echo '<(rm -rf /tmp/x)'",
+            "echo <(echo rm)",
         ];
         for command in neither {
             assert!(
