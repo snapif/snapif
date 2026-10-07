@@ -463,6 +463,10 @@ fn matched_in<'a>(
             flock_command(&argv),
             docker_command(&argv),
             parallel_command(&argv),
+            kubectl_exec_command(&argv),
+            chroot_command(&argv),
+            nsenter_command(&argv),
+            systemd_run_command(&argv),
         ]
         .into_iter()
         .flatten()
@@ -641,7 +645,7 @@ fn flock_opt_takes_value(token: &str) -> bool {
 
 fn docker_command(argv: &[String]) -> Option<String> {
     let base = command_basename(argv.first()?);
-    if !base.eq_ignore_ascii_case("docker") {
+    if !base.eq_ignore_ascii_case("docker") && !base.eq_ignore_ascii_case("podman") {
         return None;
     }
     let sub = argv.get(1)?;
@@ -726,6 +730,106 @@ fn parallel_command(argv: &[String]) -> Option<String> {
         return None;
     }
     Some(argv[start..index].join(" "))
+}
+
+fn kubectl_exec_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("kubectl") || argv.get(1).map(String::as_str) != Some("exec") {
+        return None;
+    }
+    let mut index = 2;
+    while index < argv.len() && argv[index] != "--" {
+        let token = &argv[index];
+        if token.starts_with('-') && token != "--" {
+            let takes_next = matches!(token.as_str(), "-c" | "-n" | "--container" | "--namespace")
+                && !token.contains('=');
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    if index < argv.len() && argv[index] == "--" {
+        index += 1;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn chroot_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("chroot") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() && argv[index].starts_with('-') {
+        let takes_next =
+            matches!(argv[index].as_str(), "-u" | "--userspec") && !argv[index].contains('=');
+        index += 1;
+        if takes_next {
+            index += 1;
+        }
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn nsenter_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("nsenter") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() && argv[index].starts_with('-') {
+        let takes_next = matches!(
+            argv[index].as_str(),
+            "-t" | "-S" | "-G" | "-r" | "--target" | "--setuid" | "--setgid" | "--root"
+        ) && !argv[index].contains('=');
+        index += 1;
+        if takes_next {
+            index += 1;
+        }
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn systemd_run_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("systemd-run") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() && (argv[index].starts_with('-') || argv[index] == "--") {
+        if argv[index] == "--" {
+            index += 1;
+            break;
+        }
+        let takes_next = matches!(
+            argv[index].as_str(),
+            "-p" | "-u" | "--property" | "--unit" | "--uid" | "--gid" | "--slice" | "--description"
+        ) && !argv[index].contains('=');
+        index += 1;
+        if takes_next {
+            index += 1;
+        }
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
 }
 
 fn parallel_opt_takes_value(token: &str) -> bool {
@@ -1867,6 +1971,14 @@ mod tests {
             "parallel rm ::: /tmp/x",
             "parallel -j 4 rm -rf /tmp ::: x",
             "parallel --jobs=4 rm ::: x",
+            "podman exec box rm -rf /tmp",
+            "podman run --rm ubuntu rm -rf /tmp",
+            "kubectl exec pod -- rm -rf /tmp",
+            "kubectl exec -it pod -- rm -rf /tmp",
+            "chroot /mnt rm -rf /tmp",
+            "nsenter -t 1 -m rm -rf /tmp",
+            "systemd-run rm -rf /tmp",
+            "systemd-run --uid 0 rm -rf /tmp",
         ];
         for command in rm {
             assert_eq!(
@@ -1922,6 +2034,12 @@ mod tests {
             "docker run ubuntu",
             "docker ps",
             "parallel echo rm ::: a",
+            "podman exec box",
+            "kubectl exec pod",
+            "kubectl get pods",
+            "chroot /mnt",
+            "nsenter -t 1 -m",
+            "systemd-run --unit job",
             "git status",
             "git -C repo status",
             "git -C push status",
