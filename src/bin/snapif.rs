@@ -422,6 +422,13 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
             return 1;
         }
     };
+    // A closed port must not hide a file that is not JSON. Directory
+    // order would otherwise post the first valid vector and return.
+    if let Err(code) = each_vector(vectors, |path, bytes| {
+        vector_request(path, bytes).map(|_| ())
+    }) {
+        return code;
+    }
     let result = each_vector(vectors, |path, bytes| {
         let Some(request) = vector_request(path, bytes)? else {
             return Ok(());
@@ -489,6 +496,7 @@ fn each_vector(
             return Err(1);
         }
     };
+    let mut paths = Vec::new();
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
@@ -498,10 +506,13 @@ fn each_vector(
             }
         };
         let path = entry.path();
-        if !is_json_ext(&path) {
-            continue;
+        if is_json_ext(&path) {
+            paths.push(path);
         }
-        let raw = match fs::read(&path) {
+    }
+    paths.sort();
+    for path in &paths {
+        let raw = match fs::read(path) {
             Ok(raw) => raw,
             Err(err) => {
                 eprintln!("{}: {err}", path.display());
@@ -513,7 +524,7 @@ fn each_vector(
             eprintln!("{}: invalid json: {err}", path.display());
             return Err(2);
         }
-        visit(&path, bytes)?;
+        visit(path, bytes)?;
         checked += 1;
     }
     Ok(checked)

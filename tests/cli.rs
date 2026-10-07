@@ -965,6 +965,46 @@ fn vectors_pass_locally_and_base_url_does_not_connect() {
 
 #[cfg(feature = "http")]
 #[test]
+fn base_url_names_invalid_json_before_it_connects() {
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    listener.set_nonblocking(true).expect("nonblocking");
+    let port = listener.local_addr().expect("addr").port();
+    let dir = std::env::temp_dir().join(format!("snapif-remote-json-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("a-good.json"),
+    )
+    .expect("copy");
+    fs::write(dir.join("z-bad.json"), "{,\n").expect("bad");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .args(["--base-url", &format!("http://127.0.0.1:{port}")])
+        .env_remove("SNAPIF_TIMEOUT_MS")
+        .env_remove("SNAPIF_ALLOW_PRIVATE_HTTP")
+        .env_remove("SNAPIF_API_KEY")
+        .output()
+        .expect("run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("z-bad.json") && stderr.contains("invalid json"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("error sending request"), "{stderr}");
+    match listener.accept() {
+        Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+        other => panic!("posted before the local json check: {other:?} {stderr}"),
+    }
+}
+
+#[cfg(feature = "http")]
+#[test]
 fn base_url_that_is_not_a_url_exits_1() {
     let output = bin()
         .args(["test", "--vectors"])
