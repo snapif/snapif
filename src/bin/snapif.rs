@@ -513,13 +513,15 @@ fn finish_checked(count: usize, what: &str) -> u8 {
 }
 
 fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool) -> u8 {
-    let policy = match load_policy(policy) {
+    let spec = policy;
+    let policy = match load_policy(spec) {
         Ok(policy) => policy,
         Err(err) => {
             eprintln!("{err}");
             return 1;
         }
     };
+    let active_policy = replayed_policy_name(&policy);
     if path.is_dir() {
         eprintln!("{}: replay path must be a file", path.display());
         return 1;
@@ -534,6 +536,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
     let text = without_bom_str(&raw);
     let mut checked = 0usize;
     let mut failed = false;
+    let mut replayed_elsewhere = false;
     let mut counts: std::collections::BTreeMap<(String, String), [usize; 3]> =
         std::collections::BTreeMap::new();
     let mut reason_counts: std::collections::BTreeMap<String, usize> =
@@ -624,6 +627,9 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             for reason in &row.reasons {
                 *reason_counts.entry(reason.clone()).or_insert(0) += 1;
             }
+            if !row.policy.is_empty() && row.policy != active_policy {
+                replayed_elsewhere = true;
+            }
         }
     }
     if summary {
@@ -645,12 +651,25 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
         for (tag, count) in reasons.into_iter().take(5) {
             eprintln!("reason {tag} {count}");
         }
+        if replayed_elsewhere {
+            eprintln!("replayed with {active_policy}");
+        }
     }
     if checked == 0 {
         eprintln!("no replay rows checked");
         return 1;
     }
     if failed { 1 } else { 0 }
+}
+
+fn replayed_policy_name(loaded: &Policy) -> String {
+    if let Some(id) = loaded.shipped_id.as_deref() {
+        return id.to_string();
+    }
+    if let Some(path) = loaded.source_path.as_deref() {
+        return path.to_string();
+    }
+    "tool-gate".to_string()
 }
 
 fn block_on<T>(future: impl std::future::Future<Output = Result<T, Error>>) -> Result<T, Error> {

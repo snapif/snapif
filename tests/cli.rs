@@ -3586,6 +3586,119 @@ fn replay_summary_counts_actions_and_logged_reasons() {
     assert!(stderr.contains("reason authority_claim 1"), "{stderr}");
     assert!(stderr.contains("reason below_floor 1"), "{stderr}");
     assert!(stderr.contains("reason review_floor 1"), "{stderr}");
+    assert!(!stderr.contains("replayed with"), "{stderr}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn replay_summary_names_the_policy_it_actually_used() {
+    let dir = std::env::temp_dir().join(format!("snapif-replayed-with-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let row = dir.join("rows.jsonl");
+    fs::write(
+        &row,
+        concat!(
+            r#"{"id":"tag-auto","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.95,"nouls":{},"timeout":false},"expected":"auto","reasons":[],"policy":"tool-gate"}"#,
+            "\n",
+        ),
+    )
+    .expect("write");
+    let same = bin()
+        .args(["replay", "--summary"])
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("same");
+    let same_out = String::from_utf8_lossy(&same.stdout);
+    let same_err = String::from_utf8_lossy(&same.stderr);
+    assert_eq!(same.status.code(), Some(0), "{same_out}{same_err}");
+    assert!(
+        same_err.contains("tag tool-gate auto 1 review 0 escalate 0"),
+        "{same_err}"
+    );
+    assert!(!same_err.contains("replayed with"), "{same_err}");
+    let policy = dir.join("strict.toml");
+    fs::write(
+        &policy,
+        r#"
+schema_version = 1
+fail = "closed"
+shadow = false
+cascade_min = 0.80
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+signal = "confidence"
+[noul]
+yes_auto = 0.90
+no_auto = 0.10
+[default_action]
+auto = 0.99
+review = 0.99
+when_unsure = "escalate"
+class = "read"
+block_on = [
+  { id = "authority_claim", when = "yes" },
+]
+"#,
+    )
+    .expect("policy");
+    let other = bin()
+        .args(["replay", "--summary", "--policy"])
+        .arg(&policy)
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("other");
+    let stdout = String::from_utf8_lossy(&other.stdout);
+    let stderr = String::from_utf8_lossy(&other.stderr);
+    assert_eq!(other.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("\"got\":\"escalate\""), "{stdout}");
+    assert!(
+        stderr.contains("tag tool-gate auto 0 review 0 escalate 1"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("replayed with {}", policy.display())),
+        "{stderr}"
+    );
+    let from_env = bin()
+        .args(["replay", "--summary"])
+        .arg(&row)
+        .env("SNAPIF_POLICY", &policy)
+        .output()
+        .expect("env");
+    let env_out = String::from_utf8_lossy(&from_env.stdout);
+    let env_err = String::from_utf8_lossy(&from_env.stderr);
+    assert_eq!(from_env.status.code(), Some(1), "{env_out}{env_err}");
+    assert!(env_out.contains("\"got\":\"escalate\""), "{env_out}");
+    assert!(
+        env_err.contains("tag tool-gate auto 0 review 0 escalate 1"),
+        "{env_err}"
+    );
+    assert!(
+        env_err.contains(&format!("replayed with {}", policy.display())),
+        "{env_err}"
+    );
+    let shipped_env = bin()
+        .args(["replay", "--summary"])
+        .arg(&row)
+        .env("SNAPIF_POLICY", "tool-gate")
+        .output()
+        .expect("shipped env");
+    let shipped_out = String::from_utf8_lossy(&shipped_env.stdout);
+    let shipped_err = String::from_utf8_lossy(&shipped_env.stderr);
+    assert_eq!(
+        shipped_env.status.code(),
+        Some(0),
+        "{shipped_out}{shipped_err}"
+    );
+    assert!(
+        shipped_err.contains("tag tool-gate auto 1 review 0 escalate 0"),
+        "{shipped_err}"
+    );
+    assert!(!shipped_err.contains("replayed with"), "{shipped_err}");
     let _ = fs::remove_dir_all(dir);
 }
 
