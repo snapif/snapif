@@ -120,7 +120,8 @@ pub struct ActionPolicy {
     /// Host tool name, such as `Bash`. Unset matches only the action id.
     #[serde(default)]
     pub tool: Option<String>,
-    /// Command prefixes for `tool`. The first matching action wins.
+    /// Command prefixes for `tool`. The first matching prefix row wins for
+    /// one simple command. A stricter row later in the same string replaces it.
     #[serde(default)]
     pub prefixes: Vec<String>,
 }
@@ -367,14 +368,15 @@ fn check_action(
 /// `until`, `!`, `{`, and `(` are skipped, so `if true; then rm`,
 /// `{ rm; }`, and `(rm)` match. `for`
 /// is not skipped. `$(rm)`, `echo "$(rm)"`, and a backtick `rm` match.
-/// Single quotes do not run `$(rm)`. A command substitution is checked
-/// after the simple commands, so `git push $(rm)` stays `git.push`.
+/// Single quotes do not run `$(rm)`. The stricter row wins across the
+/// whole string, so `git push $(rm)` and `git push && rm` match `bash.rm`.
+/// `git push $(echo rm)` stays `git.push`.
 /// `bash -O extglob -c` and `bash +O extglob -c` match.
-/// `find -exec rm`, `find -execdir rm`, and `find -ok rm` match.
-/// `find -delete`, `find -name rm`, and `find -exec echo rm` do not.
-/// `ssh host rm` and `flock file rm` match. `ssh host` and `ssh -p 22 rm`
-/// do not: the word after the options is the destination, not the command.
-/// `timeout 1 rm` and `xargs rm` match.
+/// `find -exec rm`, `find -execdir rm`, `find -ok rm`, and `find -delete`
+/// match. `find -name rm`, `find -name -delete`, and `find -exec echo rm`
+/// do not. `ssh host rm` and `flock file rm` match. `ssh host` and
+/// `ssh -p 22 rm` do not: the word after the options is the destination,
+/// not the command. `timeout 1 rm` and `xargs rm` match.
 /// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
 /// `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm`.
@@ -384,11 +386,13 @@ fn check_action(
 /// ASCII case, including on `timeout.exe` and `busybox.exe`. Dots after
 /// that suffix are ignored (`git.exe.`), and a quoted trailing space is
 /// ignored (`"rm.exe "`).
-/// A later command does not replace an earlier hit: `git push && rm` stays
-/// `git.push`. `rmdir`, `git push-all`, `echo rm`, `find -delete`,
-/// `command -v rm`, `sudo -l`, an empty word, a heredoc body, `rmdir.exe`,
-/// `rm.exe.bak`, `rm.`, and `git.exe.exe` do not match. `cmd /c` is not
-/// unwrapped.
+/// A shell that reads its script from stdin runs the heredoc body, so
+/// `bash <<EOF` followed by `rm` matches. `cat <<EOF` followed by `rm`
+/// does not, and `bash -c` does not run that body. `f() { rm; }; f`
+/// matches. The same definition with no call does not. `cmd /c rm` and
+/// `powershell -Command rm` match. `rmdir`, `git push-all`, `echo rm`,
+/// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
+/// `rm.`, and `git.exe.exe` do not match.
 pub fn matched_action<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -402,87 +406,228 @@ pub fn matched_action<'a>(
         return Some(id);
     }
     let command = command.unwrap_or("").trim_start();
-    matched_in(policy, tool_name, command, 0)
+    let mut functions = Functions::new();
+    matched_in(policy, tool_name, command, 0, &mut functions)
 }
 
 const MAX_SHELL_DEPTH: u32 = 8;
+
+type Functions = std::collections::HashMap<String, String>;
 
 fn matched_in<'a>(
     policy: &'a Policy,
     tool_name: &str,
     command: &str,
     depth: u32,
+    functions: &mut Functions,
 ) -> Option<&'a ActionId> {
     if depth > MAX_SHELL_DEPTH {
         return None;
     }
-    let (segments, substitutions) = tokenize_segments(command);
-    for segment in segments {
-        let Some((argv, split_script)) = executed_argv(&segment) else {
-            continue;
-        };
-        if let Some(script) = split_script
-            && let Some(id) = matched_in(policy, tool_name, &script, depth + 1)
-        {
-            return Some(id);
-        }
-        if let Some(script) = shell_script(&argv) {
-            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
-                return Some(id);
+    let mut best = None;
+    for part in tokenize_parts(command) {
+        match part {
+            ShellPart::Function { name, body } => {
+                functions.insert(name, body);
             }
-            continue;
-        }
-        if let Some(script) = eval_script(&argv) {
-            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
-                return Some(id);
-            }
-            continue;
-        }
-        for (id, row) in &policy.actions {
-            let Some(tool) = row.tool.as_deref() else {
-                continue;
-            };
-            if !tool.eq_ignore_ascii_case(tool_name) {
-                continue;
-            }
-            let hit = row.prefixes.iter().any(|prefix| {
-                let words: Vec<String> = prefix.split_whitespace().map(str::to_string).collect();
-                !words.is_empty() && argv_matches(&argv, &words)
-            });
-            if hit {
-                return Some(id);
-            }
-        }
-        for script in find_exec_commands(&argv) {
-            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
-                return Some(id);
-            }
-        }
-        for script in [
-            ssh_remote_command(&argv),
-            flock_command(&argv),
-            docker_command(&argv),
-            parallel_command(&argv),
-            kubectl_exec_command(&argv),
-            chroot_command(&argv),
-            nsenter_command(&argv),
-            systemd_run_command(&argv),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
-                return Some(id);
+            ShellPart::Segment(segment) => {
+                consider_segment(policy, tool_name, &segment, depth, functions, &mut best);
             }
         }
     }
-    // A simple command wins over a substitution later in the same text.
-    for script in substitutions {
-        if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+    best
+}
+
+fn consider_segment<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    segment: &ShellSegment,
+    depth: u32,
+    functions: &mut Functions,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some((argv, split_script)) = executed_argv(&segment.tokens) else {
+        scan_subshells(
+            policy,
+            tool_name,
+            &segment.substitutions,
+            depth,
+            functions,
+            best,
+        );
+        return;
+    };
+    if let Some(script) = split_script {
+        let mut child = Functions::new();
+        prefer(
+            policy,
+            best,
+            matched_in(policy, tool_name, &script, depth + 1, &mut child),
+        );
+    }
+    let child_script = shell_script(&argv)
+        .or_else(|| cmd_script(&argv))
+        .or_else(|| powershell_script(&argv));
+    if let Some(script) = child_script {
+        let mut child = Functions::new();
+        prefer(
+            policy,
+            best,
+            matched_in(policy, tool_name, &script, depth + 1, &mut child),
+        );
+    } else if let Some(script) = eval_script(&argv) {
+        prefer(
+            policy,
+            best,
+            matched_in(policy, tool_name, &script, depth + 1, functions),
+        );
+    } else if let Some(body) = argv.first().and_then(|name| functions.get(name).cloned()) {
+        prefer(
+            policy,
+            best,
+            matched_in(policy, tool_name, &body, depth + 1, functions),
+        );
+    } else {
+        if let Some(id) = prefix_hit(policy, tool_name, &argv) {
+            prefer(policy, best, Some(id));
+        }
+        if find_deletes(&argv) {
+            prefer(policy, best, destructive_rm_action(policy, tool_name));
+        }
+        let scripts = find_exec_commands(&argv);
+        scan_isolated(policy, tool_name, &scripts, depth, best);
+        let remotes = remote_scripts(&argv);
+        scan_isolated(policy, tool_name, &remotes, depth, best);
+        if shell_reads_stdin(&argv) {
+            scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
+        }
+    }
+    scan_subshells(
+        policy,
+        tool_name,
+        &segment.substitutions,
+        depth,
+        functions,
+        best,
+    );
+}
+
+/// A new process. It does not see shell functions from this string.
+fn scan_isolated<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    scripts: &[String],
+    depth: u32,
+    best: &mut Option<&'a ActionId>,
+) {
+    for script in scripts {
+        let mut child = Functions::new();
+        prefer(
+            policy,
+            best,
+            matched_in(policy, tool_name, script, depth + 1, &mut child),
+        );
+    }
+}
+
+/// `$(...)` inherits functions and does not publish definitions back.
+fn scan_subshells<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    scripts: &[String],
+    depth: u32,
+    functions: &Functions,
+    best: &mut Option<&'a ActionId>,
+) {
+    for script in scripts {
+        let mut child = functions.clone();
+        prefer(
+            policy,
+            best,
+            matched_in(policy, tool_name, script, depth + 1, &mut child),
+        );
+    }
+}
+
+fn prefer<'a>(policy: &Policy, best: &mut Option<&'a ActionId>, candidate: Option<&'a ActionId>) {
+    let Some(candidate) = candidate else {
+        return;
+    };
+    let replace = match *best {
+        None => true,
+        Some(previous) => action_rank(policy, candidate) > action_rank(policy, previous),
+    };
+    if replace {
+        *best = Some(candidate);
+    }
+}
+
+/// A destructive block outranks `when_unsure = escalate`, which outranks
+/// a higher auto threshold. Equal rank keeps the earlier match.
+fn action_rank(policy: &Policy, id: &ActionId) -> (u8, u8, i32) {
+    let Some(row) = policy.actions.get(id) else {
+        return (0, 0, 0);
+    };
+    let destructive = u8::from(row.block_on.iter().any(|block| block.id.0 == "destructive"));
+    let escalate = u8::from(matches!(row.when_unsure, UnsureVerdict::Escalate));
+    let auto = row.auto.unwrap_or_else(|| {
+        policy
+            .default_action
+            .as_ref()
+            .and_then(|action| action.auto)
+            .unwrap_or(0.8)
+    });
+    let auto_millis = (auto * 1000.0).round() as i32;
+    (destructive, escalate, auto_millis)
+}
+
+fn prefix_hit<'a>(policy: &'a Policy, tool_name: &str, argv: &[String]) -> Option<&'a ActionId> {
+    for (id, row) in &policy.actions {
+        let Some(tool) = row.tool.as_deref() else {
+            continue;
+        };
+        if !tool.eq_ignore_ascii_case(tool_name) {
+            continue;
+        }
+        let hit = row.prefixes.iter().any(|prefix| {
+            let words: Vec<String> = prefix.split_whitespace().map(str::to_string).collect();
+            !words.is_empty() && argv_matches(argv, &words)
+        });
+        if hit {
             return Some(id);
         }
     }
     None
+}
+
+fn destructive_rm_action<'a>(policy: &'a Policy, tool_name: &str) -> Option<&'a ActionId> {
+    policy
+        .actions
+        .iter()
+        .find(|(id, row)| {
+            id.0 == "bash.rm"
+                && row
+                    .tool
+                    .as_deref()
+                    .is_some_and(|tool| tool.eq_ignore_ascii_case(tool_name))
+        })
+        .map(|(id, _)| id)
+}
+
+fn remote_scripts(argv: &[String]) -> Vec<String> {
+    [
+        ssh_remote_command(argv),
+        flock_command(argv),
+        docker_command(argv),
+        parallel_command(argv),
+        kubectl_exec_command(argv),
+        chroot_command(argv),
+        nsenter_command(argv),
+        systemd_run_command(argv),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 fn find_exec_commands(argv: &[String]) -> Vec<String> {
@@ -514,6 +659,86 @@ fn find_exec_commands(argv: &[String]) -> Vec<String> {
 
 fn is_find_terminator(token: &str) -> bool {
     matches!(token, ";" | "+" | "\\;")
+}
+
+fn find_deletes(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("find") && !base.eq_ignore_ascii_case("gfind") {
+        return false;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let flag = argv[index].as_str();
+        if flag == "-delete" {
+            return true;
+        }
+        if matches!(flag, "-exec" | "-execdir" | "-ok" | "-okdir") {
+            index += 1;
+            while index < argv.len() && !is_find_terminator(&argv[index]) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        let skip = find_predicate_arguments(flag);
+        if skip > 0 {
+            index += 1 + skip;
+            continue;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn find_predicate_arguments(flag: &str) -> usize {
+    if flag == "-fprintf" {
+        return 2;
+    }
+    usize::from(matches!(
+        flag,
+        "-name"
+            | "-iname"
+            | "-path"
+            | "-ipath"
+            | "-regex"
+            | "-iregex"
+            | "-wholename"
+            | "-iwholename"
+            | "-lname"
+            | "-ilname"
+            | "-samefile"
+            | "-fstype"
+            | "-user"
+            | "-group"
+            | "-uid"
+            | "-gid"
+            | "-perm"
+            | "-size"
+            | "-type"
+            | "-xtype"
+            | "-context"
+            | "-printf"
+            | "-fprint"
+            | "-newer"
+            | "-anewer"
+            | "-cnewer"
+            | "-mmin"
+            | "-amin"
+            | "-cmin"
+            | "-mtime"
+            | "-atime"
+            | "-ctime"
+            | "-used"
+            | "-links"
+            | "-inum"
+            | "-maxdepth"
+            | "-mindepth"
+            | "-regextype"
+            | "-D"
+    ))
 }
 
 fn ssh_remote_command(argv: &[String]) -> Option<String> {
@@ -1154,10 +1379,130 @@ fn eval_script(tokens: &[String]) -> Option<String> {
     Some(rest.join(" "))
 }
 
+fn is_shell_name(name: &str) -> bool {
+    const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "fish"];
+    SHELLS.iter().any(|shell| name.eq_ignore_ascii_case(shell))
+}
+
+fn shell_reads_stdin(argv: &[String]) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    let base = command_basename(first);
+    if !is_shell_name(base) {
+        return false;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            return index + 1 >= argv.len();
+        }
+        if shell_opt_takes_value(token) {
+            index += 1;
+            if index < argv.len() {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-') {
+            if flags.contains('c') {
+                return false;
+            }
+            index += 1;
+            continue;
+        }
+        if token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn cmd_script(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("cmd") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token.eq_ignore_ascii_case("/c") || token.eq_ignore_ascii_case("/k") {
+            let script = argv[index + 1..].join(" ");
+            return if script.is_empty() {
+                None
+            } else {
+                Some(script)
+            };
+        }
+        index += 1;
+    }
+    None
+}
+
+fn powershell_script(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if is_ps_command_switch(token) {
+            let script = argv[index + 1..].join(" ");
+            return if script.is_empty() {
+                None
+            } else {
+                Some(script)
+            };
+        }
+        if ps_switch_takes_value(token) {
+            index += 1;
+            if index < argv.len() {
+                index += 1;
+            }
+            continue;
+        }
+        if token.starts_with('-') || token.starts_with('/') {
+            index += 1;
+            continue;
+        }
+        return None;
+    }
+    None
+}
+
+fn is_ps_command_switch(token: &str) -> bool {
+    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
+        return false;
+    };
+    name.eq_ignore_ascii_case("command") || name.eq_ignore_ascii_case("c")
+}
+
+fn ps_switch_takes_value(token: &str) -> bool {
+    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
+        return false;
+    };
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "executionpolicy"
+            | "inputformat"
+            | "outputformat"
+            | "windowstyle"
+            | "version"
+            | "workingdirectory"
+            | "psconsolefile"
+            | "configurationname"
+            | "encodedcommand"
+            | "file"
+    )
+}
+
 fn shell_script(tokens: &[String]) -> Option<String> {
     let base = command_basename(tokens.first()?);
-    const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "fish"];
-    if !SHELLS.iter().any(|shell| base.eq_ignore_ascii_case(shell)) {
+    if !is_shell_name(base) {
         return None;
     }
     let mut index = 1;
@@ -1438,14 +1783,31 @@ where
     }
 }
 
-fn tokenize_segments(command: &str) -> (Vec<Vec<String>>, Vec<String>) {
-    let mut segments = Vec::new();
+struct ShellSegment {
+    tokens: Vec<String>,
+    heredocs: Vec<String>,
+    substitutions: Vec<String>,
+}
+
+enum ShellPart {
+    Function { name: String, body: String },
+    Segment(ShellSegment),
+}
+
+struct PendingHeredoc {
+    owner: usize,
+    delim: String,
+    dash: bool,
+}
+
+fn tokenize_parts(command: &str) -> Vec<ShellPart> {
+    let mut parts = Vec::new();
     let mut current = Vec::new();
     let mut token = String::new();
     let mut chars = command.chars().peekable();
     let mut quote = None;
     let mut quoted = false;
-    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut heredocs: Vec<PendingHeredoc> = Vec::new();
     let mut substitutions = Vec::new();
     while let Some(ch) = chars.next() {
         // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
@@ -1511,22 +1873,45 @@ fn tokenize_segments(command: &str) -> (Vec<Vec<String>>, Vec<String>) {
                 push_token(&mut token, &mut current, &mut quoted);
                 current.push(ch.to_string());
             }
+            '{' if token.is_empty() && brace_is_its_own_word(chars.peek().copied()) => {
+                if let Some(name) = function_header(&current) {
+                    if !substitutions.is_empty() {
+                        parts.push(ShellPart::Segment(ShellSegment {
+                            tokens: Vec::new(),
+                            heredocs: Vec::new(),
+                            substitutions: std::mem::take(&mut substitutions),
+                        }));
+                    }
+                    current.clear();
+                    let body = read_brace_body(&mut chars);
+                    parts.push(ShellPart::Function { name, body });
+                } else {
+                    current.push("{".to_string());
+                }
+            }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
                 push_token(&mut token, &mut current, &mut quoted);
                 if chars.peek() == Some(&'<') {
                     chars.next();
                     skip_here_word(&mut chars);
-                } else if let Some(spec) = read_heredoc_delim(&mut chars) {
-                    heredocs.push(spec);
+                } else if let Some((delim, dash)) = read_heredoc_delim(&mut chars) {
+                    heredocs.push(PendingHeredoc {
+                        owner: parts.len(),
+                        delim,
+                        dash,
+                    });
                 }
             }
             ' ' | '\t' | '\r' => push_token(&mut token, &mut current, &mut quoted),
             '\n' => {
                 push_token(&mut token, &mut current, &mut quoted);
-                push_segment(&mut current, &mut segments);
-                for (delim, dash) in heredocs.drain(..) {
-                    skip_until_delim(&mut chars, &delim, dash);
+                push_shell_segment(&mut current, &mut substitutions, &mut parts);
+                for item in std::mem::take(&mut heredocs) {
+                    let body = read_heredoc_body(&mut chars, &item.delim, item.dash);
+                    if let Some(ShellPart::Segment(segment)) = parts.get_mut(item.owner) {
+                        segment.heredocs.push(body);
+                    }
                 }
             }
             '&' | '|' | ';' => {
@@ -1534,14 +1919,102 @@ fn tokenize_segments(command: &str) -> (Vec<Vec<String>>, Vec<String>) {
                     chars.next();
                 }
                 push_token(&mut token, &mut current, &mut quoted);
-                push_segment(&mut current, &mut segments);
+                push_shell_segment(&mut current, &mut substitutions, &mut parts);
             }
             _ => token.push(ch),
         }
     }
     push_token(&mut token, &mut current, &mut quoted);
-    push_segment(&mut current, &mut segments);
-    (segments, substitutions)
+    push_shell_segment(&mut current, &mut substitutions, &mut parts);
+    parts
+}
+
+fn brace_is_its_own_word(next: Option<char>) -> bool {
+    match next {
+        None => true,
+        Some(ch) => {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}' | '\'' | '"' | '\\'
+                )
+        }
+    }
+}
+
+fn function_header(tokens: &[String]) -> Option<String> {
+    if tokens.len() == 3 && tokens[1] == "(" && tokens[2] == ")" && is_function_name(&tokens[0]) {
+        return Some(tokens[0].clone());
+    }
+    if tokens.len() == 2 && tokens[0] == "function" && is_function_name(&tokens[1]) {
+        return Some(tokens[1].clone());
+    }
+    if tokens.len() == 4
+        && tokens[0] == "function"
+        && tokens[2] == "("
+        && tokens[3] == ")"
+        && is_function_name(&tokens[1])
+    {
+        return Some(tokens[1].clone());
+    }
+    None
+}
+
+fn is_function_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn read_brace_body<I>(chars: &mut std::iter::Peekable<I>) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut body = String::new();
+    let mut depth = 1usize;
+    let mut quote = None;
+    while let Some(ch) = chars.next() {
+        if ch == '\0' {
+            continue;
+        }
+        if let Some(open) = quote {
+            body.push(ch);
+            if open == '"' && ch == '\\' {
+                if let Some(next) = chars.next()
+                    && next != '\0'
+                {
+                    body.push(next);
+                }
+                continue;
+            }
+            if ch == open {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                body.push(ch);
+            }
+            '{' => {
+                depth += 1;
+                body.push(ch);
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+                body.push(ch);
+            }
+            _ => body.push(ch),
+        }
+    }
+    body
 }
 
 /// Body of `$(...)`. The opening `(` is already consumed. Quotes hide a `)`.
@@ -1702,35 +2175,61 @@ fn read_heredoc_delim<I: Iterator<Item = char>>(
     }
 }
 
-fn skip_until_delim<I: Iterator<Item = char>>(
+fn read_heredoc_body<I: Iterator<Item = char>>(
     chars: &mut std::iter::Peekable<I>,
     delim: &str,
     dash: bool,
-) {
+) -> String {
+    let mut body = String::new();
     let mut line = String::new();
     loop {
-        match chars.next() {
-            None => break,
-            Some('\n') => {
-                let text = if dash {
-                    line.trim_start_matches('\t')
-                } else {
-                    line.as_str()
-                };
-                if text == delim {
-                    break;
-                }
-                line.clear();
+        let end = match chars.next() {
+            None => true,
+            Some('\n') => false,
+            Some(ch) => {
+                line.push(ch);
+                continue;
             }
-            Some(ch) => line.push(ch),
+        };
+        let text = if dash {
+            line.trim_start_matches('\t')
+        } else {
+            line.as_str()
+        };
+        if text == delim {
+            break;
         }
+        if end {
+            if !line.is_empty() {
+                if !body.is_empty() {
+                    body.push('\n');
+                }
+                body.push_str(&line);
+            }
+            break;
+        }
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(&line);
+        line.clear();
     }
+    body
 }
 
-fn push_segment(current: &mut Vec<String>, segments: &mut Vec<Vec<String>>) {
-    if !current.is_empty() {
-        segments.push(std::mem::take(current));
+fn push_shell_segment(
+    current: &mut Vec<String>,
+    substitutions: &mut Vec<String>,
+    parts: &mut Vec<ShellPart>,
+) {
+    if current.is_empty() && substitutions.is_empty() {
+        return;
     }
+    parts.push(ShellPart::Segment(ShellSegment {
+        tokens: std::mem::take(current),
+        heredocs: Vec::new(),
+        substitutions: std::mem::take(substitutions),
+    }));
 }
 
 pub fn effective_gates(
@@ -1996,11 +2495,8 @@ mod tests {
             "git\t-C\trepo\tpush",
             "/usr/bin/git --no-pager push",
             "git --git-dir=/repo push",
-            "git push && rm -rf /",
-            "git push $(rm -rf /)",
             "find . -exec git push \\;",
             "env -S 'git push'",
-            "cd x && git push && rm -rf /",
         ];
         for command in push {
             assert_eq!(
@@ -2022,7 +2518,6 @@ mod tests {
             "env -S 'echo rm'",
             "sudo -nu root rmdir /tmp",
             "bash -c 'echo rm'",
-            "find . -delete",
             "find . -name rm",
             "find . -exec echo rm \\;",
             "ssh host",
@@ -2288,6 +2783,7 @@ mod tests {
             "env.exe -S 'rm.exe -rf /'",
             "你好 && rm -rf /tmp/x",
             "héllo && rm -rf /tmp/x",
+            "git.exe push && rm.exe -rf /",
         ];
         for command in rm {
             assert_eq!(
@@ -2311,7 +2807,6 @@ mod tests {
             "timeout.exe 1 git.exe push",
             "sudo.exe git.cmd push",
             "bash.exe -c 'git.exe push'",
-            "git.exe push && rm.exe -rf /",
         ];
         for command in push {
             assert_eq!(
@@ -2339,6 +2834,83 @@ mod tests {
             "你好",
             "héllo",
             "\u{1F600}x",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// The shell runs `rm` in each of these strings. The old table locked
+    /// the miss (`git.push`, or no action) because the test copied the
+    /// matcher instead of the execution.
+    #[test]
+    fn shell_runs_of_rm_match_bash_rm_not_the_earlier_row() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "bash <<'EOF'\nrm -rf /\nEOF",
+            "bash <<EOF\nrm -rf /\nEOF",
+            "sh <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "sudo bash <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "f() { rm -rf /tmp/x; }; f",
+            "f() { rm -rf /tmp/x; }; f extra",
+            "f() { git push && rm -rf /tmp/x; }; f",
+            "f() { rm -rf /tmp/x; }; echo $(f)",
+            "f() { rm -rf /tmp/x; }; eval f",
+            "cmd /c rm -rf /tmp/x",
+            "cmd.exe /c rm -rf /tmp/x",
+            "cmd /c \"rm -rf /tmp/x\"",
+            "cmd /c \"git push && rm -rf /tmp/x\"",
+            "powershell -Command rm -rf /tmp/x",
+            "powershell.exe -Command rm -rf /tmp/x",
+            "pwsh -Command rm -rf /tmp/x",
+            "find . -delete",
+            "find . -name foo -delete",
+            "gfind . -delete",
+            "git push $(rm -rf /)",
+            "git push origin main && rm -rf /tmp/x",
+            "git push origin main; rm -rf /tmp/x",
+            "git push origin main | rm -rf /tmp/x",
+            "git push origin main & rm -rf /tmp/x",
+            "cd x && git push && rm -rf /",
+            "git.exe push && rm.exe -rf /",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let push = ["git push origin main", "git push $(echo rm)"];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "cat <<'EOF'\nrm -rf /\nEOF",
+            "cat <<EOF\nrm -rf /\nEOF",
+            "f() { rm --version; }",
+            "f() { echo rm; }; f",
+            "find . -name rm",
+            "find . -name -delete",
+            "find . -exec echo rm \\;",
+            "cmd /c echo rm",
+            "powershell -Command echo rm",
+            "pwsh -Command echo rm",
+            "echo cmd /c rm -rf /",
+            "bash -c 'echo ok' <<'EOF'\nrm -rf /\nEOF",
+            "bash <<'EOF'\necho ok\nEOF",
+            "f() { rm -rf /tmp/x; }; bash -c f",
+            "$(f() { rm -rf /tmp/x; }); f",
+            "bash <<'EOF'\nf() { rm -rf /tmp/x; }\nEOF\nf",
+            "find . -exec echo -delete \\;",
+            "f() { rm -rf /tmp/x; }; find . -exec f \\;",
         ];
         for command in neither {
             assert!(
