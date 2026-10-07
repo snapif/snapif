@@ -372,6 +372,8 @@ fn check_action(
 /// `bash -O extglob -c` and `bash +O extglob -c` match.
 /// `find -exec rm`, `find -execdir rm`, and `find -ok rm` match.
 /// `find -delete`, `find -name rm`, and `find -exec echo rm` do not.
+/// `ssh host rm` and `flock file rm` match. `ssh host` and `ssh -p 22 rm`
+/// do not: the word after the options is the destination, not the command.
 /// `timeout 1 rm` and `xargs rm` match.
 /// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
@@ -456,6 +458,23 @@ fn matched_in<'a>(
                 return Some(id);
             }
         }
+        for script in [
+            ssh_remote_command(&argv),
+            flock_command(&argv),
+            docker_command(&argv),
+            parallel_command(&argv),
+            kubectl_exec_command(&argv),
+            chroot_command(&argv),
+            nsenter_command(&argv),
+            systemd_run_command(&argv),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+                return Some(id);
+            }
+        }
     }
     // A simple command wins over a substitution later in the same text.
     for script in substitutions {
@@ -495,6 +514,330 @@ fn find_exec_commands(argv: &[String]) -> Vec<String> {
 
 fn is_find_terminator(token: &str) -> bool {
     matches!(token, ";" | "+" | "\\;")
+}
+
+fn ssh_remote_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("ssh") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if token.starts_with('-') {
+            let takes_next =
+                ssh_opt_takes_value(token) && !token.contains('=') && !ssh_value_is_glued(token);
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn ssh_value_is_glued(token: &str) -> bool {
+    let flags = token.strip_prefix('-').unwrap_or(token);
+    flags.len() > 1 && !flags.starts_with('-')
+}
+
+fn ssh_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-b" | "-c"
+            | "-D"
+            | "-E"
+            | "-e"
+            | "-F"
+            | "-i"
+            | "-J"
+            | "-L"
+            | "-l"
+            | "-m"
+            | "-O"
+            | "-o"
+            | "-p"
+            | "-Q"
+            | "-R"
+            | "-S"
+            | "-W"
+            | "-w"
+            | "bind_address"
+            | "cipher"
+            | "dynamic"
+            | "logfile"
+            | "escape"
+            | "config"
+            | "identity"
+            | "jump"
+            | "local"
+            | "login"
+            | "mac"
+            | "option"
+            | "port"
+            | "query"
+            | "remote"
+            | "session"
+            | "stdio"
+            | "tunnel"
+    )
+}
+
+fn flock_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("flock") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if token == "-c" || token == "--command" {
+            return argv.get(index + 1).cloned();
+        }
+        if token.starts_with('-') {
+            let takes_next = flock_opt_takes_value(token) && !token.contains('=');
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    if argv[index] == "-c" || argv[index] == "--command" {
+        return argv.get(index + 1).cloned();
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn flock_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-w" | "-E" | "wait" | "conflict-exit-code" | "timeout"
+    )
+}
+
+fn docker_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("docker") && !base.eq_ignore_ascii_case("podman") {
+        return None;
+    }
+    let sub = argv.get(1)?;
+    if sub != "exec" && sub != "run" {
+        return None;
+    }
+    let mut index = 2;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if token.starts_with('-') {
+            let takes_next = docker_opt_takes_value(token) && !token.contains('=');
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn docker_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-u" | "-w"
+            | "-e"
+            | "-n"
+            | "--user"
+            | "user"
+            | "workdir"
+            | "env"
+            | "name"
+            | "entrypoint"
+            | "hostname"
+            | "network"
+            | "volume"
+            | "mount"
+    ) || name == "-v"
+}
+
+fn parallel_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("parallel") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == ":::" || token == "::::" {
+            break;
+        }
+        if token.starts_with('-') {
+            let takes_next = parallel_opt_takes_value(token)
+                && !token.contains('=')
+                && (token.starts_with("--") || token.len() == 2);
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    let start = index;
+    while index < argv.len() && argv[index] != ":::" && argv[index] != "::::" {
+        index += 1;
+    }
+    if start == index {
+        return None;
+    }
+    Some(argv[start..index].join(" "))
+}
+
+fn kubectl_exec_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("kubectl") || argv.get(1).map(String::as_str) != Some("exec") {
+        return None;
+    }
+    let mut index = 2;
+    while index < argv.len() && argv[index] != "--" {
+        let token = &argv[index];
+        if token.starts_with('-') && token != "--" {
+            let takes_next = matches!(token.as_str(), "-c" | "-n" | "--container" | "--namespace")
+                && !token.contains('=');
+            index += 1;
+            if takes_next {
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    if index < argv.len() && argv[index] == "--" {
+        index += 1;
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn chroot_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("chroot") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() && argv[index].starts_with('-') {
+        let takes_next =
+            matches!(argv[index].as_str(), "-u" | "--userspec") && !argv[index].contains('=');
+        index += 1;
+        if takes_next {
+            index += 1;
+        }
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    index += 1;
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn nsenter_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("nsenter") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() && argv[index].starts_with('-') {
+        let takes_next = matches!(
+            argv[index].as_str(),
+            "-t" | "-S" | "-G" | "-r" | "--target" | "--setuid" | "--setgid" | "--root"
+        ) && !argv[index].contains('=');
+        index += 1;
+        if takes_next {
+            index += 1;
+        }
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn systemd_run_command(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("systemd-run") {
+        return None;
+    }
+    let mut index = 1;
+    while index < argv.len() && (argv[index].starts_with('-') || argv[index] == "--") {
+        if argv[index] == "--" {
+            index += 1;
+            break;
+        }
+        let takes_next = matches!(
+            argv[index].as_str(),
+            "-p" | "-u" | "--property" | "--unit" | "--uid" | "--gid" | "--slice" | "--description"
+        ) && !argv[index].contains('=');
+        index += 1;
+        if takes_next {
+            index += 1;
+        }
+    }
+    if index >= argv.len() {
+        return None;
+    }
+    Some(argv[index..].join(" "))
+}
+
+fn parallel_opt_takes_value(token: &str) -> bool {
+    let name = token.strip_prefix("--").unwrap_or(token);
+    matches!(
+        name,
+        "-j" | "-S" | "-a" | "-C" | "jobs" | "sshlogin" | "arg-file" | "colsep" | "timeout"
+    )
 }
 
 fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
@@ -1612,6 +1955,30 @@ mod tests {
             "find . -ok rm {} \\;",
             "find . -exec echo {} \\; -exec rm {} \\;",
             "gfind . -exec rm {} +",
+            "ssh host rm -rf /tmp",
+            "ssh -n host rm -rf /tmp",
+            "ssh -p 22 host rm -rf /tmp",
+            "ssh -o StrictHostKeyChecking=no host rm -rf /tmp",
+            "flock /tmp/lock rm -rf /tmp",
+            "flock -n /tmp/lock rm -rf /tmp",
+            "flock -w 2 /tmp/lock rm -rf /tmp",
+            "flock /tmp/lock -c 'rm -rf /tmp'",
+            "flock -c 'rm -rf /tmp' /tmp/lock",
+            "docker exec box rm -rf /tmp",
+            "docker exec -it box rm -rf /tmp",
+            "docker exec -u root box rm -rf /tmp",
+            "docker run --rm ubuntu rm -rf /tmp",
+            "parallel rm ::: /tmp/x",
+            "parallel -j 4 rm -rf /tmp ::: x",
+            "parallel --jobs=4 rm ::: x",
+            "podman exec box rm -rf /tmp",
+            "podman run --rm ubuntu rm -rf /tmp",
+            "kubectl exec pod -- rm -rf /tmp",
+            "kubectl exec -it pod -- rm -rf /tmp",
+            "chroot /mnt rm -rf /tmp",
+            "nsenter -t 1 -m rm -rf /tmp",
+            "systemd-run rm -rf /tmp",
+            "systemd-run --uid 0 rm -rf /tmp",
         ];
         for command in rm {
             assert_eq!(
@@ -1658,6 +2025,21 @@ mod tests {
             "find . -delete",
             "find . -name rm",
             "find . -exec echo rm \\;",
+            "ssh host",
+            "ssh -p 22 rm",
+            "ssh host ls",
+            "flock /tmp/lock",
+            "flock -w 2 /tmp/lock",
+            "docker exec box",
+            "docker run ubuntu",
+            "docker ps",
+            "parallel echo rm ::: a",
+            "podman exec box",
+            "kubectl exec pod",
+            "kubectl get pods",
+            "chroot /mnt",
+            "nsenter -t 1 -m",
+            "systemd-run --unit job",
             "git status",
             "git -C repo status",
             "git -C push status",
