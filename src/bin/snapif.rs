@@ -228,16 +228,32 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
                 }
             }
         }
+    } else if has("tool_name") || has("tool_input") {
+        match value
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .and_then(nonempty_trim)
+        {
+            Some(name) => name.to_string(),
+            None => {
+                eprintln!("tool_name is required");
+                return 1;
+            }
+        }
     } else {
         default_name()
     };
     let args = if has("args") {
         file.args.unwrap_or(Value::Null)
-    } else {
+    } else if has("prepared") {
         file.prepared
             .as_ref()
             .map(|prepared| prepared.args.clone())
             .unwrap_or(Value::Null)
+    } else if has("tool_input") {
+        value.get("tool_input").cloned().unwrap_or(Value::Null)
+    } else {
+        Value::Null
     };
     let trusted = if has("trusted") {
         file.trusted.unwrap_or(Value::Null)

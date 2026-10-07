@@ -602,6 +602,77 @@ fn gate_call_without_action_id_matches_a_command_prefix() {
 }
 
 #[test]
+fn gate_scores_a_hook_body_when_name_and_args_are_absent() {
+    let dir = std::env::temp_dir().join(format!("snapif-hook-body-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let rm = r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#;
+    let asked = hook_output(rm.as_bytes(), false);
+    let asked_out = String::from_utf8_lossy(&asked.stdout);
+    assert!(
+        asked_out.contains("\"permissionDecision\":\"ask\""),
+        "{asked_out}"
+    );
+    let cases = [
+        (rm, 10, "review", ""),
+        (
+            r#"{"tool_name":"bash","tool_input":{"command":"ls"},"script":{"harm":"read","confidence":1.0}}"#,
+            0,
+            "auto",
+            "",
+        ),
+        (
+            r#"{"name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+            10,
+            "review",
+            "",
+        ),
+        (
+            r#"{"script":{"harm":"read","confidence":1.0}}"#,
+            0,
+            "auto",
+            "",
+        ),
+        (
+            r#"{"tool_name":"  ","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+            1,
+            "",
+            "tool_name is required",
+        ),
+        (
+            r#"{"tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"read","confidence":1.0}}"#,
+            1,
+            "",
+            "tool_name is required",
+        ),
+        (
+            r#"{"tool_name":"Bash","tool_input":{"command":1},"script":{"harm":"read","confidence":1.0}}"#,
+            1,
+            "",
+            "command must be a string",
+        ),
+    ];
+    for (index, (body, code, word, err_needle)) in cases.iter().enumerate() {
+        let path = dir.join(format!("{index}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let out = String::from_utf8_lossy(&output.stdout);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(*code), "{index} {out}{err}");
+        assert_eq!(out.trim(), *word, "{index} {out}{err}");
+        if !err_needle.is_empty() {
+            assert!(err.contains(err_needle), "{index} {err}");
+        }
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn gate_trims_the_tool_name_before_matching() {
     let dir = std::env::temp_dir().join(format!("snapif-trim-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
