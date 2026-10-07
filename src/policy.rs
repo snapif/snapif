@@ -390,7 +390,8 @@ fn check_action(
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
 /// body in the same shell. `cat` and `bash -c` do not. An unquoted
-/// `#` comment does not run `$(rm)`. `f() { rm; }; f`
+/// `#` comment does not run `$(rm)`. `<(rm)` and `>(rm)` do.
+/// `f() { rm; }; f`
 /// matches. The same definition with no call does not. `cmd /c rm` and
 /// `powershell -Command rm` match. `rmdir`, `git push-all`, `echo rm`,
 /// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
@@ -1931,6 +1932,10 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     current.push("{".to_string());
                 }
             }
+            '<' | '>' if chars.peek() == Some(&'(') => {
+                chars.next();
+                substitutions.push(read_balanced_parens(&mut chars));
+            }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
                 push_token(&mut token, &mut current, &mut quoted);
@@ -2989,6 +2994,8 @@ mod tests {
             "bash <<< 'rm -rf /tmp/x'",
             "bash <<< $'rm -rf /tmp/x'",
             "bash <<< \"$(rm -rf /tmp/x)\"",
+            "cat <(rm -rf /tmp/x)",
+            "cat >(rm -rf /tmp/x)",
             "zsh <<< 'rm -rf /tmp/x'",
             "bash -s <<< 'rm -rf /tmp/x'",
             "bash /dev/stdin <<'EOF'\nrm -rf /tmp/x\nEOF",
@@ -3042,6 +3049,8 @@ mod tests {
             "source file.sh <<'EOF'\nrm -rf /tmp/x\nEOF",
             "echo ok # $(rm -rf /tmp/x)",
             "echo ok # `rm -rf /tmp/x`",
+            "echo '<(rm -rf /tmp/x)'",
+            "echo <(echo rm)",
         ];
         for command in neither {
             assert!(
