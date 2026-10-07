@@ -868,6 +868,10 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
         eprintln!("action id must not be blank");
         return 1;
     }
+    let model = match explain_model() {
+        Ok(model) => model,
+        Err(()) => return 1,
+    };
     let matched = snapif::policy::matched_action(&policy, action, command);
     let id = matched.cloned().unwrap_or_else(|| ActionId::new(action));
     let gates = match snapif::policy::effective_gates(&policy, &id, None) {
@@ -932,19 +936,23 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
             println!("pack_version 0");
         }
     }
-    let model = match std::env::var("SNAPIF_MODEL") {
+    println!("model {model}");
+    0
+}
+
+fn explain_model() -> Result<String, ()> {
+    match std::env::var("SNAPIF_MODEL") {
         Ok(raw) => {
             let model = raw.trim();
             if model.is_empty() {
                 eprintln!("SNAPIF_MODEL must not be blank");
-                return 1;
+                Err(())
+            } else {
+                Ok(model.to_string())
             }
-            model.to_string()
         }
-        Err(_) => "jev-latest".to_string(),
-    };
-    println!("model {model}");
-    0
+        Err(_) => Ok("jev-latest".to_string()),
+    }
 }
 
 fn hook_settings_block() -> String {
