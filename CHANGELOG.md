@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.3](https://github.com/snapif/snapif/compare/snapif-v0.2.2...snapif-v0.2.3) (2026-10-07)
+
+
+### Bug Fixes
+
+* check local files before network side effects ([#221](https://github.com/snapif/snapif/issues/221)) ([6d5849d](https://github.com/snapif/snapif/commit/6d5849debd5754ab80729102c90a672cc809dbc2))
+* match a shell command that actually runs rm ([#218](https://github.com/snapif/snapif/issues/218)) ([7378e06](https://github.com/snapif/snapif/commit/7378e0605994173058083b06cef92ed5249f6640)), closes [#213](https://github.com/snapif/snapif/issues/213) [#214](https://github.com/snapif/snapif/issues/214) [#215](https://github.com/snapif/snapif/issues/215) [#216](https://github.com/snapif/snapif/issues/216) [#217](https://github.com/snapif/snapif/issues/217)
+* match shell scripts the host actually runs ([#220](https://github.com/snapif/snapif/issues/220)) ([7bed228](https://github.com/snapif/snapif/commit/7bed228d78ee166e9c35a9ece8960383db8cd26d))
+
 ## [0.2.2](https://github.com/snapif/snapif/compare/snapif-v0.2.1...snapif-v0.2.2) (2026-10-07)
 
 
