@@ -370,6 +370,8 @@ fn check_action(
 /// Single quotes do not run `$(rm)`. A command substitution is checked
 /// after the simple commands, so `git push $(rm)` stays `git.push`.
 /// `bash -O extglob -c` and `bash +O extglob -c` match.
+/// `find -exec rm`, `find -execdir rm`, and `find -ok rm` match.
+/// `find -delete`, `find -name rm`, and `find -exec echo rm` do not.
 /// `timeout 1 rm` and `xargs rm` match.
 /// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
@@ -449,6 +451,11 @@ fn matched_in<'a>(
                 return Some(id);
             }
         }
+        for script in find_exec_commands(&argv) {
+            if let Some(id) = matched_in(policy, tool_name, &script, depth + 1) {
+                return Some(id);
+            }
+        }
     }
     // A simple command wins over a substitution later in the same text.
     for script in substitutions {
@@ -457,6 +464,37 @@ fn matched_in<'a>(
         }
     }
     None
+}
+
+fn find_exec_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("find") && !base.eq_ignore_ascii_case("gfind") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let flag = argv[index].as_str();
+        if matches!(flag, "-exec" | "-execdir" | "-ok" | "-okdir") {
+            index += 1;
+            let start = index;
+            while index < argv.len() && !is_find_terminator(&argv[index]) {
+                index += 1;
+            }
+            if start < index {
+                commands.push(argv[start..index].join(" "));
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn is_find_terminator(token: &str) -> bool {
+    matches!(token, ";" | "+" | "\\;")
 }
 
 fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
@@ -1568,6 +1606,12 @@ mod tests {
             "( rm --version )",
             "(rm --version)",
             "true && { rm --version; }",
+            "find . -exec rm -rf / {}",
+            "find . -exec rm {} \\;",
+            "find . -execdir rm {} +",
+            "find . -ok rm {} \\;",
+            "find . -exec echo {} \\; -exec rm {} \\;",
+            "gfind . -exec rm {} +",
         ];
         for command in rm {
             assert_eq!(
@@ -1587,6 +1631,7 @@ mod tests {
             "git --git-dir=/repo push",
             "git push && rm -rf /",
             "git push $(rm -rf /)",
+            "find . -exec git push \\;",
             "env -S 'git push'",
             "cd x && git push && rm -rf /",
         ];
@@ -1611,6 +1656,8 @@ mod tests {
             "sudo -nu root rmdir /tmp",
             "bash -c 'echo rm'",
             "find . -delete",
+            "find . -name rm",
+            "find . -exec echo rm \\;",
             "git status",
             "git -C repo status",
             "git -C push status",

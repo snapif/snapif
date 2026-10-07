@@ -2007,6 +2007,20 @@ fn hook_asks_when_rm_is_scored_as_a_read() {
 }
 
 #[test]
+fn hook_asks_when_find_exec_runs_rm() {
+    let asked = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"find . -exec rm -rf /tmp/x \\;"},"script":{"harm":"read","confidence":1.0}}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    assert_eq!(asked.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn hook_asks_when_rm_is_inside_if() {
     let asked = hook_output(
         br#"{"tool_name":"Bash","tool_input":{"command":"if true; then rm -rf /tmp/x; fi"},"script":{"harm":"read","confidence":1.0}}"#,
