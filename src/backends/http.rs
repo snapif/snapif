@@ -34,7 +34,9 @@ impl HttpBackend {
     ///
     /// `api_key` is `SNAPIF_API_KEY`. It is optional on loopback and required
     /// otherwise. This constructor never reads `TYPESAFE_API_KEY`. `http` is
-    /// limited to loopback.
+    /// limited to loopback. A name that does not resolve is
+    /// `http origin did not resolve`, which is a different error from a
+    /// public address.
     pub fn compatible(base_url: Url, api_key: Option<String>) -> Result<Self, Error> {
         Self::open_origin(base_url, api_key, false)
     }
@@ -359,29 +361,40 @@ fn validate_origin(url: &Url, allow_private_http: bool) -> Result<(), Error> {
     }
     match url.scheme() {
         "https" => Ok(()),
-        "http" => match resolved_ips(url) {
-            Some(ips) if ips.iter().all(IpAddr::is_loopback) => Ok(()),
-            Some(ips) if allow_private_http && addresses_allowed(&ips) => Ok(()),
-            _ if allow_private_http => Err(policy("http origin must resolve to a private address")),
-            _ => Err(policy("http origin must resolve to loopback")),
-        },
+        "http" => http_origin_from_ips(resolved_ips(url), allow_private_http),
         _ => Err(policy("origin scheme")),
     }
 }
 
-fn resolved_ips(url: &Url) -> Option<Vec<IpAddr>> {
-    match url.host()? {
-        url::Host::Ipv4(ip) => Some(vec![IpAddr::V4(ip)]),
-        url::Host::Ipv6(ip) => Some(vec![IpAddr::V6(ip)]),
-        url::Host::Domain(host) => {
+/// `Err` means the name did not resolve. An empty list is the same failure.
+/// A resolved public address stays the loopback or private-address error.
+fn http_origin_from_ips(
+    resolved: Result<Vec<IpAddr>, ()>,
+    allow_private_http: bool,
+) -> Result<(), Error> {
+    match resolved {
+        Ok(ips) if !ips.is_empty() && ips.iter().all(IpAddr::is_loopback) => Ok(()),
+        Ok(ips) if allow_private_http && addresses_allowed(&ips) => Ok(()),
+        Ok(_) if allow_private_http => Err(policy("http origin must resolve to a private address")),
+        Ok(_) => Err(policy("http origin must resolve to loopback")),
+        Err(()) => Err(policy("http origin did not resolve")),
+    }
+}
+
+fn resolved_ips(url: &Url) -> Result<Vec<IpAddr>, ()> {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => Ok(vec![IpAddr::V4(ip)]),
+        Some(url::Host::Ipv6(ip)) => Ok(vec![IpAddr::V6(ip)]),
+        Some(url::Host::Domain(host)) => {
             let port = url.port_or_known_default().unwrap_or(80);
             let ips: Vec<_> = (host, port)
                 .to_socket_addrs()
-                .ok()?
+                .map_err(|_| ())?
                 .map(|addr| addr.ip())
                 .collect();
-            if ips.is_empty() { None } else { Some(ips) }
+            if ips.is_empty() { Err(()) } else { Ok(ips) }
         }
+        None => Err(()),
     }
 }
 
@@ -400,7 +413,7 @@ fn ip_is_allowed_private(ip: IpAddr) -> bool {
 }
 
 fn host_is_loopback(url: &Url) -> bool {
-    resolved_ips(url).is_some_and(|ips| ips.iter().all(IpAddr::is_loopback))
+    resolved_ips(url).is_ok_and(|ips| !ips.is_empty() && ips.iter().all(IpAddr::is_loopback))
 }
 
 fn policy(message: &str) -> Error {
@@ -468,6 +481,31 @@ mod tests {
             Some("ts-key")
         );
         assert!(HttpBackend::compatible(url("https://example.com"), None).is_err());
+    }
+
+    #[test]
+    fn unresolved_http_origin_is_not_reported_as_a_public_address() {
+        let missing = http_origin_from_ips(Err(()), false).expect_err("lookup");
+        assert_eq!(missing.to_string(), "policy: http origin did not resolve");
+        let missing_private = http_origin_from_ips(Err(()), true).expect_err("lookup");
+        assert_eq!(
+            missing_private.to_string(),
+            "policy: http origin did not resolve"
+        );
+        let public = HttpBackend::compatible(url("http://8.8.8.8"), Some("snapif-key".to_string()))
+            .map(|backend| backend.endpoint())
+            .expect_err("public");
+        assert_eq!(
+            public.to_string(),
+            "policy: http origin must resolve to loopback"
+        );
+        let public_private = http_origin_from_ips(Ok(vec!["8.8.8.8".parse().expect("ip")]), true)
+            .expect_err("public");
+        assert_eq!(
+            public_private.to_string(),
+            "policy: http origin must resolve to a private address"
+        );
+        assert!(http_origin_from_ips(Ok(vec!["127.0.0.1".parse().expect("ip")]), false).is_ok());
     }
 
     #[test]
