@@ -529,15 +529,10 @@ fn append_gate_log(
     }
     let word = verdict_word(verdict);
     let reasons: Vec<&str> = hint.reasons.iter().map(reason_tag).collect();
-    let confidence = match hint.facts.signal {
-        Some(signal) => signal,
-        None if word == "review"
-            && hint.facts.auto.is_some_and(|auto| auto > hint.facts.review) =>
-        {
-            hint.facts.review
-        }
-        None => 0.0,
-    };
+    // A missing signal is a backend failure. Confidence 0 is a real score,
+    // and replay would escalate it when `when_unsure` is escalate.
+    let confidence = hint.facts.signal.unwrap_or(0.0);
+    let timed_out = hint.facts.signal.is_none();
     let row = serde_json::json!({
         "id": format!("log-{}", req.action_id.0),
         "gate_request": {
@@ -556,7 +551,7 @@ fn append_gate_log(
             "harm": hint.guess.clone().unwrap_or_else(|| "read".to_string()),
             "confidence": confidence,
             "nouls": nouls,
-            "timeout": hint.facts.signal.is_none() && word == "escalate",
+            "timeout": timed_out,
         },
         "expected": word,
         "reasons": reasons,

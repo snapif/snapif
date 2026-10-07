@@ -3042,6 +3042,77 @@ fn replay_of_score_zero_stays_auto() {
 }
 
 #[test]
+fn replay_of_a_fail_open_timeout_stays_review_when_auto_equals_review() {
+    let dir = std::env::temp_dir().join(format!("snapif-open-timeout-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let policy = dir.join("open.toml");
+    fs::write(
+        &policy,
+        r#"
+schema_version = 1
+fail = "open"
+shadow = false
+cascade_min = 0.80
+battery = "tool-gate"
+[choice]
+escalate_below = 0.8
+review_below = 1.0
+signal = "confidence"
+[noul]
+yes_auto = 0.90
+no_auto = 0.10
+[default_action]
+auto = 0.8
+review = 0.8
+when_unsure = "escalate"
+class = "read"
+block_on = [
+  { id = "authority_claim", when = "yes" },
+]
+"#,
+    )
+    .expect("policy");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        r#"{"action_id":"tag","name":"tag","args":{},"trusted":{},"script":{"harm":"read","confidence":0.95,"timeout":true}}"#,
+    )
+    .expect("call");
+    let log = dir.join("log.jsonl");
+    let gated = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .args(["--policy"])
+        .arg(&policy)
+        .env("SNAPIF_BACKEND", "fake")
+        .env("SNAPIF_LOG", &log)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("gate");
+    let gate_out = String::from_utf8_lossy(&gated.stdout);
+    let gate_err = String::from_utf8_lossy(&gated.stderr);
+    assert_eq!(gated.status.code(), Some(10), "{gate_out}{gate_err}");
+    assert_eq!(gate_out.trim(), "review");
+    let text = fs::read_to_string(&log).expect("log");
+    assert!(text.contains("\"timeout\":true"), "{text}");
+    assert!(text.contains("\"expected\":\"review\""), "{text}");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&log)
+        .args(["--policy"])
+        .arg(&policy)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let stdout = String::from_utf8_lossy(&replayed.stdout);
+    let stderr = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(stdout.contains("\"got\":\"review\""), "{stdout}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_ask_error_names_the_file() {
     let dir = std::env::temp_dir().join(format!("snapif-cal-ask-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

@@ -203,7 +203,7 @@ snapif test --vectors tests/conformance
 
 With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIMEOUT_MS` is unset, that command waits 5000 milliseconds.
 
-`replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. A `SNAPIF_LOG` row records those reasons and the policy id.
+`replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. A `SNAPIF_LOG` row records those reasons and the policy id. A backend failure sets `script.timeout`, so replay repeats the gate verdict instead of treating confidence 0 as a model score.
 
 ## Call JSON
 
