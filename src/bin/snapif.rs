@@ -1623,9 +1623,16 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             None => true,
         };
         for (id, label) in &row.labels {
-            if id == "harm_class" && label.is_string() {
+            if id == "harm_class" {
+                let Some(expected) = label.as_str() else {
+                    eprintln!(
+                        "{}: line {line_no}: label harm_class must be a string",
+                        path.display()
+                    );
+                    return 1;
+                };
                 let guess = hint.guess.as_deref().unwrap_or("");
-                card.add_choice_compared(label.as_str() == Some(guess), harm_guess);
+                card.add_choice_compared(expected == guess, harm_guess);
                 continue;
             }
             let Some(score) = hint.facts.scores.get(id) else {

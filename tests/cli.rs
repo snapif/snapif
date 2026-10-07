@@ -3959,6 +3959,34 @@ fn calibrate_gate_counts_verdicts_and_scores_labels() {
 }
 
 #[test]
+fn calibrate_gate_rejects_a_boolean_harm_class() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-harm-type-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let row = dir.join("rows.jsonl");
+    fs::write(
+        &row,
+        r#"{"gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"read","confidence":1.0},"expected":"Auto","labels":{"harm_class":true}}"#,
+    )
+    .expect("write");
+    let scored = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&row)
+        .env("SNAPIF_BACKEND", "typesafe")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let stdout = String::from_utf8_lossy(&scored.stdout);
+    let stderr = String::from_utf8_lossy(&scored.stderr);
+    assert_eq!(scored.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(
+        stderr.contains("label harm_class must be a string"),
+        "{stderr}"
+    );
+    assert!(!stdout.contains("brier"), "{stdout}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn hook_print_settings_does_not_read_stdin() {
     let output = bin()
         .args(["hook", "--print-settings"])
