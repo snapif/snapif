@@ -28,7 +28,7 @@ jobs:
       pull-requests: write
       actions: write
     steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2
         with:
           egress-policy: audit
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
@@ -76,7 +76,7 @@ jobs:
           ref: ${{ github.sha }}
           path: publisher
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
         if: steps.release.outputs.release_created == 'true' || (github.event_name == 'workflow_dispatch' && inputs.tag != '')
         with:
           toolchain: "1.95"
