@@ -1959,6 +1959,8 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut ssh_commands = Vec::new();
     let mut difftool_cmds = Vec::new();
     let mut diff_tools = Vec::new();
+    let mut filter_cleans = Vec::new();
+    let mut filter_smudges = Vec::new();
     let mut mergetool_cmds = Vec::new();
     let mut merge_tools = Vec::new();
     let mut index = 1;
@@ -2002,6 +2004,13 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
                             mergetool_cmds.push((tool.to_string(), script.to_string()));
                         }
                     }
+                } else if let Some(rest) = key.strip_prefix("filter.") {
+                    let script = value.strip_prefix('!').unwrap_or(value);
+                    if rest.ends_with(".clean") && !script.is_empty() {
+                        filter_cleans.push(script.to_string());
+                    } else if rest.ends_with(".smudge") && !script.is_empty() {
+                        filter_smudges.push(script.to_string());
+                    }
                 } else if let Some(name) = key.strip_prefix("alias.") {
                     aliases.push((name.to_string(), value.to_string()));
                 }
@@ -2012,6 +2021,12 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut scripts = Vec::new();
     if argv.iter().any(|word| word == "diff") {
         scripts.extend(external_diffs);
+    }
+    if argv.iter().any(|word| word == "add") {
+        scripts.extend(filter_cleans);
+    }
+    if argv.iter().any(|word| word == "checkout") {
+        scripts.extend(filter_smudges);
     }
     if argv.iter().any(|word| word == "difftool")
         && let Some(tool) = selected_difftool(argv, &diff_tools)
@@ -4076,6 +4091,14 @@ mod tests {
                 "bash.rm",
             ),
             (
+                "git -c filter.probe.clean='rm -rf /tmp/x' add file.txt",
+                "bash.rm",
+            ),
+            (
+                "git -c filter.probe.smudge='rm -rf /tmp/x' checkout -- file.txt",
+                "bash.rm",
+            ),
+            (
                 "git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
                 "bash.rm",
             ),
@@ -4126,6 +4149,15 @@ mod tests {
             )
             .is_none(),
             "mergetool.cmd is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c filter.probe.clean='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "a clean filter is not used by status"
         );
         assert!(
             matched_action(
