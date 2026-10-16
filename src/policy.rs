@@ -395,14 +395,22 @@ fn check_action(
 /// `2>/dev/null rm` match. `echo rm>/tmp/x` does not, because `rm` is
 /// only an argument. `2&>file rm` runs `2`, not `rm`.
 /// `f() { rm; }; f`
-/// matches. The same definition with no call does not. `cmd /c rm` and
-/// `powershell -Command rm` match. `powershell -EncodedCommand`, `-E`,
+/// matches. The same definition with no call does not. `cmd /c rm`,
+/// `cmd -c rm`, and `powershell -Command rm` match. `powershell rm`
+/// matches, because Windows PowerShell defaults a bare word to
+/// `-Command`. `pwsh rm` does not: that host defaults the word to
+/// `-File`. `pwsh -i -c rm` matches, because `-i` takes no value.
+/// `powershell -i xml -c rm` matches, and `xml` is the input format.
+/// `pwsh -cwa` joins the command the same way as `-Command`. `-c`
+/// stays `-Command`. Words after `-File` are script arguments, so
+/// `powershell -File script.ps1 -Command rm` does not match, and the
+/// file is not read. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
-/// `-com` is that command. `-co` is not. A colon glues the value
+/// `-com` is that command. `-co` is not. On `powershell`, bare words
+/// after that switch are still the command. A colon glues the value
 /// (`-ec:<base64>`, `-com:rm`). A switch that takes one value is
-/// skipped, including `-w hidden`, `-ep bypass`, and `-wd`. `-File`
-/// is not read. A value that is not base64, or not UTF-16LE, is not
-/// the script.
+/// skipped, including `-w hidden`, `-ep bypass`, and `-wd`. A value
+/// that is not base64, or not UTF-16LE, is not the script.
 /// `rmdir`, `git push-all`, `echo rm`,
 /// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
 /// `rm.`, and `git.exe.exe` do not match.
@@ -1480,8 +1488,7 @@ fn cmd_script(argv: &[String]) -> Option<String> {
     }
     let mut index = 1;
     while index < argv.len() {
-        let token = argv[index].as_str();
-        if token.eq_ignore_ascii_case("/c") || token.eq_ignore_ascii_case("/k") {
+        if is_cmd_run_switch(&argv[index]) {
             let script = argv[index + 1..].join(" ");
             return if script.is_empty() {
                 None
@@ -1494,6 +1501,18 @@ fn cmd_script(argv: &[String]) -> Option<String> {
     None
 }
 
+// `/c` and `/k` run the rest of the line. `cmd` accepts one leading
+// `-` for those two letters too. `--c` and `-command` do not.
+fn is_cmd_run_switch(token: &str) -> bool {
+    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
+        return false;
+    };
+    if name.starts_with('-') || name.starts_with('/') {
+        return false;
+    }
+    name.eq_ignore_ascii_case("c") || name.eq_ignore_ascii_case("k")
+}
+
 fn powershell_script(argv: &[String]) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
@@ -1502,12 +1521,18 @@ fn powershell_script(argv: &[String]) -> Option<String> {
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
-        // A bare word is not a switch. `hidden` after `-w` used to stop
-        // here, so the encoded script was never decoded.
-        let (name, inline) = ps_switch_parts(token)?;
+        // A bare word is not a switch. Windows PowerShell defaults it
+        // to -Command. pwsh defaults it to -File, which is not read.
+        // `hidden` after `-w` is the switch value, so it is not seen here.
+        let Some((name, inline)) = ps_switch_parts(token) else {
+            if base.eq_ignore_ascii_case("powershell") {
+                return ps_command_script(None, &argv[index..]);
+            }
+            return None;
+        };
         // Command before encoded: `-c` is `-Command`, and it is also a
-        // prefix of `-EncodedCommand`.
-        if is_ps_command_name(name) {
+        // prefix of `-EncodedCommand`. `-cwa` is `-CommandWithArgs`.
+        if is_ps_command_name(name) || is_ps_command_with_args_name(name) {
             return ps_command_script(inline, &argv[index + 1..]);
         }
         // One value. Later words are not part of this script, unlike `-Command`.
@@ -1518,7 +1543,12 @@ fn powershell_script(argv: &[String]) -> Option<String> {
             };
             return decode_ps_encoded_script(encoded);
         }
-        if ps_name_takes_value(name) {
+        // Words after -File belong to the script. Do not read the file,
+        // and do not treat a later -Command as the engine command.
+        if is_ps_file_name(name) {
+            return None;
+        }
+        if ps_name_takes_value(name, base) {
             index += 1;
             // `-w:hidden` already holds the value. Do not also skip `-enc`.
             if inline.is_none() && index < argv.len() {
@@ -1559,6 +1589,19 @@ fn is_ps_command_name(name: &str) -> bool {
         return true;
     }
     name.len() >= 3 && "command".starts_with(&name)
+}
+
+// `-cwa` is the alias. A prefix of `commandwithargs` of at least three
+// letters is the same switch. `-c` and `-com` stay `-Command`.
+fn is_ps_command_with_args_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name == "cwa" {
+        return true;
+    }
+    if is_ps_command_name(&name) {
+        return false;
+    }
+    name.len() >= 3 && "commandwithargs".starts_with(&name)
 }
 
 fn ps_command_script(inline: Option<&str>, rest: &[String]) -> Option<String> {
@@ -1668,17 +1711,28 @@ fn b64_sextet(byte: u8) -> Option<u8> {
     }
 }
 
+// `-f` through `-file`. Later tokens are script arguments, so the scan
+// stops. The file is not read.
+fn is_ps_file_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.is_empty() && "file".starts_with(&name)
+}
+
 // One argument, then the scan continues. A non-empty prefix of any name
 // below counts. `-w` prefixes both `windowstyle` and `workingdirectory`;
 // both take a value, so one word is skipped. `-ep` and `-wd` are not
 // leading prefixes (`executionpolicy` starts with `ex`, `workingdirectory`
-// with `wo`). `-File` is skipped the same way and is not read.
-// Called after the command and encoded checks. `-c` and `-e` also prefix
-// `configurationname` and `executionpolicy`, and `-co` prefixes both
-// `command` and `configurationname`, so those are not this kind of switch.
-fn ps_name_takes_value(name: &str) -> bool {
+// with `wo`). Called after the command, encoded, and file checks.
+// `-c` and `-e` also prefix `configurationname` and `executionpolicy`,
+// and `-co` prefixes both `command` and `configurationname`, so those
+// are not this kind of switch. pwsh `-i` is `-Interactive` and takes
+// no value. Windows PowerShell `-i` is still `-InputFormat`.
+fn ps_name_takes_value(name: &str, base: &str) -> bool {
     let name = name.to_ascii_lowercase();
     if name.is_empty() {
+        return false;
+    }
+    if name == "i" && base.eq_ignore_ascii_case("pwsh") {
         return false;
     }
     if matches!(name.as_str(), "ep" | "wd") {
@@ -1693,7 +1747,6 @@ fn ps_name_takes_value(name: &str) -> bool {
         "workingdirectory",
         "psconsolefile",
         "configurationname",
-        "file",
     ];
     if !NAMES.iter().any(|candidate| candidate.starts_with(&name)) {
         return false;
@@ -3459,7 +3512,8 @@ mod tests {
 
     /// A bare word used to end the scan, so `-w hidden` and `-ep bypass`
     /// hid `-enc`. A colon-glued value is the switch value. `-com` is
-    /// `-Command`. `-co` is not. UTF-8 base64 and `-File` still do not
+    /// `-Command`. `-co` is not. On `pwsh` the words after `-co` are
+    /// not a command script. UTF-8 base64 and `-File` still do not
     /// match `bash.rm`.
     #[test]
     fn powershell_short_switches_still_reach_the_script() {
@@ -3505,11 +3559,56 @@ mod tests {
             format!("powershell -ec:{utf8_rm}"),
             "powershell -ep bypass -enc !!!".to_string(),
             "powershell -w hidden -enc QQ==".to_string(),
-            "powershell -co rm -rf /tmp/x".to_string(),
+            "pwsh -co rm -rf /tmp/x".to_string(),
             "powershell -File rm -rf /tmp/x".to_string(),
             "powershell -com:FOO=1".to_string(),
         ];
         for command in &neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// `pwsh -i` takes no value, so `-c` still runs. Windows PowerShell
+    /// `-i` is `-InputFormat`. A bare word on `powershell` is the
+    /// command. `pwsh` leaves that word unmatched. `cmd -c` is `/c`.
+    /// `-cwa` joins like `-Command`, and `-c` stays `-Command`. Words
+    /// after `-File` are not the engine command.
+    #[test]
+    fn pwsh_i_bare_command_and_cmd_dash_c_match() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "pwsh -i -c rm -rf /tmp/x",
+            "powershell -i xml -c rm -rf /tmp/x",
+            "powershell rm -rf /tmp/x",
+            "powershell -co rm -rf /tmp/x",
+            "pwsh -cwa rm -rf /tmp/x",
+            "pwsh -cwa 'rm -rf /tmp/x'",
+            "pwsh -commandw rm -rf /tmp/x",
+            "pwsh -c rm -rf /tmp/x",
+            "pwsh -Command rm -rf /tmp/x",
+            "cmd -c rm -rf /tmp/x",
+            "cmd -k rm -rf /tmp/x",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "pwsh rm -rf /tmp/x",
+            "powershell -File script.ps1 -Command rm -rf /tmp/x",
+            "pwsh -f script.ps1 -c rm -rf /tmp/x",
+            "pwsh -cw rm -rf /tmp/x",
+            "cmd -command rm -rf /tmp/x",
+            "cmd --c rm -rf /tmp/x",
+            "cmd -x rm -rf /tmp/x",
+        ];
+        for command in neither {
             assert!(
                 matched_action(&policy, "Bash", Some(command)).is_none(),
                 "{command:?}"
