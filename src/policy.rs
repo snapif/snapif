@@ -1793,7 +1793,8 @@ fn shell_script(tokens: &[String]) -> Option<String> {
         if let Some(script) = c_argument(token, tokens.get(index + 1)) {
             return Some(script);
         }
-        if token.starts_with('-') {
+        // `+e` and `+o errexit` still run `-c`. A plus flag is not a path.
+        if token.starts_with('-') || token.starts_with('+') {
             index += 1;
             continue;
         }
@@ -1804,8 +1805,9 @@ fn shell_script(tokens: &[String]) -> Option<String> {
 
 fn shell_opt_takes_value(token: &str) -> bool {
     let name = token.strip_prefix("--").unwrap_or(token);
-    // Separate `-O` and `+O` take the next word. Glued `-Oextglob` does not.
-    matches!(name, "-o" | "-O" | "+O" | "rcfile" | "init-file")
+    // Separate `-o`, `+o`, `-O`, and `+O` take the next word.
+    // Glued `-Oextglob` does not.
+    matches!(name, "-o" | "+o" | "-O" | "+O" | "rcfile" | "init-file")
 }
 
 fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
@@ -3661,5 +3663,28 @@ mod tests {
             .is_none(),
             "bash -c does not read the heredoc"
         );
+    }
+
+    /// `bash +e -c` and `bash +o errexit -c` still run the script.
+    /// A plus flag used to end the scan, so `rm` missed `bash.rm`.
+    #[test]
+    fn shell_plus_options_still_run_the_script() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let commands = [
+            ("bash +e -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("bash +ex -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("sh +e -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("zsh +e -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("bash +o errexit -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("zsh +o errexit -c 'git push'", "git.push"),
+            ("bash +o errexit <<'EOF'\nrm -rf /tmp/x\nEOF", "bash.rm"),
+        ];
+        for (command, expected) in commands {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|action| action.0.as_str()),
+                Some(expected),
+                "{command:?}"
+            );
+        }
     }
 }
