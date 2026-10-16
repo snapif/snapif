@@ -2028,6 +2028,33 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
 }
 
 #[test]
+fn hook_denies_a_script_that_is_not_an_object_or_not_a_score() {
+    let text = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":"rm"}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert_eq!(text.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("script must be an object"), "{stdout}");
+
+    let bad = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"confidence":"high"}}"#,
+        false,
+    );
+    let bad_out = String::from_utf8_lossy(&bad.stdout);
+    assert!(
+        bad_out.contains("\"permissionDecision\":\"deny\""),
+        "{bad_out}"
+    );
+    assert!(bad_out.contains("script:"), "{bad_out}");
+    assert!(!bad_out.contains("invalid json"), "{bad_out}");
+}
+
+#[test]
 fn hook_denies_an_unknown_script_harm() {
     let denied = hook_output(
         br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"harm":"nope","confidence":0.95}}"#,
