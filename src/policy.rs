@@ -1137,10 +1137,7 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
         // `coproc rm` and `coproc name { rm; }` both run rm.
         if command_basename(&tokens[index]).eq_ignore_ascii_case("coproc") {
             index += 1;
-            if index + 1 < tokens.len()
-                && tokens[index] != "{"
-                && tokens[index + 1] == "{"
-            {
+            if index + 1 < tokens.len() && tokens[index] != "{" && tokens[index + 1] == "{" {
                 index += 1;
             }
             continue;
