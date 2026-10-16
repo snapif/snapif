@@ -1,7 +1,7 @@
 use crate::error::{DecodeError, WireError};
 use crate::ids::QuestionId;
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub const ENCODE_CAP: usize = 256 * 1024;
@@ -67,6 +67,8 @@ pub enum WireAnswer {
     },
     Score {
         score: f64,
+        /// Jev sends a string map. Drex sends the labels as an array, in order.
+        #[serde(deserialize_with = "legend_map")]
         legend: IndexMap<String, String>,
         probabilities: IndexMap<String, f64>,
         confidence: f64,
@@ -136,6 +138,27 @@ pub fn decode_request(bytes: &[u8]) -> Result<WireRequest, WireError> {
     let request: WireRequest = serde_json::from_value(value).map_err(json_error)?;
     validate(&request)?;
     Ok(request)
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LegendRaw {
+    Map(IndexMap<String, String>),
+    List(Vec<String>),
+}
+
+fn legend_map<'de, D>(deserializer: D) -> Result<IndexMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match LegendRaw::deserialize(deserializer)? {
+        LegendRaw::Map(map) => Ok(map),
+        LegendRaw::List(items) => Ok(items
+            .into_iter()
+            .enumerate()
+            .map(|(index, text)| (index.to_string(), text))
+            .collect()),
+    }
 }
 
 pub fn decode_response(bytes: &[u8]) -> Result<WireResponse, WireError> {
