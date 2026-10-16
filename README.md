@@ -276,6 +276,46 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 
 A different System One host uses `compatible`. `SNAPIF_BASE_URL` is the origin only. `SNAPIF_MODEL` is that host's model id. A public origin also needs `SNAPIF_API_KEY`. Leaving the model unset sends `jev-latest`, and a host that does not serve that name fails the gate closed (exit 11).
 
+A score legend may be a map of labels or a list of labels in order. Snapif accepts both.
+
+### TypeSafe Jev
+
+`jev-latest` is the model these commands were checked against. `ask`, `gate`, and `snapif test --base-url` all completed. The verdict word depends on the call.
+
+```bash
+SNAPIF_BACKEND=typesafe \
+SNAPIF_MODEL=jev-latest \
+  snapif gate --call call.json
+```
+
+```bash
+SNAPIF_API_KEY="$TYPESAFE_API_KEY" \
+SNAPIF_MODEL=jev-latest \
+  snapif test --vectors tests/conformance \
+  --base-url https://api.typesafe.ai
+```
+
+`test --base-url` uses the compatible client, so the TypeSafe key is passed as `SNAPIF_API_KEY` for that command.
+
+### Drex
+
+Drex on `https://console.nace.ai` uses `compatible`. `drex-v2.0` is the model these commands were checked against. `ask` included a choice, a noul, and a score. `gate` and `snapif test --base-url` completed. The verdict word depends on the call.
+
+```bash
+SNAPIF_BACKEND=compatible \
+SNAPIF_BASE_URL=https://console.nace.ai \
+SNAPIF_MODEL=drex-v2.0 \
+  snapif gate --call call.json
+```
+
+```bash
+SNAPIF_MODEL=drex-v2.0 \
+  snapif test --vectors tests/conformance \
+  --base-url https://console.nace.ai
+```
+
+`SNAPIF_API_KEY` is the Nace key. `drex-latest` completed an ask on that same origin.
+
 ### Ollama
 
 Ollama 0.35 and later serves System One at `http://127.0.0.1:11434`. Pull a decision model first. Loopback does not need `SNAPIF_API_KEY`.
