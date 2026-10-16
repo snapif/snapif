@@ -1954,6 +1954,7 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         return Vec::new();
     }
     let mut aliases = Vec::new();
+    let mut helpers = Vec::new();
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
@@ -1962,16 +1963,26 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         }
         if token == "-c" || token == "--config" {
             index += 1;
-            if let Some((name, value)) = argv.get(index).and_then(|spec| {
-                let (key, value) = spec.split_once('=')?;
-                Some((key.strip_prefix("alias.")?, value))
-            }) {
-                aliases.push((name.to_string(), value.to_string()));
+            if let Some((key, value)) = argv.get(index).and_then(|spec| spec.split_once('=')) {
+                if key == "credential.helper" {
+                    if let Some(shell) = value.strip_prefix('!') {
+                        helpers.push(shell.to_string());
+                    }
+                } else if let Some(name) = key.strip_prefix("alias.") {
+                    aliases.push((name.to_string(), value.to_string()));
+                }
             }
         }
         index += 1;
     }
     let mut scripts = Vec::new();
+    if argv.iter().any(|word| word == "credential") {
+        for shell in helpers {
+            if !shell.is_empty() {
+                scripts.push(shell);
+            }
+        }
+    }
     for (name, value) in aliases {
         let invoked = argv.iter().any(|word| word == &name);
         if !invoked {
@@ -3951,6 +3962,10 @@ mod tests {
             ("fish --init-command='rm -rf /tmp/x'", "bash.rm"),
             ("git -c 'alias.p=!rm -rf /tmp/x' p", "bash.rm"),
             ("git -c alias.p=push p", "git.push"),
+            (
+                "git -c credential.helper='!rm -rf /tmp/x' credential fill",
+                "bash.rm",
+            ),
         ];
         for (command, expected) in commands {
             assert_eq!(
@@ -3962,6 +3977,15 @@ mod tests {
         assert!(
             matched_action(&policy, "Bash", Some("git -c alias.p=push status")).is_none(),
             "an alias that is not invoked does not match"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c credential.helper='!rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "a credential helper is not used by status"
         );
     }
 }
