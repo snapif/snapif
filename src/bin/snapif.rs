@@ -180,7 +180,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     let file: CallFile = match serde_json::from_value(value.clone()) {
         Ok(file) => file,
         Err(err) => {
-            eprintln!("wire: invalid json: {err}");
+            eprintln!("call file: {err}");
             return 1;
         }
     };

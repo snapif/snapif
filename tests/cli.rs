@@ -172,6 +172,23 @@ fn gate_array_must_be_an_object() {
 }
 
 #[test]
+fn gate_call_file_type_error_is_not_invalid_json() {
+    let path = std::env::temp_dir().join(format!("snapif-gate-type-{}.json", std::process::id()));
+    fs::write(&path, r#"{"action_id":1,"name":"bash","args":{}}"#).expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("call file:"), "{err}");
+    assert!(!err.contains("invalid json"), "{err}");
+}
+
+#[test]
 fn ask_array_is_not_ok() {
     let path = std::env::temp_dir().join(format!("snapif-array-{}.json", std::process::id()));
     fs::write(&path, "[]").expect("write");
