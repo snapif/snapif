@@ -1956,6 +1956,7 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut aliases = Vec::new();
     let mut helpers = Vec::new();
     let mut external_diffs = Vec::new();
+    let mut ssh_commands = Vec::new();
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
@@ -1968,6 +1969,11 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
                 if key == "credential.helper" {
                     if let Some(shell) = value.strip_prefix('!') {
                         helpers.push(shell.to_string());
+                    }
+                } else if key == "core.sshCommand" {
+                    let script = value.strip_prefix('!').unwrap_or(value);
+                    if !script.is_empty() {
+                        ssh_commands.push(script.to_string());
                     }
                 } else if key == "diff.external" {
                     let script = value.strip_prefix('!').unwrap_or(value);
@@ -1984,6 +1990,9 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut scripts = Vec::new();
     if argv.iter().any(|word| word == "diff") {
         scripts.extend(external_diffs);
+    }
+    if git_uses_ssh(argv) {
+        scripts.extend(ssh_commands);
     }
     if argv.iter().any(|word| word == "credential") {
         for shell in helpers {
@@ -2004,6 +2013,16 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         }
     }
     scripts
+}
+
+fn git_uses_ssh(argv: &[String]) -> bool {
+    argv.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "ls-remote" | "fetch" | "pull" | "push" | "clone"
+        ) || word.contains("ssh://")
+            || word.starts_with("git@")
+    })
 }
 
 fn fish_inline_script(token: &str) -> Option<String> {
@@ -3979,6 +3998,10 @@ mod tests {
                 "git -c diff.external='rm -rf /tmp/x' diff --no-index a b",
                 "bash.rm",
             ),
+            (
+                "git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
+                "bash.rm",
+            ),
         ];
         for (command, expected) in commands {
             assert_eq!(
@@ -4008,6 +4031,15 @@ mod tests {
             )
             .is_none(),
             "an external diff is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c core.sshCommand='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "sshCommand is not used by status"
         );
     }
 }
