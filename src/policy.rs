@@ -488,7 +488,8 @@ fn consider_segment<'a>(
     }
     let child_script = shell_script(&argv)
         .or_else(|| cmd_script(&argv))
-        .or_else(|| powershell_script(&argv));
+        .or_else(|| powershell_script(&argv))
+        .or_else(|| su_script(&argv));
     if let Some(script) = child_script {
         // `pwsh -Command -` reads the heredoc. The dash itself is not a command.
         // `bash -c -` is the script "-", not stdin.
@@ -655,8 +656,12 @@ fn destructive_rm_action<'a>(policy: &'a Policy, tool_name: &str) -> Option<&'a 
 }
 
 fn remote_scripts(argv: &[String]) -> Vec<String> {
-    [
-        ssh_remote_command(argv),
+    let mut scripts = Vec::new();
+    if let Some(script) = ssh_remote_command(argv) {
+        scripts.push(script);
+    }
+    scripts.extend(ssh_proxy_commands(argv));
+    for script in [
         flock_command(argv),
         docker_command(argv),
         parallel_command(argv),
@@ -667,7 +672,10 @@ fn remote_scripts(argv: &[String]) -> Vec<String> {
     ]
     .into_iter()
     .flatten()
-    .collect()
+    {
+        scripts.push(script);
+    }
+    scripts
 }
 
 fn find_exec_commands(argv: &[String]) -> Vec<String> {
@@ -814,6 +822,36 @@ fn ssh_remote_command(argv: &[String]) -> Option<String> {
     Some(argv[index..].join(" "))
 }
 
+fn ssh_proxy_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("ssh") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        let spec = if token == "-o" {
+            index += 1;
+            argv.get(index).map(String::as_str)
+        } else {
+            token.strip_prefix("-o")
+        };
+        if let Some(command) = spec.and_then(|spec| spec.strip_prefix("ProxyCommand="))
+            && !command.is_empty()
+        {
+            commands.push(command.to_string());
+        }
+        index += 1;
+    }
+    commands
+}
+
 fn ssh_value_is_glued(token: &str) -> bool {
     let flags = token.strip_prefix('-').unwrap_or(token);
     flags.len() > 1 && !flags.starts_with('-')
@@ -918,11 +956,25 @@ fn docker_command(argv: &[String]) -> Option<String> {
         return None;
     }
     let mut index = 2;
+    let mut entrypoint = None;
     while index < argv.len() {
         let token = &argv[index];
         if token == "--" {
             index += 1;
             break;
+        }
+        if let Some(value) = token.strip_prefix("--entrypoint=") {
+            entrypoint = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if token == "--entrypoint" {
+            index += 1;
+            if let Some(value) = argv.get(index) {
+                entrypoint = Some(value.clone());
+                index += 1;
+            }
+            continue;
         }
         if token.starts_with('-') {
             let takes_next = docker_opt_takes_value(token) && !token.contains('=');
@@ -938,10 +990,21 @@ fn docker_command(argv: &[String]) -> Option<String> {
         return None;
     }
     index += 1;
-    if index >= argv.len() {
+    let tail = if index < argv.len() {
+        argv[index..].join(" ")
+    } else {
+        String::new()
+    };
+    if let Some(bin) = entrypoint {
+        if tail.is_empty() {
+            return Some(bin);
+        }
+        return Some(format!("{bin} {tail}"));
+    }
+    if tail.is_empty() {
         return None;
     }
-    Some(argv[index..].join(" "))
+    Some(tail)
 }
 
 fn docker_opt_takes_value(token: &str) -> bool {
@@ -1861,6 +1924,25 @@ fn fish_inline_script(token: &str) -> Option<String> {
         .strip_prefix("--command=")
         .or_else(|| token.strip_prefix("--init-command="))
         .map(str::to_string)
+}
+
+fn su_script(tokens: &[String]) -> Option<String> {
+    let base = command_basename(tokens.first()?);
+    if !base.eq_ignore_ascii_case("su") {
+        return None;
+    }
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        if let Some(script) = token.strip_prefix("--command=") {
+            return Some(script.to_string());
+        }
+        if token == "-c" || token == "--command" {
+            return tokens.get(index + 1).cloned();
+        }
+        index += 1;
+    }
+    None
 }
 
 fn shell_script(tokens: &[String]) -> Option<String> {
@@ -3028,6 +3110,12 @@ mod tests {
             "docker exec -it box rm -rf /tmp",
             "docker exec -u root box rm -rf /tmp",
             "docker run --rm ubuntu rm -rf /tmp",
+            "docker run --entrypoint=/bin/rm alpine -rf /tmp",
+            "docker run --entrypoint /bin/rm alpine -rf /tmp",
+            "su -c 'rm -rf /tmp'",
+            "su --command='rm -rf /tmp'",
+            "ssh -o ProxyCommand='rm -rf /tmp/x' example.com",
+            "ssh -oProxyCommand='rm -rf /tmp/x' example.com",
             "parallel rm ::: /tmp/x",
             "parallel -j 4 rm -rf /tmp ::: x",
             "parallel --jobs=4 rm ::: x",
