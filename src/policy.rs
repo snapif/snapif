@@ -1959,6 +1959,8 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut ssh_commands = Vec::new();
     let mut difftool_cmds = Vec::new();
     let mut diff_tools = Vec::new();
+    let mut mergetool_cmds = Vec::new();
+    let mut merge_tools = Vec::new();
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
@@ -1984,11 +1986,20 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
                     }
                 } else if key == "diff.tool" && !value.is_empty() {
                     diff_tools.push(value.to_string());
+                } else if key == "merge.tool" && !value.is_empty() {
+                    merge_tools.push(value.to_string());
                 } else if let Some(rest) = key.strip_prefix("difftool.") {
                     if let Some(tool) = rest.strip_suffix(".cmd") {
                         let script = value.strip_prefix('!').unwrap_or(value);
                         if !tool.is_empty() && !script.is_empty() {
                             difftool_cmds.push((tool.to_string(), script.to_string()));
+                        }
+                    }
+                } else if let Some(rest) = key.strip_prefix("mergetool.") {
+                    if let Some(tool) = rest.strip_suffix(".cmd") {
+                        let script = value.strip_prefix('!').unwrap_or(value);
+                        if !tool.is_empty() && !script.is_empty() {
+                            mergetool_cmds.push((tool.to_string(), script.to_string()));
                         }
                     }
                 } else if let Some(name) = key.strip_prefix("alias.") {
@@ -2006,6 +2017,15 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         && let Some(tool) = selected_difftool(argv, &diff_tools)
     {
         for (name, command) in difftool_cmds {
+            if name == tool {
+                scripts.push(command);
+            }
+        }
+    }
+    if argv.iter().any(|word| word == "mergetool")
+        && let Some(tool) = selected_difftool(argv, &merge_tools)
+    {
+        for (name, command) in mergetool_cmds {
             if name == tool {
                 scripts.push(command);
             }
@@ -4048,6 +4068,14 @@ mod tests {
                 "bash.rm",
             ),
             (
+                "git -c mergetool.x.cmd='rm -rf /tmp/x' mergetool --tool=x file.txt",
+                "bash.rm",
+            ),
+            (
+                "git -c mergetool.x.cmd='rm -rf /tmp/x' -c merge.tool=x mergetool file.txt",
+                "bash.rm",
+            ),
+            (
                 "git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
                 "bash.rm",
             ),
@@ -4089,6 +4117,15 @@ mod tests {
             )
             .is_none(),
             "difftool.cmd is not used by diff"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c mergetool.x.cmd='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "mergetool.cmd is not used by status"
         );
         assert!(
             matched_action(
