@@ -662,6 +662,7 @@ fn remote_scripts(argv: &[String]) -> Vec<String> {
     }
     scripts.extend(ssh_proxy_commands(argv));
     scripts.extend(rsync_shells(argv));
+    scripts.extend(ncat_commands(argv));
     for script in [
         flock_command(argv),
         docker_command(argv),
@@ -876,6 +877,36 @@ fn rsync_shells(argv: &[String]) -> Vec<String> {
                 commands.push(command.to_string());
             }
         } else if token == "-e" || token == "--rsh" {
+            index += 1;
+            if let Some(command) = argv.get(index)
+                && !command.is_empty()
+            {
+                commands.push(command.clone());
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn ncat_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("ncat") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if let Some(command) = token
+            .strip_prefix("--exec=")
+            .or_else(|| token.strip_prefix("--sh-exec="))
+            && !command.is_empty()
+        {
+            commands.push(command.to_string());
+        } else if matches!(token, "-e" | "--exec" | "-c" | "--sh-exec") {
             index += 1;
             if let Some(command) = argv.get(index)
                 && !command.is_empty()
@@ -3156,6 +3187,9 @@ mod tests {
             "ssh -oProxyCommand='rm -rf /tmp/x' example.com",
             "rsync -e 'rm -rf /tmp/x' host:/tmp /tmp",
             "rsync --rsh='rm -rf /tmp/x' host:/tmp /tmp",
+            "ncat --exec 'rm -rf /tmp/x' host 80",
+            "ncat -c 'rm -rf /tmp/x' host 80",
+            "ncat --sh-exec='rm -rf /tmp/x' host 80",
             "parallel rm ::: /tmp/x",
             "parallel -j 4 rm -rf /tmp ::: x",
             "parallel --jobs=4 rm ::: x",
