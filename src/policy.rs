@@ -490,12 +490,18 @@ fn consider_segment<'a>(
         .or_else(|| cmd_script(&argv))
         .or_else(|| powershell_script(&argv));
     if let Some(script) = child_script {
-        let mut child = Functions::new();
-        prefer(
-            policy,
-            best,
-            matched_in(policy, tool_name, &script, depth + 1, &mut child),
-        );
+        // `pwsh -Command -` reads the heredoc. The dash itself is not a command.
+        // `bash -c -` is the script "-", not stdin.
+        if is_stdin_script(&script) && is_powershell_base(argv.first().map(String::as_str)) {
+            scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
+        } else {
+            let mut child = Functions::new();
+            prefer(
+                policy,
+                best,
+                matched_in(policy, tool_name, &script, depth + 1, &mut child),
+            );
+        }
     } else if let Some(script) = eval_script(&argv) {
         prefer(
             policy,
@@ -1513,6 +1519,14 @@ fn is_cmd_run_switch(token: &str) -> bool {
     name.eq_ignore_ascii_case("c") || name.eq_ignore_ascii_case("k")
 }
 
+fn is_powershell_base(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let base = command_basename(name);
+    base.eq_ignore_ascii_case("powershell") || base.eq_ignore_ascii_case("pwsh")
+}
+
 fn powershell_script(argv: &[String]) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
@@ -1736,6 +1750,10 @@ fn ps_name_takes_value(name: &str, base: &str) -> bool {
         return false;
     }
     if matches!(name.as_str(), "ep" | "wd") {
+        return true;
+    }
+    // pwsh -SettingsFile takes a path. `-set` is long enough not to be `-s`.
+    if name.len() >= 3 && "settingsfile".starts_with(&name) {
         return true;
     }
     const NAMES: &[&str] = &[
@@ -3614,5 +3632,34 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    /// pwsh -SettingsFile takes a path, then still runs -Command.
+    /// `pwsh -Command -` runs the heredoc, not the dash.
+    #[test]
+    fn powershell_settings_file_and_stdin_heredoc_match() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "pwsh -SettingsFile C:\\x.json -c rm -rf /tmp/x",
+            "pwsh -set C:\\x.json -Command rm -rf /tmp/x",
+            "pwsh -NoProfile -Command - <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "powershell -c - <<'EOF'\nrm -rf /tmp/x\nEOF",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("bash -c - <<'EOF'\nrm -rf /tmp/x\nEOF")
+            )
+            .is_none(),
+            "bash -c does not read the heredoc"
+        );
     }
 }
