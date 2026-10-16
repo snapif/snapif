@@ -103,6 +103,25 @@ fn quickstart_response_checks() {
 }
 
 #[test]
+fn score_legend_array_uses_index_keys() {
+    let raw = r#"{"model":"drex-v2.0","answers":{"urgency":{"type":"score","score":1.4,"legend":["Routine","Soon","Immediate"],"probabilities":{"0":0.1,"1":0.2,"2":0.7},"confidence":0.5}},"usage":{"input_tokens":1,"output_tokens":0}}"#;
+    let response = decode_response(raw.as_bytes()).unwrap();
+    let Some(WireAnswer::Score { legend, .. }) = response.answers.get("urgency") else {
+        panic!("urgency is score");
+    };
+    assert_eq!(
+        legend.get("0").map(String::as_str),
+        Some("Routine"),
+        "index 0"
+    );
+    assert_eq!(
+        legend.get("2").map(String::as_str),
+        Some("Immediate"),
+        "index 2"
+    );
+}
+
+#[test]
 fn object_key_order_is_preserved() {
     let department = decode_request(DEPARTMENT.as_bytes()).unwrap();
     let Some(WireQuestion::Choice { criteria, .. }) = department.questions.get("department") else {
