@@ -398,7 +398,11 @@ fn check_action(
 /// matches. The same definition with no call does not. `cmd /c rm` and
 /// `powershell -Command rm` match. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
-/// A value that is not base64, or not UTF-16LE, is not the script.
+/// `-com` is that command. `-co` is not. A colon glues the value
+/// (`-ec:<base64>`, `-com:rm`). A switch that takes one value is
+/// skipped, including `-w hidden`, `-ep bypass`, and `-wd`. `-File`
+/// is not read. A value that is not base64, or not UTF-16LE, is not
+/// the script.
 /// `rmdir`, `git push-all`, `echo rm`,
 /// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
 /// `rm.`, and `git.exe.exe` do not match.
@@ -1498,59 +1502,88 @@ fn powershell_script(argv: &[String]) -> Option<String> {
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
-        if is_ps_command_switch(token) {
-            let script = argv[index + 1..].join(" ");
-            return if script.is_empty() {
-                None
-            } else {
-                Some(script)
-            };
+        // A bare word is not a switch. `hidden` after `-w` used to stop
+        // here, so the encoded script was never decoded.
+        let (name, inline) = ps_switch_parts(token)?;
+        // Command before encoded: `-c` is `-Command`, and it is also a
+        // prefix of `-EncodedCommand`.
+        if is_ps_command_name(name) {
+            return ps_command_script(inline, &argv[index + 1..]);
         }
         // One value. Later words are not part of this script, unlike `-Command`.
-        if is_ps_encoded_command_switch(token) {
-            return argv
-                .get(index + 1)
-                .and_then(|value| decode_ps_encoded_script(value));
+        if is_ps_encoded_command_name(name) {
+            let encoded = match inline {
+                Some(value) => value,
+                None => argv.get(index + 1)?.as_str(),
+            };
+            return decode_ps_encoded_script(encoded);
         }
-        if ps_switch_takes_value(token) {
+        if ps_name_takes_value(name) {
             index += 1;
-            if index < argv.len() {
+            // `-w:hidden` already holds the value. Do not also skip `-enc`.
+            if inline.is_none() && index < argv.len() {
                 index += 1;
             }
             continue;
         }
-        if token.starts_with('-') || token.starts_with('/') {
-            index += 1;
-            continue;
-        }
-        return None;
+        index += 1;
     }
     None
 }
 
-fn is_ps_command_switch(token: &str) -> bool {
-    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
-        return false;
+// The first `:` glues the value (`-ec:<base64>`, `-com:rm`). `--` and
+// `/` are the same prefix as `-`.
+fn ps_switch_parts(token: &str) -> Option<(&str, Option<&str>)> {
+    if !token.starts_with('-') && !token.starts_with('/') {
+        return None;
+    }
+    let (head, inline) = match token.split_once(':') {
+        Some((head, value)) => (head, Some(value)),
+        None => (token, None),
     };
-    name.eq_ignore_ascii_case("command") || name.eq_ignore_ascii_case("c")
+    Some((ps_switch_name(head)?, inline))
 }
 
-// pwsh accepts `-e` and `-enc` as prefixes of `-EncodedCommand`, plus the
-// alias `-ec`. `-ec` is not a prefix: `encodedcommand` starts with `en`.
-// `--encodedcommand` and `/encodedcommand` are the same switch.
-fn is_ps_encoded_command_switch(token: &str) -> bool {
-    let Some(name) = ps_encoded_switch_name(token) else {
-        return false;
-    };
-    let name = name.to_ascii_lowercase();
-    !name.is_empty() && ("encodedcommand".starts_with(&name) || name == "ec")
-}
-
-fn ps_encoded_switch_name(token: &str) -> Option<&str> {
+fn ps_switch_name(token: &str) -> Option<&str> {
     token
         .strip_prefix("--")
         .or_else(|| token.strip_prefix('-'))
         .or_else(|| token.strip_prefix('/'))
+}
+
+// `-c` is the alias. `configurationname` starts with `con`, so `-com`
+// is only `-Command`. `-co` matches both and is not the command.
+fn is_ps_command_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name == "c" {
+        return true;
+    }
+    name.len() >= 3 && "command".starts_with(&name)
+}
+
+fn ps_command_script(inline: Option<&str>, rest: &[String]) -> Option<String> {
+    let inline = inline.filter(|text| !text.is_empty());
+    if inline.is_none() && rest.is_empty() {
+        return None;
+    }
+    let mut script = String::new();
+    if let Some(inline) = inline {
+        script.push_str(inline);
+    }
+    for word in rest {
+        if !script.is_empty() {
+            script.push(' ');
+        }
+        script.push_str(word);
+    }
+    Some(script)
+}
+
+// pwsh accepts `-e` and `-enc` as prefixes of `-EncodedCommand`, plus the
+// alias `-ec`. `-ec` is not a prefix: `encodedcommand` starts with `en`.
+fn is_ps_encoded_command_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.is_empty() && ("encodedcommand".starts_with(&name) || name == "ec")
 }
 
 // UTF-16LE base64, same as pwsh `-EncodedCommand`. Space, tab, CR, and LF
@@ -1635,22 +1668,37 @@ fn b64_sextet(byte: u8) -> Option<u8> {
     }
 }
 
-fn ps_switch_takes_value(token: &str) -> bool {
-    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
+// One argument, then the scan continues. A non-empty prefix of any name
+// below counts. `-w` prefixes both `windowstyle` and `workingdirectory`;
+// both take a value, so one word is skipped. `-ep` and `-wd` are not
+// leading prefixes (`executionpolicy` starts with `ex`, `workingdirectory`
+// with `wo`). `-File` is skipped the same way and is not read.
+// Called after the command and encoded checks. `-c` and `-e` also prefix
+// `configurationname` and `executionpolicy`, and `-co` prefixes both
+// `command` and `configurationname`, so those are not this kind of switch.
+fn ps_name_takes_value(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name.is_empty() {
         return false;
-    };
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "executionpolicy"
-            | "inputformat"
-            | "outputformat"
-            | "windowstyle"
-            | "version"
-            | "workingdirectory"
-            | "psconsolefile"
-            | "configurationname"
-            | "file"
-    )
+    }
+    if matches!(name.as_str(), "ep" | "wd") {
+        return true;
+    }
+    const NAMES: &[&str] = &[
+        "executionpolicy",
+        "inputformat",
+        "outputformat",
+        "windowstyle",
+        "version",
+        "workingdirectory",
+        "psconsolefile",
+        "configurationname",
+        "file",
+    ];
+    if !NAMES.iter().any(|candidate| candidate.starts_with(&name)) {
+        return false;
+    }
+    !("command".starts_with(&name) || "encodedcommand".starts_with(&name))
 }
 
 fn shell_script(tokens: &[String]) -> Option<String> {
@@ -3402,6 +3450,66 @@ mod tests {
             "pwsh -ea cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
         ];
         for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// A bare word used to end the scan, so `-w hidden` and `-ep bypass`
+    /// hid `-enc`. A colon-glued value is the switch value. `-com` is
+    /// `-Command`. `-co` is not. UTF-8 base64 and `-File` still do not
+    /// match `bash.rm`.
+    #[test]
+    fn powershell_short_switches_still_reach_the_script() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let payload = "cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=";
+        let utf8_rm = "cm0gLXJmIC90bXAveA==";
+        assert_eq!(
+            super::powershell_script(&[
+                "powershell".to_string(),
+                "-com:rm".to_string(),
+                "-rf".to_string(),
+                "/tmp/x".to_string(),
+            ])
+            .as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        let rm = [
+            format!("powershell -w hidden -enc {payload}"),
+            format!("powershell -nop -ep bypass -enc {payload}"),
+            format!("powershell -ex bypass -enc {payload}"),
+            "powershell -com rm -rf /tmp/x".to_string(),
+            format!("powershell -ec:{payload}"),
+            format!("powershell -E:{payload}"),
+            format!("powershell -EncodedCommand:{payload}"),
+            "powershell -com:rm -rf /tmp/x".to_string(),
+            "powershell -com:FOO=1 rm -rf /tmp/x".to_string(),
+            format!("powershell -wd /tmp -enc {payload}"),
+            format!("powershell -w:hidden -enc {payload}"),
+            format!("pwsh --ec:{payload}"),
+            format!("pwsh /ec:{payload}"),
+            format!("powershell -con name -enc {payload}"),
+        ];
+        for command in &rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            format!("powershell -enc {utf8_rm}"),
+            format!("powershell -w hidden -enc {utf8_rm}"),
+            format!("powershell -ec:{utf8_rm}"),
+            "powershell -ep bypass -enc !!!".to_string(),
+            "powershell -w hidden -enc QQ==".to_string(),
+            "powershell -co rm -rf /tmp/x".to_string(),
+            "powershell -File rm -rf /tmp/x".to_string(),
+            "powershell -com:FOO=1".to_string(),
+        ];
+        for command in &neither {
             assert!(
                 matched_action(&policy, "Bash", Some(command)).is_none(),
                 "{command:?}"
