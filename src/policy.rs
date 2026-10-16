@@ -3561,6 +3561,8 @@ mod tests {
             "powershell -com:rm -rf /tmp/x".to_string(),
             "powershell -com:FOO=1 rm -rf /tmp/x".to_string(),
             format!("powershell -wd /tmp -enc {payload}"),
+            "pwsh -o Text -c rm -rf /tmp/x".to_string(),
+            "pwsh -WorkingDirectory /tmp -c rm -rf /tmp/x".to_string(),
             format!("powershell -w:hidden -enc {payload}"),
             format!("pwsh --ec:{payload}"),
             format!("pwsh /ec:{payload}"),
@@ -3678,6 +3680,8 @@ mod tests {
             ("bash +o errexit -c 'rm -rf /tmp/x'", "bash.rm"),
             ("zsh +o errexit -c 'git push'", "git.push"),
             ("bash +o errexit <<'EOF'\nrm -rf /tmp/x\nEOF", "bash.rm"),
+            ("bash --init-file /dev/null -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("bash --rcfile /dev/null -c 'rm -rf /tmp/x'", "bash.rm"),
         ];
         for (command, expected) in commands {
             assert_eq!(
