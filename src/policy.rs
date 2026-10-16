@@ -1957,6 +1957,8 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut helpers = Vec::new();
     let mut external_diffs = Vec::new();
     let mut ssh_commands = Vec::new();
+    let mut difftool_cmds = Vec::new();
+    let mut diff_tools = Vec::new();
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
@@ -1980,6 +1982,15 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
                     if !script.is_empty() {
                         external_diffs.push(script.to_string());
                     }
+                } else if key == "diff.tool" && !value.is_empty() {
+                    diff_tools.push(value.to_string());
+                } else if let Some(rest) = key.strip_prefix("difftool.") {
+                    if let Some(tool) = rest.strip_suffix(".cmd") {
+                        let script = value.strip_prefix('!').unwrap_or(value);
+                        if !tool.is_empty() && !script.is_empty() {
+                            difftool_cmds.push((tool.to_string(), script.to_string()));
+                        }
+                    }
                 } else if let Some(name) = key.strip_prefix("alias.") {
                     aliases.push((name.to_string(), value.to_string()));
                 }
@@ -1990,6 +2001,15 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     let mut scripts = Vec::new();
     if argv.iter().any(|word| word == "diff") {
         scripts.extend(external_diffs);
+    }
+    if argv.iter().any(|word| word == "difftool")
+        && let Some(tool) = selected_difftool(argv, &diff_tools)
+    {
+        for (name, command) in difftool_cmds {
+            if name == tool {
+                scripts.push(command);
+            }
+        }
     }
     if git_uses_ssh(argv) {
         scripts.extend(ssh_commands);
@@ -2013,6 +2033,27 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         }
     }
     scripts
+}
+
+fn selected_difftool(argv: &[String], configured: &[String]) -> Option<String> {
+    let mut index = 0;
+    let mut from_cli = None;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if let Some(name) = token.strip_prefix("--tool=") {
+            if !name.is_empty() {
+                from_cli = Some(name.to_string());
+            }
+        } else if token == "--tool"
+            && let Some(name) = argv.get(index + 1)
+            && !name.is_empty()
+            && !name.starts_with('-')
+        {
+            from_cli = Some(name.clone());
+        }
+        index += 1;
+    }
+    from_cli.or_else(|| configured.last().cloned())
 }
 
 fn git_uses_ssh(argv: &[String]) -> bool {
@@ -3999,6 +4040,14 @@ mod tests {
                 "bash.rm",
             ),
             (
+                "git -c difftool.x.cmd='rm -rf /tmp/x' difftool --tool=x a b",
+                "bash.rm",
+            ),
+            (
+                "git -c difftool.x.cmd='rm -rf /tmp/x' -c diff.tool=x difftool a b",
+                "bash.rm",
+            ),
+            (
                 "git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
                 "bash.rm",
             ),
@@ -4031,6 +4080,15 @@ mod tests {
             )
             .is_none(),
             "an external diff is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c difftool.x.cmd='rm -rf /tmp/x' diff --no-index a b")
+            )
+            .is_none(),
+            "difftool.cmd is not used by diff"
         );
         assert!(
             matched_action(
