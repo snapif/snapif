@@ -661,6 +661,7 @@ fn remote_scripts(argv: &[String]) -> Vec<String> {
         scripts.push(script);
     }
     scripts.extend(ssh_proxy_commands(argv));
+    scripts.extend(rsync_shells(argv));
     for script in [
         flock_command(argv),
         docker_command(argv),
@@ -846,6 +847,34 @@ fn ssh_proxy_commands(argv: &[String]) -> Vec<String> {
             && !command.is_empty()
         {
             commands.push(command.to_string());
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn rsync_shells(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("rsync") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if let Some(command) = token.strip_prefix("--rsh=") {
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+        } else if token == "-e" || token == "--rsh" {
+            index += 1;
+            if let Some(command) = argv.get(index)
+                && !command.is_empty()
+            {
+                commands.push(command.clone());
+            }
         }
         index += 1;
     }
@@ -3116,6 +3145,8 @@ mod tests {
             "su --command='rm -rf /tmp'",
             "ssh -o ProxyCommand='rm -rf /tmp/x' example.com",
             "ssh -oProxyCommand='rm -rf /tmp/x' example.com",
+            "rsync -e 'rm -rf /tmp/x' host:/tmp /tmp",
+            "rsync --rsh='rm -rf /tmp/x' host:/tmp /tmp",
             "parallel rm ::: /tmp/x",
             "parallel -j 4 rm -rf /tmp ::: x",
             "parallel --jobs=4 rm ::: x",
