@@ -278,6 +278,18 @@ A different System One host uses `compatible`. `SNAPIF_BASE_URL` is the origin o
 
 A score legend may be a map of labels or a list of labels in order. Snapif accepts both.
 
+The Getting started `call.json` includes `script`. That field is only for `fake`. A live gate uses a call without it:
+
+```json
+{"action_id":"tag","name":"list_files","args":{},"trusted":{"user_request":"list the workspace"},"untrusted":null}
+```
+
+```bash
+snapif gate --call live.json
+```
+
+The commands below set the backend and the model, then run that file.
+
 ### TypeSafe Jev
 
 `jev-latest` is the model these commands were checked against. `ask`, `gate`, and `snapif test --base-url` all completed. The verdict word depends on the call.
@@ -285,7 +297,7 @@ A score legend may be a map of labels or a list of labels in order. Snapif accep
 ```bash
 SNAPIF_BACKEND=typesafe \
 SNAPIF_MODEL=jev-latest \
-  snapif gate --call call.json
+  snapif gate --call live.json
 ```
 
 ```bash
@@ -305,7 +317,7 @@ Drex on `https://console.nace.ai` uses `compatible`. `drex-v2.0` is the model th
 SNAPIF_BACKEND=compatible \
 SNAPIF_BASE_URL=https://console.nace.ai \
 SNAPIF_MODEL=drex-v2.0 \
-  snapif gate --call call.json
+  snapif gate --call live.json
 ```
 
 ```bash
@@ -327,7 +339,7 @@ ollama pull tev1:0.8b
 SNAPIF_BACKEND=compatible \
 SNAPIF_BASE_URL=http://127.0.0.1:11434 \
 SNAPIF_MODEL=tev1:0.8b \
-  snapif gate --call call.json
+  snapif gate --call live.json
 ```
 
 ```bash
