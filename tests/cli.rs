@@ -172,6 +172,23 @@ fn gate_array_must_be_an_object() {
 }
 
 #[test]
+fn gate_call_file_type_error_is_not_invalid_json() {
+    let path = std::env::temp_dir().join(format!("snapif-gate-type-{}.json", std::process::id()));
+    fs::write(&path, r#"{"action_id":1,"name":"bash","args":{}}"#).expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("call file:"), "{err}");
+    assert!(!err.contains("invalid json"), "{err}");
+}
+
+#[test]
 fn ask_array_is_not_ok() {
     let path = std::env::temp_dir().join(format!("snapif-array-{}.json", std::process::id()));
     fs::write(&path, "[]").expect("write");
@@ -2025,6 +2042,33 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
         "{array_out}"
     );
     assert!(array_out.contains("invalid json"), "{array_out}");
+}
+
+#[test]
+fn hook_denies_a_script_that_is_not_an_object_or_not_a_score() {
+    let text = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":"rm"}"#,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert_eq!(text.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("script must be an object"), "{stdout}");
+
+    let bad = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":{"confidence":"high"}}"#,
+        false,
+    );
+    let bad_out = String::from_utf8_lossy(&bad.stdout);
+    assert!(
+        bad_out.contains("\"permissionDecision\":\"deny\""),
+        "{bad_out}"
+    );
+    assert!(bad_out.contains("script:"), "{bad_out}");
+    assert!(!bad_out.contains("invalid json"), "{bad_out}");
 }
 
 #[test]

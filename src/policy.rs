@@ -395,8 +395,23 @@ fn check_action(
 /// `2>/dev/null rm` match. `echo rm>/tmp/x` does not, because `rm` is
 /// only an argument. `2&>file rm` runs `2`, not `rm`.
 /// `f() { rm; }; f`
-/// matches. The same definition with no call does not. `cmd /c rm` and
-/// `powershell -Command rm` match. `rmdir`, `git push-all`, `echo rm`,
+/// matches. The same definition with no call does not. `cmd /c rm`,
+/// `cmd -c rm`, and `powershell -Command rm` match. `powershell rm`
+/// matches, because Windows PowerShell defaults a bare word to
+/// `-Command`. `pwsh rm` does not: that host defaults the word to
+/// `-File`. `pwsh -i -c rm` matches, because `-i` takes no value.
+/// `powershell -i xml -c rm` matches, and `xml` is the input format.
+/// `pwsh -cwa` joins the command the same way as `-Command`. `-c`
+/// stays `-Command`. Words after `-File` are script arguments, so
+/// `powershell -File script.ps1 -Command rm` does not match, and the
+/// file is not read. `powershell -EncodedCommand`, `-E`,
+/// and `-EC` match once that value is decoded from UTF-16LE base64.
+/// `-com` is that command. `-co` is not. On `powershell`, bare words
+/// after that switch are still the command. A colon glues the value
+/// (`-ec:<base64>`, `-com:rm`). A switch that takes one value is
+/// skipped, including `-w hidden`, `-ep bypass`, and `-wd`. A value
+/// that is not base64, or not UTF-16LE, is not the script.
+/// `rmdir`, `git push-all`, `echo rm`,
 /// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
 /// `rm.`, and `git.exe.exe` do not match.
 pub fn matched_action<'a>(
@@ -473,14 +488,21 @@ fn consider_segment<'a>(
     }
     let child_script = shell_script(&argv)
         .or_else(|| cmd_script(&argv))
-        .or_else(|| powershell_script(&argv));
+        .or_else(|| powershell_script(&argv))
+        .or_else(|| su_script(&argv));
     if let Some(script) = child_script {
-        let mut child = Functions::new();
-        prefer(
-            policy,
-            best,
-            matched_in(policy, tool_name, &script, depth + 1, &mut child),
-        );
+        // `pwsh -Command -` reads the heredoc. The dash itself is not a command.
+        // `bash -c -` is the script "-", not stdin.
+        if is_stdin_script(&script) && is_powershell_base(argv.first().map(String::as_str)) {
+            scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
+        } else {
+            let mut child = Functions::new();
+            prefer(
+                policy,
+                best,
+                matched_in(policy, tool_name, &script, depth + 1, &mut child),
+            );
+        }
     } else if let Some(script) = eval_script(&argv) {
         prefer(
             policy,
@@ -504,6 +526,10 @@ fn consider_segment<'a>(
         scan_isolated(policy, tool_name, &scripts, depth, best);
         let remotes = remote_scripts(&argv);
         scan_isolated(policy, tool_name, &remotes, depth, best);
+        let arms = case_arm_scripts(&argv);
+        scan_isolated(policy, tool_name, &arms, depth, best);
+        let aliases = git_alias_scripts(&argv);
+        scan_isolated(policy, tool_name, &aliases, depth, best);
         if shell_reads_stdin(&argv) {
             scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
         }
@@ -630,8 +656,14 @@ fn destructive_rm_action<'a>(policy: &'a Policy, tool_name: &str) -> Option<&'a 
 }
 
 fn remote_scripts(argv: &[String]) -> Vec<String> {
-    [
-        ssh_remote_command(argv),
+    let mut scripts = Vec::new();
+    if let Some(script) = ssh_remote_command(argv) {
+        scripts.push(script);
+    }
+    scripts.extend(ssh_proxy_commands(argv));
+    scripts.extend(rsync_shells(argv));
+    scripts.extend(ncat_commands(argv));
+    for script in [
         flock_command(argv),
         docker_command(argv),
         parallel_command(argv),
@@ -642,7 +674,10 @@ fn remote_scripts(argv: &[String]) -> Vec<String> {
     ]
     .into_iter()
     .flatten()
-    .collect()
+    {
+        scripts.push(script);
+    }
+    scripts
 }
 
 fn find_exec_commands(argv: &[String]) -> Vec<String> {
@@ -789,6 +824,101 @@ fn ssh_remote_command(argv: &[String]) -> Option<String> {
     Some(argv[index..].join(" "))
 }
 
+fn is_openssh_client(name: &str) -> bool {
+    let base = command_basename(name);
+    base.eq_ignore_ascii_case("ssh")
+        || base.eq_ignore_ascii_case("scp")
+        || base.eq_ignore_ascii_case("sftp")
+}
+
+fn ssh_proxy_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !is_openssh_client(first) {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        let spec = if token == "-o" {
+            index += 1;
+            argv.get(index).map(String::as_str)
+        } else {
+            token.strip_prefix("-o")
+        };
+        if let Some(command) = spec.and_then(|spec| spec.strip_prefix("ProxyCommand="))
+            && !command.is_empty()
+        {
+            commands.push(command.to_string());
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn rsync_shells(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("rsync") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if let Some(command) = token.strip_prefix("--rsh=") {
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+        } else if token == "-e" || token == "--rsh" {
+            index += 1;
+            if let Some(command) = argv.get(index)
+                && !command.is_empty()
+            {
+                commands.push(command.clone());
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn ncat_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("ncat") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if let Some(command) = token
+            .strip_prefix("--exec=")
+            .or_else(|| token.strip_prefix("--sh-exec="))
+            && !command.is_empty()
+        {
+            commands.push(command.to_string());
+        } else if matches!(token, "-e" | "--exec" | "-c" | "--sh-exec") {
+            index += 1;
+            if let Some(command) = argv.get(index)
+                && !command.is_empty()
+            {
+                commands.push(command.clone());
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
 fn ssh_value_is_glued(token: &str) -> bool {
     let flags = token.strip_prefix('-').unwrap_or(token);
     flags.len() > 1 && !flags.starts_with('-')
@@ -893,11 +1023,25 @@ fn docker_command(argv: &[String]) -> Option<String> {
         return None;
     }
     let mut index = 2;
+    let mut entrypoint = None;
     while index < argv.len() {
         let token = &argv[index];
         if token == "--" {
             index += 1;
             break;
+        }
+        if let Some(value) = token.strip_prefix("--entrypoint=") {
+            entrypoint = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if token == "--entrypoint" {
+            index += 1;
+            if let Some(value) = argv.get(index) {
+                entrypoint = Some(value.clone());
+                index += 1;
+            }
+            continue;
         }
         if token.starts_with('-') {
             let takes_next = docker_opt_takes_value(token) && !token.contains('=');
@@ -913,10 +1057,21 @@ fn docker_command(argv: &[String]) -> Option<String> {
         return None;
     }
     index += 1;
-    if index >= argv.len() {
+    let tail = if index < argv.len() {
+        argv[index..].join(" ")
+    } else {
+        String::new()
+    };
+    if let Some(bin) = entrypoint {
+        if tail.is_empty() {
+            return Some(bin);
+        }
+        return Some(format!("{bin} {tail}"));
+    }
+    if tail.is_empty() {
         return None;
     }
-    Some(argv[index..].join(" "))
+    Some(tail)
 }
 
 fn docker_opt_takes_value(token: &str) -> bool {
@@ -1107,6 +1262,14 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
     while index < tokens.len() {
         if is_assignment(&tokens[index]) {
             index += 1;
+            continue;
+        }
+        // `coproc rm` and `coproc name { rm; }` both run rm.
+        if command_basename(&tokens[index]).eq_ignore_ascii_case("coproc") {
+            index += 1;
+            if index + 1 < tokens.len() && tokens[index] != "{" && tokens[index + 1] == "{" {
+                index += 1;
+            }
             continue;
         }
         // `for rm in a` stays `for`. These words are not the command.
@@ -1473,8 +1636,7 @@ fn cmd_script(argv: &[String]) -> Option<String> {
     }
     let mut index = 1;
     while index < argv.len() {
-        let token = argv[index].as_str();
-        if token.eq_ignore_ascii_case("/c") || token.eq_ignore_ascii_case("/k") {
+        if is_cmd_run_switch(&argv[index]) {
             let script = argv[index + 1..].join(" ");
             return if script.is_empty() {
                 None
@@ -1487,6 +1649,26 @@ fn cmd_script(argv: &[String]) -> Option<String> {
     None
 }
 
+// `/c` and `/k` run the rest of the line. `cmd` accepts one leading
+// `-` for those two letters too. `--c` and `-command` do not.
+fn is_cmd_run_switch(token: &str) -> bool {
+    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
+        return false;
+    };
+    if name.starts_with('-') || name.starts_with('/') {
+        return false;
+    }
+    name.eq_ignore_ascii_case("c") || name.eq_ignore_ascii_case("k")
+}
+
+fn is_powershell_base(name: Option<&str>) -> bool {
+    let Some(name) = name else {
+        return false;
+    };
+    let base = command_basename(name);
+    base.eq_ignore_ascii_case("powershell") || base.eq_ignore_ascii_case("pwsh")
+}
+
 fn powershell_script(argv: &[String]) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
@@ -1495,54 +1677,454 @@ fn powershell_script(argv: &[String]) -> Option<String> {
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
-        if is_ps_command_switch(token) {
-            let script = argv[index + 1..].join(" ");
-            return if script.is_empty() {
-                None
-            } else {
-                Some(script)
-            };
+        // A bare word is not a switch. Windows PowerShell defaults it
+        // to -Command. pwsh defaults it to -File, which is not read.
+        // `hidden` after `-w` is the switch value, so it is not seen here.
+        let Some((name, inline)) = ps_switch_parts(token) else {
+            if base.eq_ignore_ascii_case("powershell") {
+                return ps_command_script(None, &argv[index..]);
+            }
+            return None;
+        };
+        // Command before encoded: `-c` is `-Command`, and it is also a
+        // prefix of `-EncodedCommand`. `-cwa` is `-CommandWithArgs`.
+        if is_ps_command_name(name) || is_ps_command_with_args_name(name) {
+            return ps_command_script(inline, &argv[index + 1..]);
         }
-        if ps_switch_takes_value(token) {
+        // One value. Later words are not part of this script, unlike `-Command`.
+        if is_ps_encoded_command_name(name) {
+            let encoded = match inline {
+                Some(value) => value,
+                None => argv.get(index + 1)?.as_str(),
+            };
+            return decode_ps_encoded_script(encoded);
+        }
+        // Words after -File belong to the script. Do not read the file,
+        // and do not treat a later -Command as the engine command.
+        if is_ps_file_name(name) {
+            return None;
+        }
+        if ps_name_takes_value(name, base) {
             index += 1;
-            if index < argv.len() {
+            // `-w:hidden` already holds the value. Do not also skip `-enc`.
+            if inline.is_none() && index < argv.len() {
                 index += 1;
             }
             continue;
         }
-        if token.starts_with('-') || token.starts_with('/') {
-            index += 1;
-            continue;
-        }
-        return None;
+        index += 1;
     }
     None
 }
 
-fn is_ps_command_switch(token: &str) -> bool {
-    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
-        return false;
+// The first `:` glues the value (`-ec:<base64>`, `-com:rm`). `--` and
+// `/` are the same prefix as `-`.
+fn ps_switch_parts(token: &str) -> Option<(&str, Option<&str>)> {
+    if !token.starts_with('-') && !token.starts_with('/') {
+        return None;
+    }
+    let (head, inline) = match token.split_once(':') {
+        Some((head, value)) => (head, Some(value)),
+        None => (token, None),
     };
-    name.eq_ignore_ascii_case("command") || name.eq_ignore_ascii_case("c")
+    Some((ps_switch_name(head)?, inline))
 }
 
-fn ps_switch_takes_value(token: &str) -> bool {
-    let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
+fn ps_switch_name(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("--")
+        .or_else(|| token.strip_prefix('-'))
+        .or_else(|| token.strip_prefix('/'))
+}
+
+// `-c` is the alias. `configurationname` starts with `con`, so `-com`
+// is only `-Command`. `-co` matches both and is not the command.
+fn is_ps_command_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name == "c" {
+        return true;
+    }
+    name.len() >= 3 && "command".starts_with(&name)
+}
+
+// `-cwa` is the alias. A prefix of `commandwithargs` of at least three
+// letters is the same switch. `-c` and `-com` stay `-Command`.
+fn is_ps_command_with_args_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name == "cwa" {
+        return true;
+    }
+    if is_ps_command_name(&name) {
         return false;
+    }
+    name.len() >= 3 && "commandwithargs".starts_with(&name)
+}
+
+fn ps_command_script(inline: Option<&str>, rest: &[String]) -> Option<String> {
+    let inline = inline.filter(|text| !text.is_empty());
+    if inline.is_none() && rest.is_empty() {
+        return None;
+    }
+    let mut script = String::new();
+    if let Some(inline) = inline {
+        script.push_str(inline);
+    }
+    for word in rest {
+        if !script.is_empty() {
+            script.push(' ');
+        }
+        script.push_str(word);
+    }
+    Some(script)
+}
+
+// pwsh accepts `-e` and `-enc` as prefixes of `-EncodedCommand`, plus the
+// alias `-ec`. `-ec` is not a prefix: `encodedcommand` starts with `en`.
+fn is_ps_encoded_command_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.is_empty() && ("encodedcommand".starts_with(&name) || name == "ec")
+}
+
+// UTF-16LE base64, same as pwsh `-EncodedCommand`. Space, tab, CR, and LF
+// are ignored. A value that is not base64, or not UTF-16LE, is not a script.
+fn decode_ps_encoded_script(value: &str) -> Option<String> {
+    let bytes = decode_standard_base64(value)?;
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let script = String::from_utf16(&units).ok()?;
+    if script.is_empty() {
+        None
+    } else {
+        Some(script)
+    }
+}
+
+fn decode_standard_base64(value: &str) -> Option<Vec<u8>> {
+    let filtered: Vec<u8> = value
+        .bytes()
+        .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .collect();
+    if filtered.is_empty() || !filtered.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(filtered.len() / 4 * 3);
+    let quanta = filtered.len() / 4;
+    for (index, chunk) in filtered.chunks_exact(4).enumerate() {
+        let Ok(chunk) = <[u8; 4]>::try_from(chunk) else {
+            return None;
+        };
+        push_base64_quantum(chunk, index + 1 == quanta, &mut out)?;
+    }
+    Some(out)
+}
+
+fn push_base64_quantum(chunk: [u8; 4], allow_pad: bool, out: &mut Vec<u8>) -> Option<()> {
+    let pad = if chunk[2] == b'=' {
+        if chunk[3] != b'=' {
+            return None;
+        }
+        2
+    } else if chunk[3] == b'=' {
+        1
+    } else {
+        0
     };
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "executionpolicy"
-            | "inputformat"
-            | "outputformat"
-            | "windowstyle"
-            | "version"
-            | "workingdirectory"
-            | "psconsolefile"
-            | "configurationname"
-            | "encodedcommand"
-            | "file"
-    )
+    if pad > 0 && !allow_pad {
+        return None;
+    }
+    if chunk[0] == b'=' || chunk[1] == b'=' {
+        return None;
+    }
+    let first = b64_sextet(chunk[0])?;
+    let second = b64_sextet(chunk[1])?;
+    out.push((first << 2) | (second >> 4));
+    if pad == 2 {
+        return Some(());
+    }
+    let third = b64_sextet(chunk[2])?;
+    out.push(((second & 0x0f) << 4) | (third >> 2));
+    if pad == 1 {
+        return Some(());
+    }
+    let fourth = b64_sextet(chunk[3])?;
+    out.push(((third & 0x03) << 6) | fourth);
+    Some(())
+}
+
+fn b64_sextet(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
+// `-f` through `-file`. Later tokens are script arguments, so the scan
+// stops. The file is not read.
+fn is_ps_file_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.is_empty() && "file".starts_with(&name)
+}
+
+// One argument, then the scan continues. A non-empty prefix of any name
+// below counts. `-w` prefixes both `windowstyle` and `workingdirectory`;
+// both take a value, so one word is skipped. `-ep` and `-wd` are not
+// leading prefixes (`executionpolicy` starts with `ex`, `workingdirectory`
+// with `wo`). Called after the command, encoded, and file checks.
+// `-c` and `-e` also prefix `configurationname` and `executionpolicy`,
+// and `-co` prefixes both `command` and `configurationname`, so those
+// are not this kind of switch. pwsh `-i` is `-Interactive` and takes
+// no value. Windows PowerShell `-i` is still `-InputFormat`.
+fn ps_name_takes_value(name: &str, base: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    if name == "i" && base.eq_ignore_ascii_case("pwsh") {
+        return false;
+    }
+    if matches!(name.as_str(), "ep" | "wd") {
+        return true;
+    }
+    // pwsh -SettingsFile takes a path. `-set` is long enough not to be `-s`.
+    if name.len() >= 3 && "settingsfile".starts_with(&name) {
+        return true;
+    }
+    const NAMES: &[&str] = &[
+        "executionpolicy",
+        "inputformat",
+        "outputformat",
+        "windowstyle",
+        "version",
+        "workingdirectory",
+        "psconsolefile",
+        "configurationname",
+    ];
+    if !NAMES.iter().any(|candidate| candidate.starts_with(&name)) {
+        return false;
+    }
+    !("command".starts_with(&name) || "encodedcommand".starts_with(&name))
+}
+
+fn case_arm_scripts(tokens: &[String]) -> Vec<String> {
+    let Some(first) = tokens.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("case") {
+        return Vec::new();
+    }
+    let mut scripts = Vec::new();
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        let starts_arm = token.ends_with(')');
+        if !starts_arm {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let start = index;
+        while index < tokens.len() {
+            let word = tokens[index].as_str();
+            if matches!(word, ";;" | ";&" | ";;&" | "esac") {
+                break;
+            }
+            index += 1;
+        }
+        if start < index {
+            scripts.push(tokens[start..index].join(" "));
+        }
+    }
+    scripts
+}
+
+fn git_alias_scripts(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("git") {
+        return Vec::new();
+    }
+    let mut aliases = Vec::new();
+    let mut helpers = Vec::new();
+    let mut external_diffs = Vec::new();
+    let mut ssh_commands = Vec::new();
+    let mut difftool_cmds = Vec::new();
+    let mut diff_tools = Vec::new();
+    let mut filter_cleans = Vec::new();
+    let mut filter_smudges = Vec::new();
+    let mut mergetool_cmds = Vec::new();
+    let mut merge_tools = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        if token == "-c" || token == "--config" {
+            index += 1;
+            if let Some((key, value)) = argv.get(index).and_then(|spec| spec.split_once('=')) {
+                if key == "credential.helper" {
+                    if let Some(shell) = value.strip_prefix('!') {
+                        helpers.push(shell.to_string());
+                    }
+                } else if key == "core.sshCommand" {
+                    let script = value.strip_prefix('!').unwrap_or(value);
+                    if !script.is_empty() {
+                        ssh_commands.push(script.to_string());
+                    }
+                } else if key == "diff.external" {
+                    let script = value.strip_prefix('!').unwrap_or(value);
+                    if !script.is_empty() {
+                        external_diffs.push(script.to_string());
+                    }
+                } else if key == "diff.tool" && !value.is_empty() {
+                    diff_tools.push(value.to_string());
+                } else if key == "merge.tool" && !value.is_empty() {
+                    merge_tools.push(value.to_string());
+                } else if let Some(rest) = key.strip_prefix("difftool.") {
+                    if let Some(tool) = rest.strip_suffix(".cmd") {
+                        let script = value.strip_prefix('!').unwrap_or(value);
+                        if !tool.is_empty() && !script.is_empty() {
+                            difftool_cmds.push((tool.to_string(), script.to_string()));
+                        }
+                    }
+                } else if let Some(rest) = key.strip_prefix("mergetool.") {
+                    if let Some(tool) = rest.strip_suffix(".cmd") {
+                        let script = value.strip_prefix('!').unwrap_or(value);
+                        if !tool.is_empty() && !script.is_empty() {
+                            mergetool_cmds.push((tool.to_string(), script.to_string()));
+                        }
+                    }
+                } else if let Some(rest) = key.strip_prefix("filter.") {
+                    let script = value.strip_prefix('!').unwrap_or(value);
+                    if rest.ends_with(".clean") && !script.is_empty() {
+                        filter_cleans.push(script.to_string());
+                    } else if rest.ends_with(".smudge") && !script.is_empty() {
+                        filter_smudges.push(script.to_string());
+                    }
+                } else if let Some(name) = key.strip_prefix("alias.") {
+                    aliases.push((name.to_string(), value.to_string()));
+                }
+            }
+        }
+        index += 1;
+    }
+    let mut scripts = Vec::new();
+    if argv.iter().any(|word| word == "diff") {
+        scripts.extend(external_diffs);
+    }
+    if argv.iter().any(|word| word == "add") {
+        scripts.extend(filter_cleans);
+    }
+    if argv.iter().any(|word| word == "checkout") {
+        scripts.extend(filter_smudges);
+    }
+    if argv.iter().any(|word| word == "difftool")
+        && let Some(tool) = selected_difftool(argv, &diff_tools)
+    {
+        for (name, command) in difftool_cmds {
+            if name == tool {
+                scripts.push(command);
+            }
+        }
+    }
+    if argv.iter().any(|word| word == "mergetool")
+        && let Some(tool) = selected_difftool(argv, &merge_tools)
+    {
+        for (name, command) in mergetool_cmds {
+            if name == tool {
+                scripts.push(command);
+            }
+        }
+    }
+    if git_uses_ssh(argv) {
+        scripts.extend(ssh_commands);
+    }
+    if argv.iter().any(|word| word == "credential") {
+        for shell in helpers {
+            if !shell.is_empty() {
+                scripts.push(shell);
+            }
+        }
+    }
+    for (name, value) in aliases {
+        let invoked = argv.iter().any(|word| word == &name);
+        if !invoked {
+            continue;
+        }
+        if let Some(shell) = value.strip_prefix('!') {
+            scripts.push(shell.to_string());
+        } else if !value.is_empty() {
+            scripts.push(format!("git {value}"));
+        }
+    }
+    scripts
+}
+
+fn selected_difftool(argv: &[String], configured: &[String]) -> Option<String> {
+    let mut index = 0;
+    let mut from_cli = None;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if let Some(name) = token.strip_prefix("--tool=") {
+            if !name.is_empty() {
+                from_cli = Some(name.to_string());
+            }
+        } else if token == "--tool"
+            && let Some(name) = argv.get(index + 1)
+            && !name.is_empty()
+            && !name.starts_with('-')
+        {
+            from_cli = Some(name.clone());
+        }
+        index += 1;
+    }
+    from_cli.or_else(|| configured.last().cloned())
+}
+
+fn git_uses_ssh(argv: &[String]) -> bool {
+    argv.iter().any(|word| {
+        matches!(
+            word.as_str(),
+            "ls-remote" | "fetch" | "pull" | "push" | "clone"
+        ) || word.contains("ssh://")
+            || word.starts_with("git@")
+    })
+}
+
+fn fish_inline_script(token: &str) -> Option<String> {
+    token
+        .strip_prefix("--command=")
+        .or_else(|| token.strip_prefix("--init-command="))
+        .map(str::to_string)
+}
+
+fn su_script(tokens: &[String]) -> Option<String> {
+    let base = command_basename(tokens.first()?);
+    if !base.eq_ignore_ascii_case("su") {
+        return None;
+    }
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        if let Some(script) = token.strip_prefix("--command=") {
+            return Some(script.to_string());
+        }
+        if token == "-c" || token == "--command" {
+            return tokens.get(index + 1).cloned();
+        }
+        index += 1;
+    }
+    None
 }
 
 fn shell_script(tokens: &[String]) -> Option<String> {
@@ -1563,10 +2145,19 @@ fn shell_script(tokens: &[String]) -> Option<String> {
             }
             continue;
         }
+        if base.eq_ignore_ascii_case("fish") {
+            if let Some(script) = fish_inline_script(token) {
+                return Some(script);
+            }
+            if token == "-C" || token == "--init-command" {
+                return tokens.get(index + 1).cloned();
+            }
+        }
         if let Some(script) = c_argument(token, tokens.get(index + 1)) {
             return Some(script);
         }
-        if token.starts_with('-') {
+        // `+e` and `+o errexit` still run `-c`. A plus flag is not a path.
+        if token.starts_with('-') || token.starts_with('+') {
             index += 1;
             continue;
         }
@@ -1577,8 +2168,9 @@ fn shell_script(tokens: &[String]) -> Option<String> {
 
 fn shell_opt_takes_value(token: &str) -> bool {
     let name = token.strip_prefix("--").unwrap_or(token);
-    // Separate `-O` and `+O` take the next word. Glued `-Oextglob` does not.
-    matches!(name, "-o" | "-O" | "+O" | "rcfile" | "init-file")
+    // Separate `-o`, `+o`, `-O`, and `+O` take the next word.
+    // Glued `-Oextglob` does not.
+    matches!(name, "-o" | "+o" | "-O" | "+O" | "rcfile" | "init-file")
 }
 
 fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
@@ -2700,6 +3292,19 @@ mod tests {
             "docker exec -it box rm -rf /tmp",
             "docker exec -u root box rm -rf /tmp",
             "docker run --rm ubuntu rm -rf /tmp",
+            "docker run --entrypoint=/bin/rm alpine -rf /tmp",
+            "docker run --entrypoint /bin/rm alpine -rf /tmp",
+            "su -c 'rm -rf /tmp'",
+            "su --command='rm -rf /tmp'",
+            "ssh -o ProxyCommand='rm -rf /tmp/x' example.com",
+            "scp -o ProxyCommand='rm -rf /tmp/x' host:/tmp /tmp",
+            "sftp -o ProxyCommand='rm -rf /tmp/x' host",
+            "ssh -oProxyCommand='rm -rf /tmp/x' example.com",
+            "rsync -e 'rm -rf /tmp/x' host:/tmp /tmp",
+            "rsync --rsh='rm -rf /tmp/x' host:/tmp /tmp",
+            "ncat --exec 'rm -rf /tmp/x' host 80",
+            "ncat -c 'rm -rf /tmp/x' host 80",
+            "ncat --sh-exec='rm -rf /tmp/x' host 80",
             "parallel rm ::: /tmp/x",
             "parallel -j 4 rm -rf /tmp ::: x",
             "parallel --jobs=4 rm ::: x",
@@ -3222,5 +3827,367 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    /// `-EncodedCommand` is UTF-16LE base64. These match `bash.rm` only
+    /// after that decode. Raw `rm` words, UTF-8 base64 of that text, and
+    /// any value that is not UTF-16LE `rm` stay unmatched.
+    #[test]
+    fn powershell_encoded_command_is_the_script() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let payload = "cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=";
+        assert_eq!(
+            super::decode_ps_encoded_script(payload).as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        // Same bytes with a space, a non-zero pad bit, and a `+` sextet.
+        assert_eq!(
+            super::decode_ps_encoded_script("cgBt ACAALQByAGYAIAAvAHQAbQBwAC8AeAA=").as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        assert_eq!(
+            super::decode_ps_encoded_script("cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAB=").as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        assert_eq!(
+            super::decode_ps_encoded_script("cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA+AA==").as_deref(),
+            Some("rm -rf /tmp/x>")
+        );
+        let rm = [
+            "powershell -EncodedCommand cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "powershell.exe -EncodedCommand cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -EC cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "powershell -E cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -Enc cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -encoded cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh --ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh /ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -NoProfile -ExecutionPolicy Bypass -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -ec 'cgBt ACAALQByAGYAIAAvAHQAbQBwAC8AeAA='",
+            "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAB=",
+            "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA+AA==",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        // UTF-8 base64 of `rm -rf /tmp/x`, not UTF-16LE. A byte-wise decode
+        // would match `bash.rm` by accident.
+        let utf8_rm = "cm0gLXJmIC90bXAveA==";
+        let echo_rm = "ZQBjAGgAbwAgAHIAbQA=";
+        assert!(super::decode_ps_encoded_script(utf8_rm).is_none());
+        assert!(super::decode_ps_encoded_script("QQ==").is_none());
+        assert!(super::decode_ps_encoded_script("!!!").is_none());
+        assert!(super::decode_ps_encoded_script("ANg=").is_none());
+        assert_eq!(
+            super::decode_ps_encoded_script(echo_rm).as_deref(),
+            Some("echo rm")
+        );
+        // The decoded text uses the same matcher as `-Command`. `&&`
+        // keeps the stricter `bash.rm` row, which is what the plain
+        // script selects.
+        let compound = "git push && rm -rf /tmp/x";
+        let compound_encoded =
+            "ZwBpAHQAIABwAHUAcwBoACAAJgAmACAAcgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=";
+        assert_eq!(
+            super::decode_ps_encoded_script(compound_encoded).as_deref(),
+            Some(compound)
+        );
+        let wrapped = format!("powershell -EncodedCommand {compound_encoded}");
+        let as_command = format!("pwsh -Command {compound}");
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&wrapped)).map(|id| id.0.as_str()),
+            matched_action(&policy, "Bash", Some(&as_command)).map(|id| id.0.as_str()),
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&wrapped)).map(|id| id.0.as_str()),
+            Some("bash.rm")
+        );
+        let neither = [
+            "powershell -EncodedCommand rm -rf /tmp/x",
+            "powershell -EncodedCommand 'rm -rf /tmp/x'",
+            "pwsh -ec cm0gLXJmIC90bXAveA==",
+            "pwsh -E QQ==",
+            "pwsh -ec ANg=",
+            "powershell -EncodedCommand !!!",
+            "powershell -EncodedCommand",
+            "pwsh -ec ZQBjAGgAbwAgAHIAbQA=",
+            "pwsh -encodedarguments cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -ea cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// A bare word used to end the scan, so `-w hidden` and `-ep bypass`
+    /// hid `-enc`. A colon-glued value is the switch value. `-com` is
+    /// `-Command`. `-co` is not. On `pwsh` the words after `-co` are
+    /// not a command script. UTF-8 base64 and `-File` still do not
+    /// match `bash.rm`.
+    #[test]
+    fn powershell_short_switches_still_reach_the_script() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let payload = "cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=";
+        let utf8_rm = "cm0gLXJmIC90bXAveA==";
+        assert_eq!(
+            super::powershell_script(&[
+                "powershell".to_string(),
+                "-com:rm".to_string(),
+                "-rf".to_string(),
+                "/tmp/x".to_string(),
+            ])
+            .as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        let rm = [
+            format!("powershell -w hidden -enc {payload}"),
+            format!("powershell -nop -ep bypass -enc {payload}"),
+            format!("powershell -ex bypass -enc {payload}"),
+            "powershell -com rm -rf /tmp/x".to_string(),
+            format!("powershell -ec:{payload}"),
+            format!("powershell -E:{payload}"),
+            format!("powershell -EncodedCommand:{payload}"),
+            "powershell -com:rm -rf /tmp/x".to_string(),
+            "powershell -com:FOO=1 rm -rf /tmp/x".to_string(),
+            format!("powershell -wd /tmp -enc {payload}"),
+            "pwsh -o Text -c rm -rf /tmp/x".to_string(),
+            "pwsh -WorkingDirectory /tmp -c rm -rf /tmp/x".to_string(),
+            format!("powershell -w:hidden -enc {payload}"),
+            format!("pwsh --ec:{payload}"),
+            format!("pwsh /ec:{payload}"),
+            format!("powershell -con name -enc {payload}"),
+        ];
+        for command in &rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            format!("powershell -enc {utf8_rm}"),
+            format!("powershell -w hidden -enc {utf8_rm}"),
+            format!("powershell -ec:{utf8_rm}"),
+            "powershell -ep bypass -enc !!!".to_string(),
+            "powershell -w hidden -enc QQ==".to_string(),
+            "pwsh -co rm -rf /tmp/x".to_string(),
+            "powershell -File rm -rf /tmp/x".to_string(),
+            "powershell -com:FOO=1".to_string(),
+        ];
+        for command in &neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// `pwsh -i` takes no value, so `-c` still runs. Windows PowerShell
+    /// `-i` is `-InputFormat`. A bare word on `powershell` is the
+    /// command. `pwsh` leaves that word unmatched. `cmd -c` is `/c`.
+    /// `-cwa` joins like `-Command`, and `-c` stays `-Command`. Words
+    /// after `-File` are not the engine command.
+    #[test]
+    fn pwsh_i_bare_command_and_cmd_dash_c_match() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "pwsh -i -c rm -rf /tmp/x",
+            "powershell -i xml -c rm -rf /tmp/x",
+            "powershell rm -rf /tmp/x",
+            "powershell -co rm -rf /tmp/x",
+            "pwsh -cwa rm -rf /tmp/x",
+            "pwsh -cwa 'rm -rf /tmp/x'",
+            "pwsh -commandw rm -rf /tmp/x",
+            "pwsh -c rm -rf /tmp/x",
+            "pwsh -Command rm -rf /tmp/x",
+            "cmd -c rm -rf /tmp/x",
+            "cmd -k rm -rf /tmp/x",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "pwsh rm -rf /tmp/x",
+            "powershell -File script.ps1 -Command rm -rf /tmp/x",
+            "pwsh -f script.ps1 -c rm -rf /tmp/x",
+            "pwsh -cw rm -rf /tmp/x",
+            "cmd -command rm -rf /tmp/x",
+            "cmd --c rm -rf /tmp/x",
+            "cmd -x rm -rf /tmp/x",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// pwsh -SettingsFile takes a path, then still runs -Command.
+    /// `pwsh -Command -` runs the heredoc, not the dash.
+    #[test]
+    fn powershell_settings_file_and_stdin_heredoc_match() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "pwsh -SettingsFile C:\\x.json -c rm -rf /tmp/x",
+            "pwsh -set C:\\x.json -Command rm -rf /tmp/x",
+            "pwsh -NoProfile -Command - <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "powershell -c - <<'EOF'\nrm -rf /tmp/x\nEOF",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("bash -c - <<'EOF'\nrm -rf /tmp/x\nEOF")
+            )
+            .is_none(),
+            "bash -c does not read the heredoc"
+        );
+    }
+
+    /// `bash +e -c` and `bash +o errexit -c` still run the script.
+    /// A plus flag used to end the scan, so `rm` missed `bash.rm`.
+    #[test]
+    fn shell_plus_options_still_run_the_script() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let commands = [
+            ("bash +e -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("bash +ex -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("sh +e -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("zsh +e -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("bash +o errexit -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("zsh +o errexit -c 'git push'", "git.push"),
+            ("bash +o errexit <<'EOF'\nrm -rf /tmp/x\nEOF", "bash.rm"),
+            ("bash --init-file /dev/null -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("bash --rcfile /dev/null -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("case x in x) rm -rf /tmp/x ;; esac", "bash.rm"),
+            ("coproc { rm -rf /tmp/x; }", "bash.rm"),
+            ("coproc rm -rf /tmp/x", "bash.rm"),
+            ("fish --command='rm -rf /tmp/x'", "bash.rm"),
+            ("fish -C 'rm -rf /tmp/x'", "bash.rm"),
+            ("fish --init-command='rm -rf /tmp/x'", "bash.rm"),
+            ("git -c 'alias.p=!rm -rf /tmp/x' p", "bash.rm"),
+            ("git -c alias.p=push p", "git.push"),
+            (
+                "git -c credential.helper='!rm -rf /tmp/x' credential fill",
+                "bash.rm",
+            ),
+            (
+                "git -c diff.external='rm -rf /tmp/x' diff --no-index a b",
+                "bash.rm",
+            ),
+            (
+                "git -c difftool.x.cmd='rm -rf /tmp/x' difftool --tool=x a b",
+                "bash.rm",
+            ),
+            (
+                "git -c difftool.x.cmd='rm -rf /tmp/x' -c diff.tool=x difftool a b",
+                "bash.rm",
+            ),
+            (
+                "git -c mergetool.x.cmd='rm -rf /tmp/x' mergetool --tool=x file.txt",
+                "bash.rm",
+            ),
+            (
+                "git -c mergetool.x.cmd='rm -rf /tmp/x' -c merge.tool=x mergetool file.txt",
+                "bash.rm",
+            ),
+            (
+                "git -c filter.probe.clean='rm -rf /tmp/x' add file.txt",
+                "bash.rm",
+            ),
+            (
+                "git -c filter.probe.smudge='rm -rf /tmp/x' checkout -- file.txt",
+                "bash.rm",
+            ),
+            (
+                "git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
+                "bash.rm",
+            ),
+        ];
+        for (command, expected) in commands {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|action| action.0.as_str()),
+                Some(expected),
+                "{command:?}"
+            );
+        }
+        assert!(
+            matched_action(&policy, "Bash", Some("git -c alias.p=push status")).is_none(),
+            "an alias that is not invoked does not match"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c credential.helper='!rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "a credential helper is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c diff.external='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "an external diff is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c difftool.x.cmd='rm -rf /tmp/x' diff --no-index a b")
+            )
+            .is_none(),
+            "difftool.cmd is not used by diff"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c mergetool.x.cmd='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "mergetool.cmd is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c filter.probe.clean='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "a clean filter is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c core.sshCommand='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "sshCommand is not used by status"
+        );
     }
 }

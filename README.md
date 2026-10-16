@@ -104,7 +104,7 @@ Drop `--shadow` and stdout denies. The process still exits 0. The reason names t
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"escalate: decode"}}
 ```
 
-A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `$'rm'`, `$"rm"`, `bash -c $'rm -rf /'`, `exec rm`, `eval 'rm -rf /'`, `timeout 1 rm`, and `xargs rm` match as well, because bash runs those words as `rm`. Homebrew's `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm` match the same rows. `git.exe push`, `rm.exe -rf /tmp`, `timeout.exe 1 rm`, and `busybox.exe rm` match too. A hook command that arrives as a list of words is quoted before the match, so `C:/Program Files/Git/cmd/git.exe` and `push` are still the `git push` row, and `echo` plus `rm -rf /tmp` stays `echo`. The suffix is `.exe`, `.cmd`, `.bat`, or `.com`, in any letter case, and only when it is the whole extension. Dots after that suffix still count, so `git.exe. push` is the `git push` row. `rmdir`, `git push-all`, `echo rm`, `echo $'rm'`, `exec -a rm echo`, `timeout 1 echo rm`, `xargs echo rm`, `echo grm`, `rmdir.exe`, `git.exe push-all`, `rm.`, and `rm.exe.bak` do not. `git push && rm`, `git push $(rm)`, `find . -delete`, a shell heredoc or here-string whose body runs `rm`, `bash /dev/stdin` and `bash -s` with that body, `source /dev/stdin` with that body, `f() { rm; }; f`, and `cmd /c rm` match `bash.rm`. `cat` with that stdin, `bash -c` with that stdin, a function that is never called, `echo ok # $(rm)`, `echo '<(rm)'`, `find . -name rm`, and `find . -name -delete` do not. `cat <(rm)` and `cat >(rm)` match `bash.rm`. A redirect is not a command word, so `rm>/dev/null`, `>/dev/null rm`, and `2>/dev/null rm` match `bash.rm`. `echo rm>/tmp/x` does not.
+A scripted `Bash` command `rm -rf /tmp` with harm `exec` and confidence `0.95` matches `bash.rm` and asks. `/bin/rm`, `RM`, and a tab in `git push` match the same rows. `sudo rm`, `sudo -nu root rm`, `FOO=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm -rf /'`, `env -S 'rm -rf /'`, and `git -C repo push` match those rows too. `$'rm'`, `$"rm"`, `bash -c $'rm -rf /'`, `exec rm`, `eval 'rm -rf /'`, `timeout 1 rm`, and `xargs rm` match as well, because bash runs those words as `rm`. Homebrew's `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm` match the same rows. `git.exe push`, `rm.exe -rf /tmp`, `timeout.exe 1 rm`, and `busybox.exe rm` match too. A hook command that arrives as a list of words is quoted before the match, so `C:/Program Files/Git/cmd/git.exe` and `push` are still the `git push` row, and `echo` plus `rm -rf /tmp` stays `echo`. The suffix is `.exe`, `.cmd`, `.bat`, or `.com`, in any letter case, and only when it is the whole extension. Dots after that suffix still count, so `git.exe. push` is the `git push` row. `rmdir`, `git push-all`, `echo rm`, `echo $'rm'`, `exec -a rm echo`, `timeout 1 echo rm`, `xargs echo rm`, `echo grm`, `rmdir.exe`, `git.exe push-all`, `rm.`, and `rm.exe.bak` do not. `git push && rm`, `git push $(rm)`, `find . -delete`, a shell heredoc or here-string whose body runs `rm`, `bash /dev/stdin` and `bash -s` with that body, `source /dev/stdin` with that body, `f() { rm; }; f`, and `cmd /c rm` match `bash.rm`. `powershell -Command rm` and `pwsh -Command rm` match `bash.rm`. `powershell -EncodedCommand`, `-E`, and `-EC` match that row when the value is UTF-16LE base64 of the script. A value that is not valid base64, or not valid UTF-16LE, stays unmatched. Snapif matches the decoded text and does not run it. `cat` with that stdin, `bash -c` with that stdin, a function that is never called, `echo ok # $(rm)`, `echo '<(rm)'`, `find . -name rm`, and `find . -name -delete` do not. `cat <(rm)` and `cat >(rm)` match `bash.rm`. A redirect is not a command word, so `rm>/dev/null`, `>/dev/null rm`, and `2>/dev/null rm` match `bash.rm`. `echo rm>/tmp/x` does not.
 
 ```json
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask","permissionDecisionReason":"review: review_floor"}}
@@ -278,6 +278,18 @@ A different System One host uses `compatible`. `SNAPIF_BASE_URL` is the origin o
 
 A score legend may be a map of labels or a list of labels in order. Snapif accepts both.
 
+The Getting started `call.json` includes `script`. That field is only for `fake`. A live gate uses a call without it:
+
+```json
+{"action_id":"tag","name":"list_files","args":{},"trusted":{"user_request":"list the workspace"},"untrusted":null}
+```
+
+```bash
+snapif gate --call live.json
+```
+
+The commands below set the backend and the model, then run that file.
+
 ### TypeSafe Jev
 
 `jev-latest` is the model these commands were checked against. `ask`, `gate`, and `snapif test --base-url` all completed. The verdict word depends on the call.
@@ -285,7 +297,7 @@ A score legend may be a map of labels or a list of labels in order. Snapif accep
 ```bash
 SNAPIF_BACKEND=typesafe \
 SNAPIF_MODEL=jev-latest \
-  snapif gate --call call.json
+  snapif gate --call live.json
 ```
 
 ```bash
@@ -305,7 +317,7 @@ Drex on `https://console.nace.ai` uses `compatible`. `drex-v2.0` is the model th
 SNAPIF_BACKEND=compatible \
 SNAPIF_BASE_URL=https://console.nace.ai \
 SNAPIF_MODEL=drex-v2.0 \
-  snapif gate --call call.json
+  snapif gate --call live.json
 ```
 
 ```bash
@@ -327,7 +339,7 @@ ollama pull tev1:0.8b
 SNAPIF_BACKEND=compatible \
 SNAPIF_BASE_URL=http://127.0.0.1:11434 \
 SNAPIF_MODEL=tev1:0.8b \
-  snapif gate --call call.json
+  snapif gate --call live.json
 ```
 
 ```bash

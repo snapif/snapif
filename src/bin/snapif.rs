@@ -180,7 +180,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     let file: CallFile = match serde_json::from_value(value.clone()) {
         Ok(file) => file,
         Err(err) => {
-            eprintln!("wire: invalid json: {err}");
+            eprintln!("call file: {err}");
             return 1;
         }
     };
@@ -1084,11 +1084,15 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
             return 0;
         }
     };
-    if let Some(script) = value.get("script").filter(|item| item.is_object()) {
+    if let Some(script) = value.get("script") {
+        if !script.is_object() {
+            hook_decision("deny", "script must be an object");
+            return 0;
+        }
         let script: ReplayScript = match serde_json::from_value(script.clone()) {
             Ok(script) => script,
-            Err(_) => {
-                hook_decision("deny", "invalid json");
+            Err(err) => {
+                hook_decision("deny", &format!("script: {err}"));
                 return 0;
             }
         };

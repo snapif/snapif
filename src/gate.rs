@@ -159,7 +159,9 @@ impl<B: Backend> Client<B> {
             truncated = true;
         }
         let deadline = Instant::now() + timeout;
-        let evaluated = match self.backend.evaluate(request.clone(), deadline).await {
+        // The response check only needs the questions. The state can be large.
+        let questions = request.questions.clone();
+        let evaluated = match self.backend.evaluate(request, deadline).await {
             Ok(evaluated) => evaluated,
             Err(err) => {
                 return Ok(self.closed(
@@ -181,7 +183,7 @@ impl<B: Backend> Client<B> {
         for (id, answer) in &evaluated.wire.answers {
             crate::backend::record_prob_sum(&mut meta, id, answer);
         }
-        if let Err(err) = wire::check_response(&request.questions, &evaluated.wire) {
+        if let Err(err) = wire::check_response(&questions, &evaluated.wire) {
             return Ok(self.closed(
                 &req.action_id,
                 &gates,
@@ -548,7 +550,7 @@ fn append_gate_log(
             "extra_questions": extras,
         },
         "script": {
-            "harm": hint.guess.clone().unwrap_or_else(|| "read".to_string()),
+            "harm": hint.guess.clone().unwrap_or_default(),
             "confidence": confidence,
             "nouls": nouls,
             "timeout": timed_out,
@@ -1373,6 +1375,27 @@ mod tests {
         let _ = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
         let _ = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
         assert_eq!(client.backend().calls(), 2);
+    }
+
+    #[test]
+    fn timeout_log_does_not_call_the_miss_a_read() {
+        let path = std::env::temp_dir().join(format!("snapif-timeout-log-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut backend = FakeBackend::new().on_timeout("harm_class");
+        for id in crate::backends::cascade::battery_ids() {
+            if id.0 == "harm_class" {
+                continue;
+            }
+            backend = backend.on_noul(&id.0, 0.0);
+        }
+        let mut client = Client::new(backend).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.log_path = Some(path.clone());
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        assert!(matches!(verdict, crate::verdict::Verdict::Escalate(_)));
+        let text = std::fs::read_to_string(&path).expect("log");
+        assert!(text.contains("\"timeout\":true"), "{text}");
+        assert!(!text.contains("\"harm\":\"read\""), "{text}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
