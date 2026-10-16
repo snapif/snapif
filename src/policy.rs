@@ -823,11 +823,18 @@ fn ssh_remote_command(argv: &[String]) -> Option<String> {
     Some(argv[index..].join(" "))
 }
 
+fn is_openssh_client(name: &str) -> bool {
+    let base = command_basename(name);
+    base.eq_ignore_ascii_case("ssh")
+        || base.eq_ignore_ascii_case("scp")
+        || base.eq_ignore_ascii_case("sftp")
+}
+
 fn ssh_proxy_commands(argv: &[String]) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
-    if !command_basename(first).eq_ignore_ascii_case("ssh") {
+    if !is_openssh_client(first) {
         return Vec::new();
     }
     let mut commands = Vec::new();
@@ -3144,6 +3151,8 @@ mod tests {
             "su -c 'rm -rf /tmp'",
             "su --command='rm -rf /tmp'",
             "ssh -o ProxyCommand='rm -rf /tmp/x' example.com",
+            "scp -o ProxyCommand='rm -rf /tmp/x' host:/tmp /tmp",
+            "sftp -o ProxyCommand='rm -rf /tmp/x' host",
             "ssh -oProxyCommand='rm -rf /tmp/x' example.com",
             "rsync -e 'rm -rf /tmp/x' host:/tmp /tmp",
             "rsync --rsh='rm -rf /tmp/x' host:/tmp /tmp",
