@@ -159,7 +159,9 @@ impl<B: Backend> Client<B> {
             truncated = true;
         }
         let deadline = Instant::now() + timeout;
-        let evaluated = match self.backend.evaluate(request.clone(), deadline).await {
+        // The response check only needs the questions. The state can be large.
+        let questions = request.questions.clone();
+        let evaluated = match self.backend.evaluate(request, deadline).await {
             Ok(evaluated) => evaluated,
             Err(err) => {
                 return Ok(self.closed(
@@ -181,7 +183,7 @@ impl<B: Backend> Client<B> {
         for (id, answer) in &evaluated.wire.answers {
             crate::backend::record_prob_sum(&mut meta, id, answer);
         }
-        if let Err(err) = wire::check_response(&request.questions, &evaluated.wire) {
+        if let Err(err) = wire::check_response(&questions, &evaluated.wire) {
             return Ok(self.closed(
                 &req.action_id,
                 &gates,
