@@ -1795,7 +1795,7 @@ fn case_arm_scripts(tokens: &[String]) -> Vec<String> {
     let mut index = 1;
     while index < tokens.len() {
         let token = tokens[index].as_str();
-        let starts_arm = token == ")" || (token.ends_with(')') && token != ")");
+        let starts_arm = token.ends_with(')');
         if !starts_arm {
             index += 1;
             continue;
@@ -1832,12 +1832,11 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         }
         if token == "-c" || token == "--config" {
             index += 1;
-            if let Some(spec) = argv.get(index) {
-                if let Some((key, value)) = spec.split_once('=') {
-                    if let Some(name) = key.strip_prefix("alias.") {
-                        aliases.push((name.to_string(), value.to_string()));
-                    }
-                }
+            if let Some((name, value)) = argv.get(index).and_then(|spec| {
+                let (key, value) = spec.split_once('=')?;
+                Some((key.strip_prefix("alias.")?, value))
+            }) {
+                aliases.push((name.to_string(), value.to_string()));
             }
         }
         index += 1;
