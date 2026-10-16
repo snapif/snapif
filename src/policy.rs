@@ -396,7 +396,10 @@ fn check_action(
 /// only an argument. `2&>file rm` runs `2`, not `rm`.
 /// `f() { rm; }; f`
 /// matches. The same definition with no call does not. `cmd /c rm` and
-/// `powershell -Command rm` match. `rmdir`, `git push-all`, `echo rm`,
+/// `powershell -Command rm` match. `powershell -EncodedCommand`, `-E`,
+/// and `-EC` match once that value is decoded from UTF-16LE base64.
+/// A value that is not base64, or not UTF-16LE, is not the script.
+/// `rmdir`, `git push-all`, `echo rm`,
 /// `command -v rm`, `sudo -l`, an empty word, `rmdir.exe`, `rm.exe.bak`,
 /// `rm.`, and `git.exe.exe` do not match.
 pub fn matched_action<'a>(
@@ -1503,6 +1506,12 @@ fn powershell_script(argv: &[String]) -> Option<String> {
                 Some(script)
             };
         }
+        // One value. Later words are not part of this script, unlike `-Command`.
+        if is_ps_encoded_command_switch(token) {
+            return argv
+                .get(index + 1)
+                .and_then(|value| decode_ps_encoded_script(value));
+        }
         if ps_switch_takes_value(token) {
             index += 1;
             if index < argv.len() {
@@ -1526,6 +1535,106 @@ fn is_ps_command_switch(token: &str) -> bool {
     name.eq_ignore_ascii_case("command") || name.eq_ignore_ascii_case("c")
 }
 
+// pwsh accepts `-e` and `-enc` as prefixes of `-EncodedCommand`, plus the
+// alias `-ec`. `-ec` is not a prefix: `encodedcommand` starts with `en`.
+// `--encodedcommand` and `/encodedcommand` are the same switch.
+fn is_ps_encoded_command_switch(token: &str) -> bool {
+    let Some(name) = ps_encoded_switch_name(token) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    !name.is_empty() && ("encodedcommand".starts_with(&name) || name == "ec")
+}
+
+fn ps_encoded_switch_name(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("--")
+        .or_else(|| token.strip_prefix('-'))
+        .or_else(|| token.strip_prefix('/'))
+}
+
+// UTF-16LE base64, same as pwsh `-EncodedCommand`. Space, tab, CR, and LF
+// are ignored. A value that is not base64, or not UTF-16LE, is not a script.
+fn decode_ps_encoded_script(value: &str) -> Option<String> {
+    let bytes = decode_standard_base64(value)?;
+    if !bytes.len().is_multiple_of(2) {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect();
+    let script = String::from_utf16(&units).ok()?;
+    if script.is_empty() {
+        None
+    } else {
+        Some(script)
+    }
+}
+
+fn decode_standard_base64(value: &str) -> Option<Vec<u8>> {
+    let filtered: Vec<u8> = value
+        .bytes()
+        .filter(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
+        .collect();
+    if filtered.is_empty() || !filtered.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(filtered.len() / 4 * 3);
+    let quanta = filtered.len() / 4;
+    for (index, chunk) in filtered.chunks_exact(4).enumerate() {
+        let Ok(chunk) = <[u8; 4]>::try_from(chunk) else {
+            return None;
+        };
+        push_base64_quantum(chunk, index + 1 == quanta, &mut out)?;
+    }
+    Some(out)
+}
+
+fn push_base64_quantum(chunk: [u8; 4], allow_pad: bool, out: &mut Vec<u8>) -> Option<()> {
+    let pad = if chunk[2] == b'=' {
+        if chunk[3] != b'=' {
+            return None;
+        }
+        2
+    } else if chunk[3] == b'=' {
+        1
+    } else {
+        0
+    };
+    if pad > 0 && !allow_pad {
+        return None;
+    }
+    if chunk[0] == b'=' || chunk[1] == b'=' {
+        return None;
+    }
+    let first = b64_sextet(chunk[0])?;
+    let second = b64_sextet(chunk[1])?;
+    out.push((first << 2) | (second >> 4));
+    if pad == 2 {
+        return Some(());
+    }
+    let third = b64_sextet(chunk[2])?;
+    out.push(((second & 0x0f) << 4) | (third >> 2));
+    if pad == 1 {
+        return Some(());
+    }
+    let fourth = b64_sextet(chunk[3])?;
+    out.push(((third & 0x03) << 6) | fourth);
+    Some(())
+}
+
+fn b64_sextet(byte: u8) -> Option<u8> {
+    match byte {
+        b'A'..=b'Z' => Some(byte - b'A'),
+        b'a'..=b'z' => Some(byte - b'a' + 26),
+        b'0'..=b'9' => Some(byte - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
+}
+
 fn ps_switch_takes_value(token: &str) -> bool {
     let Some(name) = token.strip_prefix('-').or_else(|| token.strip_prefix('/')) else {
         return false;
@@ -1540,7 +1649,6 @@ fn ps_switch_takes_value(token: &str) -> bool {
             | "workingdirectory"
             | "psconsolefile"
             | "configurationname"
-            | "encodedcommand"
             | "file"
     )
 }
@@ -3215,6 +3323,83 @@ mod tests {
             "echo ok # `rm -rf /tmp/x`",
             "echo '<(rm -rf /tmp/x)'",
             "echo <(echo rm)",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// `-EncodedCommand` is UTF-16LE base64. These match `bash.rm` only
+    /// after that decode. Raw `rm` words, UTF-8 base64 of that text, and
+    /// any value that is not UTF-16LE `rm` stay unmatched.
+    #[test]
+    fn powershell_encoded_command_is_the_script() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let payload = "cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=";
+        assert_eq!(
+            super::decode_ps_encoded_script(payload).as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        // Same bytes with a space, a non-zero pad bit, and a `+` sextet.
+        assert_eq!(
+            super::decode_ps_encoded_script("cgBt ACAALQByAGYAIAAvAHQAbQBwAC8AeAA=").as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        assert_eq!(
+            super::decode_ps_encoded_script("cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAB=").as_deref(),
+            Some("rm -rf /tmp/x")
+        );
+        assert_eq!(
+            super::decode_ps_encoded_script("cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA+AA==").as_deref(),
+            Some("rm -rf /tmp/x>")
+        );
+        let rm = [
+            "powershell -EncodedCommand cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "powershell.exe -EncodedCommand cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "powershell -E cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -Enc cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -encoded cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh --ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh /ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -NoProfile -ExecutionPolicy Bypass -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -ec 'cgBt ACAALQByAGYAIAAvAHQAbQBwAC8AeAA='",
+            "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAB=",
+            "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA+AA==",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        // UTF-8 base64 of `rm -rf /tmp/x`, not UTF-16LE. A byte-wise decode
+        // would match `bash.rm` by accident.
+        let utf8_rm = "cm0gLXJmIC90bXAveA==";
+        let echo_rm = "ZQBjAGgAbwAgAHIAbQA=";
+        assert!(super::decode_ps_encoded_script(utf8_rm).is_none());
+        assert!(super::decode_ps_encoded_script("QQ==").is_none());
+        assert!(super::decode_ps_encoded_script("!!!").is_none());
+        assert!(super::decode_ps_encoded_script("ANg=").is_none());
+        assert_eq!(
+            super::decode_ps_encoded_script(echo_rm).as_deref(),
+            Some("echo rm")
+        );
+        let neither = [
+            "powershell -EncodedCommand rm -rf /tmp/x",
+            "powershell -EncodedCommand 'rm -rf /tmp/x'",
+            "pwsh -ec cm0gLXJmIC90bXAveA==",
+            "pwsh -E QQ==",
+            "pwsh -ec ANg=",
+            "powershell -EncodedCommand !!!",
+            "powershell -EncodedCommand",
+            "pwsh -ec ZQBjAGgAbwAgAHIAbQA=",
+            "pwsh -encodedarguments cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -ea cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
         ];
         for command in neither {
             assert!(
