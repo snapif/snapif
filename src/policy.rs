@@ -3857,6 +3857,7 @@ mod tests {
             "powershell -EncodedCommand cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
             "powershell.exe -EncodedCommand cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
             "pwsh -ec cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
+            "pwsh -EC cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
             "powershell -E cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
             "pwsh -Enc cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
             "pwsh -encoded cgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=",
@@ -3885,6 +3886,26 @@ mod tests {
         assert_eq!(
             super::decode_ps_encoded_script(echo_rm).as_deref(),
             Some("echo rm")
+        );
+        // The decoded text uses the same matcher as `-Command`. `&&`
+        // keeps the stricter `bash.rm` row, which is what the plain
+        // script selects.
+        let compound = "git push && rm -rf /tmp/x";
+        let compound_encoded =
+            "ZwBpAHQAIABwAHUAcwBoACAAJgAmACAAcgBtACAALQByAGYAIAAvAHQAbQBwAC8AeAA=";
+        assert_eq!(
+            super::decode_ps_encoded_script(compound_encoded).as_deref(),
+            Some(compound)
+        );
+        let wrapped = format!("powershell -EncodedCommand {compound_encoded}");
+        let as_command = format!("pwsh -Command {compound}");
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&wrapped)).map(|id| id.0.as_str()),
+            matched_action(&policy, "Bash", Some(&as_command)).map(|id| id.0.as_str()),
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&wrapped)).map(|id| id.0.as_str()),
+            Some("bash.rm")
         );
         let neither = [
             "powershell -EncodedCommand rm -rf /tmp/x",
