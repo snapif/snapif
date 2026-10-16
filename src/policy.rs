@@ -1955,6 +1955,7 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
     }
     let mut aliases = Vec::new();
     let mut helpers = Vec::new();
+    let mut external_diffs = Vec::new();
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
@@ -1968,6 +1969,11 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
                     if let Some(shell) = value.strip_prefix('!') {
                         helpers.push(shell.to_string());
                     }
+                } else if key == "diff.external" {
+                    let script = value.strip_prefix('!').unwrap_or(value);
+                    if !script.is_empty() {
+                        external_diffs.push(script.to_string());
+                    }
                 } else if let Some(name) = key.strip_prefix("alias.") {
                     aliases.push((name.to_string(), value.to_string()));
                 }
@@ -1976,6 +1982,9 @@ fn git_alias_scripts(argv: &[String]) -> Vec<String> {
         index += 1;
     }
     let mut scripts = Vec::new();
+    if argv.iter().any(|word| word == "diff") {
+        scripts.extend(external_diffs);
+    }
     if argv.iter().any(|word| word == "credential") {
         for shell in helpers {
             if !shell.is_empty() {
@@ -3966,6 +3975,10 @@ mod tests {
                 "git -c credential.helper='!rm -rf /tmp/x' credential fill",
                 "bash.rm",
             ),
+            (
+                "git -c diff.external='rm -rf /tmp/x' diff --no-index a b",
+                "bash.rm",
+            ),
         ];
         for (command, expected) in commands {
             assert_eq!(
@@ -3986,6 +3999,15 @@ mod tests {
             )
             .is_none(),
             "a credential helper is not used by status"
+        );
+        assert!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c diff.external='rm -rf /tmp/x' status")
+            )
+            .is_none(),
+            "an external diff is not used by status"
         );
     }
 }
