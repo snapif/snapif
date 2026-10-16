@@ -16,6 +16,8 @@ allow = [
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
     "NCSA",
+    # foldhash 0.2, via serde_json 1.0.154. OSI approved.
+    "Zlib",
 ]
 confidence-threshold = 0.8
 
