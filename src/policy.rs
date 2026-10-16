@@ -525,6 +525,10 @@ fn consider_segment<'a>(
         scan_isolated(policy, tool_name, &scripts, depth, best);
         let remotes = remote_scripts(&argv);
         scan_isolated(policy, tool_name, &remotes, depth, best);
+        let arms = case_arm_scripts(&argv);
+        scan_isolated(policy, tool_name, &arms, depth, best);
+        let aliases = git_alias_scripts(&argv);
+        scan_isolated(policy, tool_name, &aliases, depth, best);
         if shell_reads_stdin(&argv) {
             scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
         }
@@ -1128,6 +1132,17 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
     while index < tokens.len() {
         if is_assignment(&tokens[index]) {
             index += 1;
+            continue;
+        }
+        // `coproc rm` and `coproc name { rm; }` both run rm.
+        if command_basename(&tokens[index]).eq_ignore_ascii_case("coproc") {
+            index += 1;
+            if index + 1 < tokens.len()
+                && tokens[index] != "{"
+                && tokens[index + 1] == "{"
+            {
+                index += 1;
+            }
             continue;
         }
         // `for rm in a` stays `for`. These words are not the command.
@@ -1772,6 +1787,86 @@ fn ps_name_takes_value(name: &str, base: &str) -> bool {
     !("command".starts_with(&name) || "encodedcommand".starts_with(&name))
 }
 
+fn case_arm_scripts(tokens: &[String]) -> Vec<String> {
+    let Some(first) = tokens.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("case") {
+        return Vec::new();
+    }
+    let mut scripts = Vec::new();
+    let mut index = 1;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        let starts_arm = token == ")" || (token.ends_with(')') && token != ")");
+        if !starts_arm {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let start = index;
+        while index < tokens.len() {
+            let word = tokens[index].as_str();
+            if matches!(word, ";;" | ";&" | ";;&" | "esac") {
+                break;
+            }
+            index += 1;
+        }
+        if start < index {
+            scripts.push(tokens[start..index].join(" "));
+        }
+    }
+    scripts
+}
+
+fn git_alias_scripts(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("git") {
+        return Vec::new();
+    }
+    let mut aliases = Vec::new();
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        if token == "-c" || token == "--config" {
+            index += 1;
+            if let Some(spec) = argv.get(index) {
+                if let Some((key, value)) = spec.split_once('=') {
+                    if let Some(name) = key.strip_prefix("alias.") {
+                        aliases.push((name.to_string(), value.to_string()));
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    let mut scripts = Vec::new();
+    for (name, value) in aliases {
+        let invoked = argv.iter().any(|word| word == &name);
+        if !invoked {
+            continue;
+        }
+        if let Some(shell) = value.strip_prefix('!') {
+            scripts.push(shell.to_string());
+        } else if !value.is_empty() {
+            scripts.push(format!("git {value}"));
+        }
+    }
+    scripts
+}
+
+fn fish_inline_script(token: &str) -> Option<String> {
+    token
+        .strip_prefix("--command=")
+        .or_else(|| token.strip_prefix("--init-command="))
+        .map(str::to_string)
+}
+
 fn shell_script(tokens: &[String]) -> Option<String> {
     let base = command_basename(tokens.first()?);
     if !is_shell_name(base) {
@@ -1789,6 +1884,14 @@ fn shell_script(tokens: &[String]) -> Option<String> {
                 index += 1;
             }
             continue;
+        }
+        if base.eq_ignore_ascii_case("fish") {
+            if let Some(script) = fish_inline_script(token) {
+                return Some(script);
+            }
+            if token == "-C" || token == "--init-command" {
+                return tokens.get(index + 1).cloned();
+            }
         }
         if let Some(script) = c_argument(token, tokens.get(index + 1)) {
             return Some(script);
@@ -3682,6 +3785,14 @@ mod tests {
             ("bash +o errexit <<'EOF'\nrm -rf /tmp/x\nEOF", "bash.rm"),
             ("bash --init-file /dev/null -c 'rm -rf /tmp/x'", "bash.rm"),
             ("bash --rcfile /dev/null -c 'rm -rf /tmp/x'", "bash.rm"),
+            ("case x in x) rm -rf /tmp/x ;; esac", "bash.rm"),
+            ("coproc { rm -rf /tmp/x; }", "bash.rm"),
+            ("coproc rm -rf /tmp/x", "bash.rm"),
+            ("fish --command='rm -rf /tmp/x'", "bash.rm"),
+            ("fish -C 'rm -rf /tmp/x'", "bash.rm"),
+            ("fish --init-command='rm -rf /tmp/x'", "bash.rm"),
+            ("git -c 'alias.p=!rm -rf /tmp/x' p", "bash.rm"),
+            ("git -c alias.p=push p", "git.push"),
         ];
         for (command, expected) in commands {
             assert_eq!(
@@ -3690,5 +3801,9 @@ mod tests {
                 "{command:?}"
             );
         }
+        assert!(
+            matched_action(&policy, "Bash", Some("git -c alias.p=push status")).is_none(),
+            "an alias that is not invoked does not match"
+        );
     }
 }
