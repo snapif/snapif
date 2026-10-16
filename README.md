@@ -201,7 +201,7 @@ snapif explain --action git.push
 snapif test --vectors tests/conformance
 ```
 
-With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIMEOUT_MS` is unset, that command waits 5000 milliseconds.
+With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIMEOUT_MS` is unset, that command waits 5000 milliseconds. When `SNAPIF_MODEL` is set, each posted vector uses that name instead of the model field in the file. A blank value is an error, and nothing is posted.
 
 `replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. The policy word on that line is the id stored on the row. A different `--policy` or `SNAPIF_POLICY` also prints `replayed with`. A `SNAPIF_LOG` row records those reasons and the policy id. A backend failure sets `script.timeout`, so replay repeats the gate verdict instead of treating confidence 0 as a model score.
 
@@ -256,7 +256,7 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | Variable | Role |
 | --- | --- |
 | `SNAPIF_BACKEND` | `fake`, `typesafe`, or `compatible`. Unset is an error. |
-| `SNAPIF_MODEL` | Replaces the default model `jev-latest`. Blank is an error. |
+| `SNAPIF_MODEL` | Replaces the default model `jev-latest`. Blank is an error. `test --base-url` posts this name instead of the model field in the vector. |
 | `SNAPIF_POLICY` | Shipped id or a `.toml` path. Unset uses `tool-gate`. `gate`, `ask`, `explain`, `hook`, `calibrate`, and `replay` follow it when `--policy` is unset. `test` does not read it. An explicit `--policy` wins. |
 | `SNAPIF_SHADOW` | `1` or `true` is the same override as `--shadow`. |
 | `SNAPIF_TIMEOUT_MS` | Milliseconds for `gate`, `ask`, `hook`, and `calibrate` without `--gate`. Unset is 2000. `test --base-url` uses the same variable; unset there is 5000. `0` is a zero-millisecond budget. |
@@ -269,3 +269,31 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. |
 
 `typesafe` calls the TypeSafe API. `compatible` calls another server that speaks the same System One shape. Both send the model `jev-latest` unless `SNAPIF_MODEL` is set.
+
+## Models
+
+`SNAPIF_BACKEND=typesafe` with `TYPESAFE_API_KEY` calls `https://api.typesafe.ai/v1/systemone`. The model is `jev-latest` unless `SNAPIF_MODEL` names a pinned id.
+
+A different System One host uses `compatible`. `SNAPIF_BASE_URL` is the origin only. `SNAPIF_MODEL` is that host's model id. A public origin also needs `SNAPIF_API_KEY`. Leaving the model unset sends `jev-latest`, and a host that does not serve that name fails the gate closed (exit 11).
+
+### Ollama
+
+Ollama 0.35 and later serves System One at `http://127.0.0.1:11434`. Pull a decision model first. Loopback does not need `SNAPIF_API_KEY`.
+
+`tev1:0.8b` is the model these commands were checked against. `ask`, `gate`, and `snapif test --base-url` all completed. A warm `gate` fit in the default 2000 ms budget. The verdict word depends on the call.
+
+```bash
+ollama pull tev1:0.8b
+SNAPIF_BACKEND=compatible \
+SNAPIF_BASE_URL=http://127.0.0.1:11434 \
+SNAPIF_MODEL=tev1:0.8b \
+  snapif gate --call call.json
+```
+
+```bash
+SNAPIF_MODEL=tev1:0.8b \
+  snapif test --vectors tests/conformance \
+  --base-url http://127.0.0.1:11434
+```
+
+The same origin takes whatever decision model you pulled. Set `SNAPIF_MODEL` to that name. Only `tev1:0.8b` was checked here. With the model unset, Ollama returns 404 for `jev-latest` and `gate` exits 11.

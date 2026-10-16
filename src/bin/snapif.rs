@@ -91,6 +91,7 @@ enum Command {
         gate: bool,
     },
     /// Check conformance JSON. With the http feature, `--base-url` posts each valid vector.
+    /// A set `SNAPIF_MODEL` replaces the model name on those posts.
     Test {
         /// Directory of conformance JSON files.
         #[arg(long)]
@@ -429,10 +430,17 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
     }) {
         return code;
     }
+    let model_override = match posted_model() {
+        Ok(model) => model,
+        Err(code) => return code,
+    };
     let result = each_vector(vectors, |path, bytes| {
-        let Some(request) = vector_request(path, bytes)? else {
+        let Some(mut request) = vector_request(path, bytes)? else {
             return Ok(());
         };
+        if let Some(model) = &model_override {
+            request.model.clone_from(model);
+        }
         let deadline = std::time::Instant::now() + timeout;
         let evaluated = match runtime.block_on(snapif::backend::Backend::evaluate(
             &backend,
@@ -454,6 +462,22 @@ fn test_remote(vectors: &PathBuf, raw: &str) -> u8 {
     match result {
         Ok(count) => finish_checked(count, "conformance vectors"),
         Err(code) => code,
+    }
+}
+
+/// `SNAPIF_MODEL` for `--base-url` posts. Unset leaves the vector's model.
+/// Blank is a programmer error and does not open a connection.
+#[cfg(feature = "http")]
+fn posted_model() -> Result<Option<String>, u8> {
+    let Ok(raw) = std::env::var("SNAPIF_MODEL") else {
+        return Ok(None);
+    };
+    let model = raw.trim();
+    if model.is_empty() {
+        eprintln!("SNAPIF_MODEL must not be blank");
+        Err(1)
+    } else {
+        Ok(Some(model.to_string()))
     }
 }
 
