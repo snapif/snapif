@@ -1091,6 +1091,120 @@ fn base_url_posts_a_vector_and_checks_the_response() {
 
 #[cfg(feature = "http")]
 #[test]
+fn base_url_posts_snapif_model_instead_of_the_vector_model() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let seen = std::env::temp_dir().join(format!(
+        "snapif-posted-model-{}-{}",
+        std::process::id(),
+        port
+    ));
+    let seen_thread = seen.clone();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        loop {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let header = String::from_utf8_lossy(&buf[..end]);
+                        let length = header
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                if name.eq_ignore_ascii_case("content-length") {
+                                    value.trim().parse::<usize>().ok()
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or(0);
+                        if buf.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = fs::write(&seen_thread, &buf);
+        let body = r#"{"model":"loop","answers":{"department":{"type":"choice","choice":"billing","probabilities":{"billing":1.0},"confidence":0.91}},"usage":{"input_tokens":1,"output_tokens":2}}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+    });
+
+    let dir = std::env::temp_dir().join(format!(
+        "snapif-model-override-{}-{}",
+        std::process::id(),
+        port
+    ));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("department_choice.json"),
+    )
+    .expect("copy");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .args(["--base-url", &format!("http://127.0.0.1:{port}")])
+        .env("SNAPIF_MODEL", " tev1:0.8b ")
+        .output()
+        .expect("run");
+    let posted = fs::read_to_string(&seen).unwrap_or_default();
+    let _ = fs::remove_dir_all(&dir);
+    let _ = fs::remove_file(&seen);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{err}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+    assert!(
+        posted.contains("\"model\":\"tev1:0.8b\""),
+        "posted body did not use SNAPIF_MODEL: {posted}"
+    );
+    assert!(
+        !posted.contains("jev-latest"),
+        "vector model was still posted: {posted}"
+    );
+}
+
+#[cfg(feature = "http")]
+#[test]
+fn base_url_blank_model_exits_before_connect() {
+    let dir = std::env::temp_dir().join(format!("snapif-blank-model-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    fs::copy(
+        manifest("tests/conformance/department_choice.json"),
+        dir.join("department_choice.json"),
+    )
+    .expect("copy");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .args(["--base-url", "http://127.0.0.1:9"])
+        .env("SNAPIF_MODEL", " ")
+        .output()
+        .expect("run");
+    let _ = fs::remove_dir_all(&dir);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("SNAPIF_MODEL must not be blank"), "{err}");
+    assert!(!err.contains("rejected"), "{err}");
+}
+
+#[cfg(feature = "http")]
+#[test]
 fn base_url_gives_each_vector_its_own_deadline() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
