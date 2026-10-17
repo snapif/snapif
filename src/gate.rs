@@ -462,23 +462,52 @@ fn gate_cache_key<B: Backend>(
             serde_json::json!({"id": id, "wire": wire})
         })
         .collect();
-    let body = serde_json::json!({
-        "policy": policy,
-        "model": model,
-        "timeout_ms": timeout.as_millis(),
-        "shadow": client.shadow_on(policy.shadow),
-        "action_id": req.action_id.0,
-        "name": req.prepared.name,
-        "args": req.prepared.args,
-        "trusted": req.state.trusted,
-        "untrusted": req.state.untrusted,
-        "extras": extras,
-    });
-    let text = serde_json::to_string(&body).ok()?;
+    // Hash the compact JSON as it is written. The request fields are
+    // borrowed, so a cache hit does not keep a second copy of them.
+    let body = CacheKeyBody {
+        policy,
+        model,
+        timeout_ms: timeout.as_millis(),
+        shadow: client.shadow_on(policy.shadow),
+        action_id: &req.action_id.0,
+        name: &req.prepared.name,
+        args: &req.prepared.args,
+        trusted: &req.state.trusted,
+        untrusted: &req.state.untrusted,
+        extras: &extras,
+    };
+    use std::hash::Hasher;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    use std::hash::{Hash, Hasher};
-    text.hash(&mut hasher);
+    let mut writer = HashWriter(&mut hasher);
+    serde_json::to_writer(&mut writer, &body).ok()?;
     Some(hasher.finish())
+}
+
+#[derive(serde::Serialize)]
+struct CacheKeyBody<'a> {
+    policy: &'a Policy,
+    model: &'a str,
+    timeout_ms: u128,
+    shadow: bool,
+    action_id: &'a str,
+    name: &'a str,
+    args: &'a serde_json::Value,
+    trusted: &'a serde_json::Value,
+    untrusted: &'a serde_json::Value,
+    extras: &'a [serde_json::Value],
+}
+
+struct HashWriter<'a, H>(&'a mut H);
+
+impl<H: std::hash::Hasher> std::io::Write for HashWriter<'_, H> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn reason_tag(reason: &crate::verdict::UnsureReason) -> &'static str {
@@ -572,7 +601,24 @@ fn hashed_untrusted(value: &serde_json::Value) -> serde_json::Value {
     if value.is_null() {
         return serde_json::Value::Null;
     }
-    serde_json::json!({"len": value.to_string().len()})
+    // The log stores only the compact JSON length. Counting the bytes
+    // avoids holding a second copy of a large untrusted value.
+    let mut count = ByteCount(0);
+    serde_json::to_writer(&mut count, value).expect("untrusted json");
+    serde_json::json!({"len": count.0})
+}
+
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn redact_value(value: &serde_json::Value) -> serde_json::Value {
@@ -1190,6 +1236,33 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_changes_when_the_args_change() {
+        let client = Client::<AnyBackend>::from_config(&crate::ClientConfig {
+            backend: "fake".to_string(),
+            cache_capacity: Some(4),
+            ..crate::ClientConfig::default()
+        })
+        .expect("fake");
+        let policy = Policy::shipped("tool-gate").expect("policy");
+        let req = tag_request(json!({}));
+        let model = "jev-latest";
+        let timeout = std::time::Duration::from_millis(2000);
+        let first = super::gate_cache_key(&client, &req, &policy, model, timeout);
+        let again = super::gate_cache_key(&client, &req, &policy, model, timeout);
+        assert_eq!(first, again);
+        assert!(first.is_some());
+        let changed = tag_request(json!({"n": 1}));
+        let second = super::gate_cache_key(&client, &changed, &policy, model, timeout);
+        assert_ne!(first, second);
+        let uncached = Client::<AnyBackend>::from_config(&crate::ClientConfig {
+            backend: "fake".to_string(),
+            ..crate::ClientConfig::default()
+        })
+        .expect("fake");
+        assert!(super::gate_cache_key(&uncached, &req, &policy, model, timeout).is_none());
+    }
+
+    #[test]
     fn replace_fake_drops_the_cached_verdict() {
         let mut client = Client::<AnyBackend>::from_config(&crate::ClientConfig {
             backend: "fake".to_string(),
@@ -1414,6 +1487,15 @@ mod tests {
         assert!(!text.contains("secret-value"));
         assert!(!text.contains("hidden"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn untrusted_log_len_is_the_compact_json_length() {
+        let value = json!({"blob": "x".repeat(4_000), "n": 1});
+        let logged = super::hashed_untrusted(&value);
+        assert_eq!(logged["len"], value.to_string().len());
+        assert!(!logged.to_string().contains("xxxx"));
+        assert!(super::hashed_untrusted(&serde_json::Value::Null).is_null());
     }
 
     #[test]

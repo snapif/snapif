@@ -256,14 +256,18 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     } else {
         Value::Null
     };
+    // A hook body has `prompt` and no trusted object. `snapif hook`
+    // copies that text. Gate already accepts the same body for the
+    // command, so a missing trusted object uses the same copy.
+    // An explicit object still wins, including an empty one.
     let trusted = if has("trusted") {
-        file.trusted.unwrap_or(Value::Null)
+        file.trusted.filter(|item| item.is_object())
     } else {
         file.state
             .as_ref()
-            .map(|state| state.trusted.clone())
-            .unwrap_or(Value::Null)
-    };
+            .and_then(|state| state.trusted.as_object().map(|_| state.trusted.clone()))
+    }
+    .unwrap_or_else(|| hook_trusted(&value));
     let untrusted = if has("untrusted") {
         file.untrusted.unwrap_or(Value::Null)
     } else {
@@ -757,7 +761,9 @@ fn scripted(
         if id.0 == "harm_class" {
             continue;
         }
-        let value = nouls.get(&id.0).and_then(Value::as_f64).unwrap_or(0.0);
+        // A missing battery answer stays 0, so a yes block does not fire.
+        // A present value that is not a number must not become that 0.
+        let value = script_noul(nouls, &id.0)?.unwrap_or(0.0);
         backend = backend.on_noul(&id.0, value);
     }
     for question in extras {
@@ -765,7 +771,7 @@ fn scripted(
         if battery.iter().any(|battery_id| battery_id.0 == id) {
             continue;
         }
-        let logged = nouls.get(id).and_then(Value::as_f64);
+        let logged = script_noul(nouls, id)?;
         backend = match question {
             Question::Noul(_) => backend.on_noul(id, logged.unwrap_or(1.0)),
             Question::Choice(choice) => {
@@ -781,6 +787,23 @@ fn scripted(
         };
     }
     Ok(backend)
+}
+
+fn script_noul(nouls: &serde_json::Map<String, Value>, id: &str) -> Result<Option<f64>, Error> {
+    let Some(value) = nouls.get(id) else {
+        return Ok(None);
+    };
+    let Some(number) = value.as_f64() else {
+        return Err(Error::Policy(snapif::error::PolicyError::Config(format!(
+            "script noul {id} must be a number from 0 to 1, got {value}"
+        ))));
+    };
+    if !(0.0..=1.0).contains(&number) {
+        return Err(Error::Policy(snapif::error::PolicyError::Config(format!(
+            "script noul {id} must be a number from 0 to 1, got {number}"
+        ))));
+    }
+    Ok(Some(number))
 }
 
 fn open_client(policy: Option<&str>, shadow: bool) -> Result<Client<AnyBackend>, Error> {
