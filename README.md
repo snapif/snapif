@@ -220,6 +220,8 @@ With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIME
 
 `prepared` is `{ "name", "args" }`. `state` is `{ "trusted", "untrusted" }`.
 
+A prefix match follows the command that program runs. OpenSSH accepts `ProxyCommand` in any ASCII case, with a space or with `=`. Git ignores ASCII case in a config section and variable name, so `Credential.Helper` and `credential.https://example.com.helper` are read the same way as `credential.helper`. A credential helper runs only for the `credential` subcommand. On an ssh remote, `GIT_SSH_COMMAND` replaces `core.sshCommand`. A local path does not run that command. `export` reaches a later command when that builtin runs in the current shell. A pipeline does not publish it.
+
 ## Hook result
 
 A hook error still exits 0 and denies the call. A non-zero exit would let the tool run.
