@@ -761,7 +761,9 @@ fn scripted(
         if id.0 == "harm_class" {
             continue;
         }
-        let value = nouls.get(&id.0).and_then(Value::as_f64).unwrap_or(0.0);
+        // A missing battery answer stays 0, so a yes block does not fire.
+        // A present value that is not a number must not become that 0.
+        let value = script_noul(nouls, &id.0)?.unwrap_or(0.0);
         backend = backend.on_noul(&id.0, value);
     }
     for question in extras {
@@ -769,7 +771,7 @@ fn scripted(
         if battery.iter().any(|battery_id| battery_id.0 == id) {
             continue;
         }
-        let logged = nouls.get(id).and_then(Value::as_f64);
+        let logged = script_noul(nouls, id)?;
         backend = match question {
             Question::Noul(_) => backend.on_noul(id, logged.unwrap_or(1.0)),
             Question::Choice(choice) => {
@@ -785,6 +787,23 @@ fn scripted(
         };
     }
     Ok(backend)
+}
+
+fn script_noul(nouls: &serde_json::Map<String, Value>, id: &str) -> Result<Option<f64>, Error> {
+    let Some(value) = nouls.get(id) else {
+        return Ok(None);
+    };
+    let Some(number) = value.as_f64() else {
+        return Err(Error::Policy(snapif::error::PolicyError::Config(format!(
+            "script noul {id} must be a number from 0 to 1, got {value}"
+        ))));
+    };
+    if !(0.0..=1.0).contains(&number) {
+        return Err(Error::Policy(snapif::error::PolicyError::Config(format!(
+            "script noul {id} must be a number from 0 to 1, got {number}"
+        ))));
+    }
+    Ok(Some(number))
 }
 
 fn open_client(policy: Option<&str>, shadow: bool) -> Result<Client<AnyBackend>, Error> {

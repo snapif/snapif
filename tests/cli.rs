@@ -3916,6 +3916,47 @@ block_on = [
 }
 
 #[test]
+fn replay_and_calibrate_reject_a_string_battery_noul() {
+    let dir = std::env::temp_dir().join(format!("snapif-bad-noul-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let row = dir.join("rows.jsonl");
+    fs::write(
+        &row,
+        r#"{"id":"bad-destructive","gate_request":{"action_id":"bash.rm","prepared":{"name":"bash.rm","args":{}},"state":{"trusted":{"user_request":"invoice"},"untrusted":null}},"script":{"harm":"exec","confidence":1.0,"nouls":{"destructive":"0.95"}},"expected":"auto"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_out = String::from_utf8_lossy(&replayed.stdout);
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_out}{replay_err}");
+    assert!(
+        replay_err.contains("script noul destructive must be a number from 0 to 1"),
+        "{replay_err}"
+    );
+    assert!(!replay_out.contains("\"got\":\"auto\""), "{replay_out}");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&row)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_out = String::from_utf8_lossy(&calibrated.stdout);
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(1), "{cal_out}{cal_err}");
+    assert!(
+        cal_err.contains("script noul destructive must be a number from 0 to 1"),
+        "{cal_err}"
+    );
+    assert!(!cal_out.contains("gate_matched"), "{cal_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn replay_summary_counts_actions_and_logged_reasons() {
     let dir = std::env::temp_dir().join(format!("snapif-summary-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
