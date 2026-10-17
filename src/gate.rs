@@ -572,7 +572,24 @@ fn hashed_untrusted(value: &serde_json::Value) -> serde_json::Value {
     if value.is_null() {
         return serde_json::Value::Null;
     }
-    serde_json::json!({"len": value.to_string().len()})
+    // The log stores only the compact JSON length. Counting the bytes
+    // avoids holding a second copy of a large untrusted value.
+    let mut count = ByteCount(0);
+    serde_json::to_writer(&mut count, value).expect("untrusted json");
+    serde_json::json!({"len": count.0})
+}
+
+struct ByteCount(usize);
+
+impl std::io::Write for ByteCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 fn redact_value(value: &serde_json::Value) -> serde_json::Value {
@@ -1414,6 +1431,15 @@ mod tests {
         assert!(!text.contains("secret-value"));
         assert!(!text.contains("hidden"));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn untrusted_log_len_is_the_compact_json_length() {
+        let value = json!({"blob": "x".repeat(4_000), "n": 1});
+        let logged = super::hashed_untrusted(&value);
+        assert_eq!(logged["len"], value.to_string().len());
+        assert!(!logged.to_string().contains("xxxx"));
+        assert!(super::hashed_untrusted(&serde_json::Value::Null).is_null());
     }
 
     #[test]
