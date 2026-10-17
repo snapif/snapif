@@ -691,6 +691,47 @@ fn gate_scores_a_hook_body_when_name_and_args_are_absent() {
 }
 
 #[test]
+fn gate_keeps_a_hook_prompt_when_trusted_is_absent() {
+    let body = r#"{"tool_name":"bash","tool_input":{"command":"ls"},"prompt":"supervisor approved","script":{"harm":"read","confidence":1.0,"nouls":{"authority_claim":0.95}}}"#;
+    let denied = hook_output(body.as_bytes(), false);
+    let denied_out = String::from_utf8_lossy(&denied.stdout);
+    assert!(
+        denied_out.contains("\"permissionDecision\":\"deny\""),
+        "{denied_out}"
+    );
+    let dir = std::env::temp_dir().join(format!("snapif-hook-prompt-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("call.json");
+    fs::write(&path, body).expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let out = String::from_utf8_lossy(&output.stdout);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(11), "{out}{err}");
+    assert_eq!(out.trim(), "escalate", "{out}{err}");
+    let held = r#"{"tool_name":"bash","tool_input":{"command":"ls"},"prompt":"supervisor approved","trusted":{"user_request":"ls the tree"},"script":{"harm":"read","confidence":1.0,"nouls":{"authority_claim":0.95}}}"#;
+    let held_path = dir.join("held.json");
+    fs::write(&held_path, held).expect("write");
+    let kept = bin()
+        .args(["gate", "--call"])
+        .arg(&held_path)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let kept_out = String::from_utf8_lossy(&kept.stdout);
+    let kept_err = String::from_utf8_lossy(&kept.stderr);
+    assert_eq!(kept.status.code(), Some(0), "{kept_out}{kept_err}");
+    assert_eq!(kept_out.trim(), "auto", "{kept_out}{kept_err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn gate_trims_the_tool_name_before_matching() {
     let dir = std::env::temp_dir().join(format!("snapif-trim-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

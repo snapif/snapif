@@ -256,14 +256,18 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     } else {
         Value::Null
     };
+    // A hook body has `prompt` and no trusted object. `snapif hook`
+    // copies that text. Gate already accepts the same body for the
+    // command, so a missing trusted object uses the same copy.
+    // An explicit object still wins, including an empty one.
     let trusted = if has("trusted") {
-        file.trusted.unwrap_or(Value::Null)
+        file.trusted.filter(|item| item.is_object())
     } else {
         file.state
             .as_ref()
-            .map(|state| state.trusted.clone())
-            .unwrap_or(Value::Null)
-    };
+            .and_then(|state| state.trusted.as_object().map(|_| state.trusted.clone()))
+    }
+    .unwrap_or_else(|| hook_trusted(&value));
     let untrusted = if has("untrusted") {
         file.untrusted.unwrap_or(Value::Null)
     } else {
