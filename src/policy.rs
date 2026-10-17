@@ -376,7 +376,29 @@ fn check_action(
 /// match. `find -name rm`, `find -name -delete`, and `find -exec echo rm`
 /// do not. `ssh host rm` and `flock file rm` match. `ssh host` and
 /// `ssh -p 22 rm` do not: the word after the options is the destination,
-/// not the command. `timeout 1 rm` and `xargs rm` match.
+/// not the command. `ssh -o ProxyCommand=rm`, and the same `-o` on
+/// `scp` and `sftp`, match that command. A value after `-p` or `-i`
+/// does not hide a later `ProxyCommand`. The option name ignores ASCII
+/// case. A space works the same as `=`, and whitespace around `=` is
+/// ignored. An empty command and `none` do not match.
+/// `git -c credential.helper='!rm' credential` matches, including
+/// another ASCII case, `credential.https://example.com.helper`, and
+/// `credential..helper`. An empty helper clears the ones already seen.
+/// A helper with no `!` is a program name, not a shell. Section and
+/// variable names ignore ASCII case. The subsection in `difftool.x.cmd`
+/// stays case-sensitive. An alias name does not: `alias.P` runs for
+/// `p` and `P`. `core.sshCommand` matches an ssh remote and a bare
+/// `push`, and it does not match an `https://` URL or a local path.
+/// `GIT_SSH_COMMAND`
+/// replaces that config when the assignment is present, including when
+/// the value is empty. `GIT_SSH` is one program path, used only when
+/// neither command is set. `export NAME=value` lasts for a later command
+/// in the same shell, including `builtin export`. A function named
+/// `export` runs instead of that builtin. `export -n` drops the name.
+/// A pipeline does not publish it. A bare assignment does not.
+/// `status` does not run these,
+/// and a later argument named `credential` is not that subcommand.
+/// `timeout 1 rm` and `xargs rm` match.
 /// `timeout -- rm` keeps `rm` as the duration. `timeout 1 echo rm`
 /// and `xargs echo rm` do not match. Homebrew names the same binaries
 /// `gtimeout`, `gxargs`, `genv`, `gnice`, `gnohup`, `gstdbuf`, and `grm`.
@@ -428,7 +450,16 @@ pub fn matched_action<'a>(
     }
     let command = command.unwrap_or("").trim_start();
     let mut functions = Functions::new();
-    matched_in(policy, tool_name, command, 0, &mut functions)
+    let mut env = Vec::new();
+    matched_in(
+        policy,
+        tool_name,
+        command,
+        0,
+        &mut functions,
+        &mut env,
+        &GitBindings::default(),
+    )
 }
 
 const MAX_SHELL_DEPTH: u32 = 8;
@@ -441,6 +472,8 @@ fn matched_in<'a>(
     command: &str,
     depth: u32,
     functions: &mut Functions,
+    env: &mut Vec<(String, String)>,
+    git: &GitBindings,
 ) -> Option<&'a ActionId> {
     if depth > MAX_SHELL_DEPTH {
         return None;
@@ -452,95 +485,193 @@ fn matched_in<'a>(
                 functions.insert(name, body);
             }
             ShellPart::Segment(segment) => {
-                consider_segment(policy, tool_name, &segment, depth, functions, &mut best);
+                let subshell = segment.tokens.first().is_some_and(|token| token == "(");
+                if segment.isolated || subshell {
+                    let mut copy = env.clone();
+                    consider_segment(
+                        policy, tool_name, &segment, depth, functions, &mut copy, git, &mut best,
+                    );
+                } else {
+                    consider_segment(
+                        policy, tool_name, &segment, depth, functions, env, git, &mut best,
+                    );
+                }
             }
         }
     }
     best
 }
 
+// A child needs the exported environment and the git bindings.
+// A prefix assignment is not published back.
+#[allow(clippy::too_many_arguments)]
 fn consider_segment<'a>(
     policy: &'a Policy,
     tool_name: &str,
     segment: &ShellSegment,
     depth: u32,
     functions: &mut Functions,
+    exported: &mut Vec<(String, String)>,
+    git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some((argv, split_script)) = executed_argv(&segment.tokens) else {
+    let Some(executed) = executed_argv(&segment.tokens, exported) else {
         scan_subshells(
             policy,
             tool_name,
             &segment.substitutions,
             depth,
             functions,
+            exported,
+            git,
             best,
         );
         return;
     };
-    if let Some(script) = split_script {
-        let mut child = Functions::new();
-        prefer(
+    // `$(...)` does not see a prefix assignment. A child process does.
+    let local = &executed.env;
+    // A function named `export` runs instead of the builtin.
+    // `command export` and `builtin export` keep the builtin.
+    let export_is_function = is_export(&executed.argv)
+        && !executed.exec_wrapper
+        && !executed.bypass_function
+        && executed
+            .argv
+            .first()
+            .is_some_and(|word| functions.contains_key(word));
+    if is_export(&executed.argv) && !executed.exec_wrapper && !export_is_function {
+        scan_subshells(
             policy,
+            tool_name,
+            &segment.substitutions,
+            depth,
+            functions,
+            exported,
+            git,
             best,
-            matched_in(policy, tool_name, &script, depth + 1, &mut child),
         );
+        apply_exports(exported, &executed.argv, local);
+        return;
     }
-    let child_script = shell_script(&argv)
-        .or_else(|| cmd_script(&argv))
-        .or_else(|| powershell_script(&argv))
-        .or_else(|| su_script(&argv));
+    let run_detached =
+        |script: &str, functions: &mut Functions, best: &mut Option<&'a ActionId>| {
+            let mut child_env = local.clone();
+            prefer(
+                policy,
+                best,
+                matched_in(
+                    policy,
+                    tool_name,
+                    script,
+                    depth + 1,
+                    functions,
+                    &mut child_env,
+                    git,
+                ),
+            );
+        };
+    let mut run_here =
+        |script: &str, functions: &mut Functions, best: &mut Option<&'a ActionId>| {
+            let before = local.clone();
+            let mut child_env = local.clone();
+            prefer(
+                policy,
+                best,
+                matched_in(
+                    policy,
+                    tool_name,
+                    script,
+                    depth + 1,
+                    functions,
+                    &mut child_env,
+                    git,
+                ),
+            );
+            publish_env_changes(exported, &before, &child_env);
+        };
+    if let Some(script) = &executed.split_script {
+        let mut child = Functions::new();
+        run_detached(script, &mut child, best);
+    }
+    let child_script = shell_script(&executed.argv)
+        .or_else(|| cmd_script(&executed.argv))
+        .or_else(|| powershell_script(&executed.argv))
+        .or_else(|| su_script(&executed.argv));
     if let Some(script) = child_script {
         // `pwsh -Command -` reads the heredoc. The dash itself is not a command.
         // `bash -c -` is the script "-", not stdin.
-        if is_stdin_script(&script) && is_powershell_base(argv.first().map(String::as_str)) {
-            scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
+        if is_stdin_script(&script) && is_powershell_base(executed.argv.first().map(String::as_str))
+        {
+            scan_isolated(
+                policy,
+                tool_name,
+                &segment.heredocs,
+                depth,
+                local,
+                git,
+                best,
+            );
         } else {
             let mut child = Functions::new();
-            prefer(
-                policy,
-                best,
-                matched_in(policy, tool_name, &script, depth + 1, &mut child),
-            );
+            run_detached(&script, &mut child, best);
         }
-    } else if let Some(script) = eval_script(&argv) {
-        prefer(
-            policy,
-            best,
-            matched_in(policy, tool_name, &script, depth + 1, functions),
-        );
-    } else if let Some(body) = argv.first().and_then(|name| functions.get(name).cloned()) {
-        prefer(
-            policy,
-            best,
-            matched_in(policy, tool_name, &body, depth + 1, functions),
-        );
+    } else if let Some(script) = eval_script(&executed.argv) {
+        run_here(&script, functions, best);
+    } else if !executed.exec_wrapper
+        && !executed.bypass_function
+        && let Some(body) = executed
+            .argv
+            .first()
+            .and_then(|name| functions.get(name).cloned())
+    {
+        run_here(&body, functions, best);
     } else {
-        if let Some(id) = prefix_hit(policy, tool_name, &argv) {
+        if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
             prefer(policy, best, Some(id));
         }
-        if find_deletes(&argv) {
+        if find_deletes(&executed.argv) {
             prefer(policy, best, destructive_rm_action(policy, tool_name));
         }
-        let scripts = find_exec_commands(&argv);
-        scan_isolated(policy, tool_name, &scripts, depth, best);
-        let remotes = remote_scripts(&argv);
-        scan_isolated(policy, tool_name, &remotes, depth, best);
-        let arms = case_arm_scripts(&argv);
-        scan_isolated(policy, tool_name, &arms, depth, best);
-        let aliases = git_alias_scripts(&argv);
-        scan_isolated(policy, tool_name, &aliases, depth, best);
-        if shell_reads_stdin(&argv) {
-            scan_isolated(policy, tool_name, &segment.heredocs, depth, best);
-        }
-    }
-    if sourced_stdin(&argv) {
-        for body in &segment.heredocs {
+        let scripts = find_exec_commands(&executed.argv);
+        scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+        let remotes = remote_scripts(&executed.argv);
+        scan_isolated(policy, tool_name, &remotes, depth, local, git, best);
+        let arms = case_arm_scripts(&executed.argv);
+        scan_isolated(policy, tool_name, &arms, depth, local, git, best);
+        let found = git_alias_scripts(&executed.argv, local, git);
+        scan_isolated(policy, tool_name, &found.commands, depth, local, git, best);
+        for body in &found.shells {
+            let mut child = Functions::new();
+            let mut child_env = local.clone();
             prefer(
                 policy,
                 best,
-                matched_in(policy, tool_name, body, depth + 1, functions),
+                matched_in(
+                    policy,
+                    tool_name,
+                    body,
+                    depth + 1,
+                    &mut child,
+                    &mut child_env,
+                    &found.bindings,
+                ),
             );
+        }
+        if shell_reads_stdin(&executed.argv) {
+            scan_isolated(
+                policy,
+                tool_name,
+                &segment.heredocs,
+                depth,
+                local,
+                git,
+                best,
+            );
+        }
+    }
+    if sourced_stdin(&executed.argv) {
+        for body in &segment.heredocs {
+            run_here(body, functions, best);
         }
     }
     scan_subshells(
@@ -549,8 +680,77 @@ fn consider_segment<'a>(
         &segment.substitutions,
         depth,
         functions,
+        exported,
+        git,
         best,
     );
+}
+
+fn is_export(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|word| command_basename(word) == "export")
+}
+
+/// `export NAME=value` lasts for later commands in this shell.
+/// `export NAME` copies the prefix value. `export -n` drops the name.
+/// A prefix assignment does not.
+fn apply_exports(
+    exported: &mut Vec<(String, String)>,
+    argv: &[String],
+    local: &[(String, String)],
+) {
+    let mut unexport = false;
+    let mut options = true;
+    for token in argv.iter().skip(1) {
+        if options {
+            if token == "--" {
+                options = false;
+                continue;
+            }
+            if let Some(drop_name) = export_drop_flag(token) {
+                unexport |= drop_name;
+                continue;
+            }
+        }
+        if unexport {
+            if let Some((name, _)) = plain_assignment(token) {
+                unset_env(exported, name);
+            } else if env_name(token) {
+                unset_env(exported, token);
+            }
+            continue;
+        }
+        if apply_assignment(exported, token) {
+            continue;
+        }
+        if env_name(token)
+            && let Some(value) = last_assignment(local, token)
+        {
+            set_env(exported, token, value);
+        }
+    }
+}
+
+/// `Some(true)` is `-n`: a later command must not see that name.
+/// `Some(false)` is `-f` or `-p`, which is not an assignment.
+fn export_drop_flag(token: &str) -> Option<bool> {
+    let letters = token.strip_prefix('-')?;
+    if letters.is_empty() || !letters.chars().all(|ch| matches!(ch, 'n' | 'f' | 'p')) {
+        return None;
+    }
+    Some(letters.contains('n'))
+}
+
+fn publish_env_changes(
+    parent: &mut Vec<(String, String)>,
+    before: &[(String, String)],
+    after: &[(String, String)],
+) {
+    for (key, value) in after {
+        if last_assignment(before, key) != Some(value.as_str()) {
+            set_env(parent, key, value);
+        }
+    }
 }
 
 /// A new process. It does not see shell functions from this string.
@@ -559,33 +759,57 @@ fn scan_isolated<'a>(
     tool_name: &str,
     scripts: &[String],
     depth: u32,
+    env: &[(String, String)],
+    git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
     for script in scripts {
         let mut child = Functions::new();
+        let mut child_env = env.to_vec();
         prefer(
             policy,
             best,
-            matched_in(policy, tool_name, script, depth + 1, &mut child),
+            matched_in(
+                policy,
+                tool_name,
+                script,
+                depth + 1,
+                &mut child,
+                &mut child_env,
+                git,
+            ),
         );
     }
 }
 
 /// `$(...)` inherits functions and does not publish definitions back.
+/// It also does not see a prefix assignment on the command being expanded.
+#[allow(clippy::too_many_arguments)]
 fn scan_subshells<'a>(
     policy: &'a Policy,
     tool_name: &str,
     scripts: &[String],
     depth: u32,
     functions: &Functions,
+    env: &[(String, String)],
+    git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
     for script in scripts {
         let mut child = functions.clone();
+        let mut child_env = env.to_vec();
         prefer(
             policy,
             best,
-            matched_in(policy, tool_name, script, depth + 1, &mut child),
+            matched_in(
+                policy,
+                tool_name,
+                script,
+                depth + 1,
+                &mut child,
+                &mut child_env,
+                git,
+            ),
         );
     }
 }
@@ -838,6 +1062,9 @@ fn ssh_proxy_commands(argv: &[String]) -> Vec<String> {
     if !is_openssh_client(first) {
         return Vec::new();
     }
+    // `scp -P` and `sftp -P` take a port. `ssh` uses `-p`.
+    let port_is_uppercase = command_basename(first).eq_ignore_ascii_case("scp")
+        || command_basename(first).eq_ignore_ascii_case("sftp");
     let mut commands = Vec::new();
     let mut index = 1;
     while index < argv.len() {
@@ -845,20 +1072,73 @@ fn ssh_proxy_commands(argv: &[String]) -> Vec<String> {
         if token == "--" || !token.starts_with('-') {
             break;
         }
-        let spec = if token == "-o" {
+        if token == "-o" {
             index += 1;
-            argv.get(index).map(String::as_str)
-        } else {
-            token.strip_prefix("-o")
-        };
-        if let Some(command) = spec.and_then(|spec| spec.strip_prefix("ProxyCommand="))
-            && !command.is_empty()
-        {
-            commands.push(command.to_string());
+            if let Some(command) = argv.get(index).and_then(|spec| proxy_command_script(spec)) {
+                commands.push(command.to_string());
+            }
+            index += 1;
+            continue;
         }
+        if let Some(spec) = token.strip_prefix("-o")
+            && !spec.is_empty()
+        {
+            if let Some(command) = proxy_command_script(spec) {
+                commands.push(command.to_string());
+            }
+            index += 1;
+            continue;
+        }
+        // `-p 22` is a port, not the end of the options. The next
+        // `-o ProxyCommand` still runs.
+        let takes_next = (ssh_opt_takes_value(token) || (port_is_uppercase && token == "-P"))
+            && !token.contains('=')
+            && !ssh_value_is_glued(token);
         index += 1;
+        if takes_next && index < argv.len() {
+            index += 1;
+        }
     }
     commands
+}
+
+/// OpenSSH option line. The keyword ignores ASCII case. Whitespace or
+/// `=` separates the command, and whitespace around `=` is ignored.
+/// `none` clears the command. A longer keyword is a different option.
+fn proxy_command_script(spec: &str) -> Option<&str> {
+    let spec = trim_ssh_start(spec);
+    let keyword = "proxycommand";
+    // `get` refuses a cut inside a character. `split_at` would panic.
+    let head = spec.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &spec[keyword.len()..];
+    let rest = if rest.starts_with(is_ssh_space) {
+        let rest = trim_ssh_start(rest);
+        if let Some(after) = rest.strip_prefix('=') {
+            trim_ssh_start(after)
+        } else {
+            rest
+        }
+    } else if let Some(after) = rest.strip_prefix('=') {
+        trim_ssh_start(after)
+    } else {
+        return None;
+    };
+    if rest.is_empty() || rest.eq_ignore_ascii_case("none") {
+        None
+    } else {
+        Some(rest)
+    }
+}
+
+fn is_ssh_space(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000b}' | '\u{000c}')
+}
+
+fn trim_ssh_start(text: &str) -> &str {
+    text.trim_start_matches(is_ssh_space)
 }
 
 fn rsync_shells(argv: &[String]) -> Vec<String> {
@@ -1256,11 +1536,27 @@ fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
     true
 }
 
-fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
+struct ExecutedArgv {
+    argv: Vec<String>,
+    split_script: Option<String>,
+    env: Vec<(String, String)>,
+    exec_wrapper: bool,
+    /// `command` or `builtin` was peeled, so a shell function of the
+    /// same name does not run.
+    bypass_function: bool,
+}
+
+fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<ExecutedArgv> {
     let mut index = 0;
     let mut split_script = None;
+    let mut env = inherited.to_vec();
+    let mut exec_wrapper = false;
+    let mut bypass_function = false;
+    let mut allow_assign = true;
     while index < tokens.len() {
-        if is_assignment(&tokens[index]) {
+        if allow_assign
+            && (apply_assignment(&mut env, &tokens[index]) || is_assignment(&tokens[index]))
+        {
             index += 1;
             continue;
         }
@@ -1283,15 +1579,51 @@ fn executed_argv(tokens: &[String]) -> Option<(Vec<String>, Option<String>)> {
             break;
         }
         index += 1;
-        let Some((next, script)) = skip_wrapper_flags(base, tokens, index) else {
-            return split_script.map(|script| (Vec::new(), Some(script)));
+        if !runs_in_parent(base) {
+            exec_wrapper = true;
+        } else {
+            bypass_function = true;
+        }
+        let start = index;
+        let Some((next, script)) = skip_wrapper_flags(base, tokens, index, &mut env) else {
+            return split_script.map(|script| ExecutedArgv {
+                argv: Vec::new(),
+                split_script: Some(script),
+                env,
+                exec_wrapper,
+                bypass_function,
+            });
         };
+        if next == start {
+            // `nice FOO=bar` does not assign FOO. `command exec` still
+            // has to see `exec` as the next program.
+            if start < tokens.len() && apply_assignment_token(&tokens[start]) {
+                break;
+            }
+            continue;
+        }
+        if tokens
+            .get(start..next)
+            .is_some_and(|range| range.iter().any(|token| token == "--"))
+        {
+            allow_assign = false;
+        }
         if split_script.is_none() {
             split_script = script;
         }
         index = next;
     }
-    Some((tokens[index..].to_vec(), split_script))
+    Some(ExecutedArgv {
+        argv: tokens[index..].to_vec(),
+        split_script,
+        env,
+        exec_wrapper,
+        bypass_function,
+    })
+}
+
+fn runs_in_parent(wrapper: &str) -> bool {
+    matches!(wrapper, "command" | "builtin")
 }
 
 fn leading_shell_keyword(token: &str) -> bool {
@@ -1305,11 +1637,18 @@ fn skip_wrapper_flags(
     wrapper: &str,
     tokens: &[String],
     mut index: usize,
+    env: &mut Vec<(String, String)>,
 ) -> Option<(usize, Option<String>)> {
     let mut split_script = None;
     while index < tokens.len() {
         let token = tokens[index].as_str();
-        if is_assignment(token) {
+        if apply_assignment_token(token) {
+            if wrapper_sets_env(wrapper) {
+                apply_assignment(env, token);
+            } else {
+                // `nice FOO=bar` runs a program named `FOO=bar`. It is not an assignment.
+                break;
+            }
             index += 1;
             continue;
         }
@@ -1463,8 +1802,8 @@ fn gnu_alias(name: &str) -> &str {
 
 fn is_wrapper(name: &str) -> bool {
     const WRAPPERS: &[&str] = &[
-        "sudo", "doas", "pkexec", "env", "command", "nice", "nohup", "time", "busybox", "ionice",
-        "stdbuf", "setsid", "exec", "timeout", "xargs",
+        "sudo", "doas", "pkexec", "env", "command", "builtin", "nice", "nohup", "time", "busybox",
+        "ionice", "stdbuf", "setsid", "exec", "timeout", "xargs",
     ];
     WRAPPERS
         .iter()
@@ -1946,145 +2285,412 @@ fn case_arm_scripts(tokens: &[String]) -> Vec<String> {
     scripts
 }
 
-fn git_alias_scripts(argv: &[String]) -> Vec<String> {
+struct GitScripts {
+    commands: Vec<String>,
+    shells: Vec<String>,
+    bindings: GitBindings,
+}
+
+fn git_alias_scripts(
+    argv: &[String],
+    env: &[(String, String)],
+    inherited: &GitBindings,
+) -> GitScripts {
+    let bindings = inherited.clone();
     let Some(first) = argv.first() else {
-        return Vec::new();
+        return GitScripts {
+            commands: Vec::new(),
+            shells: Vec::new(),
+            bindings,
+        };
     };
     if !command_basename(first).eq_ignore_ascii_case("git") {
-        return Vec::new();
+        return GitScripts {
+            commands: Vec::new(),
+            shells: Vec::new(),
+            bindings,
+        };
     }
-    let mut aliases = Vec::new();
-    let mut helpers = Vec::new();
-    let mut external_diffs = Vec::new();
-    let mut ssh_commands = Vec::new();
-    let mut difftool_cmds = Vec::new();
-    let mut diff_tools = Vec::new();
-    let mut filter_cleans = Vec::new();
-    let mut filter_smudges = Vec::new();
-    let mut mergetool_cmds = Vec::new();
-    let mut merge_tools = Vec::new();
+    let mut seen = bindings;
     let mut index = 1;
     while index < argv.len() {
         let token = argv[index].as_str();
         if token == "--" || !token.starts_with('-') {
             break;
         }
-        if token == "-c" || token == "--config" {
+        if token == "-c" {
             index += 1;
-            if let Some((key, value)) = argv.get(index).and_then(|spec| spec.split_once('=')) {
-                if key == "credential.helper" {
-                    if let Some(shell) = value.strip_prefix('!') {
-                        helpers.push(shell.to_string());
-                    }
-                } else if key == "core.sshCommand" {
-                    let script = value.strip_prefix('!').unwrap_or(value);
-                    if !script.is_empty() {
-                        ssh_commands.push(script.to_string());
-                    }
-                } else if key == "diff.external" {
-                    let script = value.strip_prefix('!').unwrap_or(value);
-                    if !script.is_empty() {
-                        external_diffs.push(script.to_string());
-                    }
-                } else if key == "diff.tool" && !value.is_empty() {
-                    diff_tools.push(value.to_string());
-                } else if key == "merge.tool" && !value.is_empty() {
-                    merge_tools.push(value.to_string());
-                } else if let Some(rest) = key.strip_prefix("difftool.") {
-                    if let Some(tool) = rest.strip_suffix(".cmd") {
-                        let script = value.strip_prefix('!').unwrap_or(value);
-                        if !tool.is_empty() && !script.is_empty() {
-                            difftool_cmds.push((tool.to_string(), script.to_string()));
-                        }
-                    }
-                } else if let Some(rest) = key.strip_prefix("mergetool.") {
-                    if let Some(tool) = rest.strip_suffix(".cmd") {
-                        let script = value.strip_prefix('!').unwrap_or(value);
-                        if !tool.is_empty() && !script.is_empty() {
-                            mergetool_cmds.push((tool.to_string(), script.to_string()));
-                        }
-                    }
-                } else if let Some(rest) = key.strip_prefix("filter.") {
-                    let script = value.strip_prefix('!').unwrap_or(value);
-                    if rest.ends_with(".clean") && !script.is_empty() {
-                        filter_cleans.push(script.to_string());
-                    } else if rest.ends_with(".smudge") && !script.is_empty() {
-                        filter_smudges.push(script.to_string());
-                    }
-                } else if let Some(name) = key.strip_prefix("alias.") {
-                    aliases.push((name.to_string(), value.to_string()));
+            if let Some(spec) = argv.get(index) {
+                seen.note(spec);
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(spec) = token.strip_prefix("--config-env=") {
+            seen.note_env(spec, env);
+            index += 1;
+            continue;
+        }
+        if token == "--config-env" {
+            index += 1;
+            if let Some(spec) = argv.get(index) {
+                seen.note_env(spec, env);
+            }
+            index += 1;
+            continue;
+        }
+        let takes = !token.contains('=') && option_takes_value(token);
+        index += 1;
+        if takes && index < argv.len() {
+            index += 1;
+        }
+    }
+    let mut commands = Vec::new();
+    let mut shells = Vec::new();
+    seen.collect(argv, env, 0, &mut commands, &mut shells);
+    GitScripts {
+        commands,
+        shells,
+        bindings: seen,
+    }
+}
+
+#[derive(Clone, Default)]
+struct GitBindings {
+    helpers: Vec<String>,
+    ssh: Option<String>,
+    external_diff: Option<String>,
+    diff_tool: Option<String>,
+    merge_tool: Option<String>,
+    difftools: Vec<(String, String)>,
+    mergetools: Vec<(String, String)>,
+    cleans: Vec<(String, String)>,
+    smudges: Vec<(String, String)>,
+    aliases: Vec<(String, String)>,
+}
+
+struct GitKey {
+    section: String,
+    subsection: Option<String>,
+    name: String,
+}
+
+impl GitBindings {
+    fn note(&mut self, spec: &str) {
+        let Some((key, value)) = spec.split_once('=') else {
+            return;
+        };
+        let Some(parsed) = parse_git_key(key) else {
+            return;
+        };
+        match (
+            parsed.section.as_str(),
+            parsed.subsection.as_deref(),
+            parsed.name.as_str(),
+        ) {
+            ("credential", _, "helper") => note_credential_helper(&mut self.helpers, value),
+            ("core", None, "sshcommand") => {
+                self.ssh = Some(strip_bang(value).to_string());
+            }
+            ("diff", None, "external") => {
+                self.external_diff = Some(strip_bang(value).to_string());
+            }
+            ("diff", None, "tool") => self.diff_tool = Some(value.to_string()),
+            ("merge", None, "tool") => self.merge_tool = Some(value.to_string()),
+            ("difftool", Some(tool), "cmd") if !tool.is_empty() => {
+                set_named(&mut self.difftools, tool, strip_bang(value), true);
+            }
+            ("mergetool", Some(tool), "cmd") if !tool.is_empty() => {
+                set_named(&mut self.mergetools, tool, strip_bang(value), true);
+            }
+            ("filter", Some(name), "clean") if !name.is_empty() => {
+                set_named(&mut self.cleans, name, strip_bang(value), true);
+            }
+            ("filter", Some(name), "smudge") if !name.is_empty() => {
+                set_named(&mut self.smudges, name, strip_bang(value), true);
+            }
+            ("alias", _, _) => {
+                if let Some(name) = alias_name(&parsed) {
+                    set_named(&mut self.aliases, &name, value, false);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn note_env(&mut self, spec: &str, env: &[(String, String)]) {
+        let Some((key, var)) = spec.rsplit_once('=') else {
+            return;
+        };
+        if key.is_empty() || var.is_empty() {
+            return;
+        }
+        let Some(value) = last_assignment(env, var) else {
+            return;
+        };
+        let binding = format!("{key}={value}");
+        self.note(&binding);
+    }
+
+    fn collect(
+        &self,
+        argv: &[String],
+        env: &[(String, String)],
+        depth: u32,
+        commands: &mut Vec<String>,
+        shells: &mut Vec<String>,
+    ) {
+        if depth > MAX_SHELL_DEPTH {
+            return;
+        }
+        // Git runs these for the subcommand, not for a later path
+        // that happens to use the same word (`status credential`).
+        let Some(subcommand) = git_subcommand(argv) else {
+            return;
+        };
+        if subcommand == "diff"
+            && let Some(command) = self
+                .external_diff
+                .as_ref()
+                .filter(|value| !value.is_empty())
+        {
+            commands.push(command.clone());
+        }
+        if subcommand == "add" {
+            commands.extend(self.cleans.iter().map(|(_, command)| command.clone()));
+        }
+        if subcommand == "checkout" {
+            commands.extend(self.smudges.iter().map(|(_, command)| command.clone()));
+        }
+        if subcommand == "difftool" {
+            push_selected_tool(commands, argv, &self.diff_tool, &self.difftools);
+        }
+        if subcommand == "mergetool" {
+            push_selected_tool(commands, argv, &self.merge_tool, &self.mergetools);
+        }
+        commands.extend(ssh_scripts(&self.ssh, argv, env));
+        if subcommand == "credential" {
+            commands.extend(self.helpers.iter().cloned());
+        }
+        let extra = git_args_after_subcommand(argv);
+        for (name, value) in &self.aliases {
+            if !subcommand.eq_ignore_ascii_case(name) {
+                continue;
+            }
+            // Git ignores an alias that hides a real command (`alias.push`).
+            // `alias.p` still expands, because `p` is not a command.
+            if git_command(name) {
+                continue;
+            }
+            if let Some(shell) = value.strip_prefix('!') {
+                if !shell.is_empty() {
+                    shells.push(shell.to_string());
+                }
+            } else if !value.is_empty() {
+                let mut child = command_argv(&format!("git {value}"));
+                child.extend(extra.iter().cloned());
+                if child.len() > 1 {
+                    // Quote so a later rescan sees the same words git executes.
+                    // A bare join would turn the argument `a;rm` into a shell.
+                    commands.push(quote_argv(&child));
+                    self.collect(&child, env, depth + 1, commands, shells);
                 }
             }
         }
-        index += 1;
     }
-    let mut scripts = Vec::new();
-    if argv.iter().any(|word| word == "diff") {
-        scripts.extend(external_diffs);
+}
+
+fn note_credential_helper(helpers: &mut Vec<String>, value: &str) {
+    if value.is_empty() {
+        helpers.clear();
+        return;
     }
-    if argv.iter().any(|word| word == "add") {
-        scripts.extend(filter_cleans);
+    let Some(shell) = value.strip_prefix('!') else {
+        return;
+    };
+    if !shell.is_empty() {
+        helpers.push(shell.to_string());
     }
-    if argv.iter().any(|word| word == "checkout") {
-        scripts.extend(filter_smudges);
+}
+
+fn strip_bang(value: &str) -> &str {
+    value.strip_prefix('!').unwrap_or(value)
+}
+
+fn parse_git_key(key: &str) -> Option<GitKey> {
+    let (left, name) = key.rsplit_once('.')?;
+    if left.is_empty() || !git_ident(name) {
+        return None;
     }
-    if argv.iter().any(|word| word == "difftool")
-        && let Some(tool) = selected_difftool(argv, &diff_tools)
-    {
-        for (name, command) in difftool_cmds {
-            if name == tool {
-                scripts.push(command);
-            }
+    let (section, subsection) = if let Some((section, sub)) = left.split_once('.') {
+        (section, Some(sub.to_string()))
+    } else {
+        (left, None)
+    };
+    if !git_ident(section) {
+        return None;
+    }
+    Some(GitKey {
+        section: section.to_ascii_lowercase(),
+        subsection,
+        name: name.to_ascii_lowercase(),
+    })
+}
+
+fn git_ident(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+fn alias_name(key: &GitKey) -> Option<String> {
+    if key.section != "alias" {
+        return None;
+    }
+    match &key.subsection {
+        None => Some(key.name.clone()),
+        Some(sub) => Some(format!("{sub}.{}", key.name)),
+    }
+}
+
+/// The last value for this name wins. An empty value removes it.
+/// `case_sensitive` is false for alias names, which Git folds.
+fn set_named(list: &mut Vec<(String, String)>, name: &str, value: &str, case_sensitive: bool) {
+    let same = |existing: &str| {
+        if case_sensitive {
+            existing == name
+        } else {
+            existing.eq_ignore_ascii_case(name)
+        }
+    };
+    if let Some(index) = list.iter().rposition(|(existing, _)| same(existing)) {
+        if value.is_empty() {
+            list.remove(index);
+        } else {
+            list[index] = (name.to_string(), value.to_string());
+        }
+        return;
+    }
+    if !value.is_empty() {
+        list.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn push_selected_tool(
+    scripts: &mut Vec<String>,
+    argv: &[String],
+    configured: &Option<String>,
+    commands: &[(String, String)],
+) {
+    let configured = match configured {
+        Some(tool) if !tool.is_empty() => vec![tool.clone()],
+        _ => Vec::new(),
+    };
+    let Some(tool) = selected_difftool(argv, &configured) else {
+        return;
+    };
+    for (name, command) in commands {
+        if name == &tool {
+            scripts.push(command.clone());
         }
     }
-    if argv.iter().any(|word| word == "mergetool")
-        && let Some(tool) = selected_difftool(argv, &merge_tools)
-    {
-        for (name, command) in mergetool_cmds {
-            if name == tool {
-                scripts.push(command);
-            }
-        }
+}
+
+/// `GIT_SSH_COMMAND` wins, including an empty value, which suppresses
+/// `core.sshCommand` and `GIT_SSH`. The config wins over `GIT_SSH`.
+fn ssh_scripts(
+    configured: &Option<String>,
+    argv: &[String],
+    env: &[(String, String)],
+) -> Vec<String> {
+    if !git_uses_ssh(argv) {
+        return Vec::new();
     }
-    if git_uses_ssh(argv) {
-        scripts.extend(ssh_commands);
+    if let Some(value) = last_assignment(env, "GIT_SSH_COMMAND") {
+        return one_script(value);
     }
-    if argv.iter().any(|word| word == "credential") {
-        for shell in helpers {
-            if !shell.is_empty() {
-                scripts.push(shell);
-            }
-        }
+    if let Some(value) = configured {
+        return one_script(value);
     }
-    for (name, value) in aliases {
-        let invoked = argv.iter().any(|word| word == &name);
-        if !invoked {
-            continue;
-        }
-        if let Some(shell) = value.strip_prefix('!') {
-            scripts.push(shell.to_string());
-        } else if !value.is_empty() {
-            scripts.push(format!("git {value}"));
-        }
+    if let Some(value) = last_assignment(env, "GIT_SSH") {
+        return git_ssh_program(value);
     }
-    scripts
+    Vec::new()
+}
+
+fn one_script(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        Vec::new()
+    } else {
+        vec![value.to_string()]
+    }
+}
+
+/// `GIT_SSH` is one program path. Git execs it. A space does not start a shell.
+fn git_ssh_program(value: &str) -> Vec<String> {
+    if value.is_empty() || !is_program_path(value) {
+        Vec::new()
+    } else {
+        vec![value.to_string()]
+    }
+}
+
+fn is_program_path(value: &str) -> bool {
+    !value.chars().any(|ch| {
+        ch.is_whitespace()
+            || matches!(
+                ch,
+                ';' | '|' | '&' | '$' | '`' | '(' | ')' | '<' | '>' | '\'' | '"' | '\\'
+            )
+    })
+}
+
+fn last_assignment<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    env.iter()
+        .rev()
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.as_str())
 }
 
 fn selected_difftool(argv: &[String], configured: &[String]) -> Option<String> {
-    let mut index = 0;
+    // Options end at `--`. `--tool` after that is a path.
+    let mut index = git_option_end(argv);
+    if index < argv.len() {
+        index += 1;
+    }
     let mut from_cli = None;
     while index < argv.len() {
         let token = argv[index].as_str();
+        if token == "--" {
+            break;
+        }
         if let Some(name) = token.strip_prefix("--tool=") {
             if !name.is_empty() {
                 from_cli = Some(name.to_string());
             }
-        } else if token == "--tool"
-            && let Some(name) = argv.get(index + 1)
-            && !name.is_empty()
-            && !name.starts_with('-')
-        {
-            from_cli = Some(name.clone());
+            index += 1;
+            continue;
+        }
+        if token == "--tool" || token == "-t" {
+            index += 1;
+            if let Some(name) = argv.get(index).filter(|name| !name.is_empty()) {
+                from_cli = Some((*name).clone());
+                index += 1;
+            }
+            continue;
+        }
+        // The value of `--extcmd` is a command, not a tool name.
+        if token == "--extcmd" || token == "-x" {
+            index += 1;
+            if index < argv.len() {
+                index += 1;
+            }
+            continue;
         }
         index += 1;
     }
@@ -2092,13 +2698,213 @@ fn selected_difftool(argv: &[String], configured: &[String]) -> Option<String> {
 }
 
 fn git_uses_ssh(argv: &[String]) -> bool {
-    argv.iter().any(|word| {
-        matches!(
-            word.as_str(),
-            "ls-remote" | "fetch" | "pull" | "push" | "clone"
-        ) || word.contains("ssh://")
-            || word.starts_with("git@")
-    })
+    // `status push` is not a push. The remote is the subcommand.
+    let Some(subcommand) = git_subcommand(argv) else {
+        return false;
+    };
+    if !matches!(
+        subcommand,
+        "ls-remote" | "fetch" | "pull" | "push" | "clone"
+    ) {
+        return false;
+    }
+    let mut saw_url = false;
+    let mut ssh_url = false;
+    let mut index = 0;
+    while index < argv.len() {
+        let word = argv[index].as_str();
+        if word == "-c" || word == "--config-env" {
+            index += 1;
+            if index < argv.len() {
+                index += 1;
+            }
+            continue;
+        }
+        if let Some(ssh) = remote_is_ssh(word) {
+            saw_url = true;
+            ssh_url |= ssh;
+        }
+        index += 1;
+    }
+    if ssh_url { true } else { !saw_url }
+}
+
+/// `Some(true)` is an ssh remote. `Some(false)` is some other URL.
+/// A config key such as `credential.https://example.com.helper` is neither.
+fn remote_is_ssh(word: &str) -> Option<bool> {
+    let body = if word.starts_with("--") {
+        word.split_once('=')?.1
+    } else {
+        word
+    };
+    if is_local_git_path(body) {
+        return Some(false);
+    }
+    if body.starts_with("git@") && body.contains(':') {
+        return Some(true);
+    }
+    let index = body.find("://")?;
+    let scheme = &body[..index];
+    if scheme.is_empty()
+        || !scheme
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '+' || ch == '-')
+    {
+        return None;
+    }
+    Some(scheme == "ssh")
+}
+
+/// A filesystem path. `origin` is a remote name, so it stays unset here.
+fn is_local_git_path(body: &str) -> bool {
+    if body.starts_with('/')
+        || body.starts_with("./")
+        || body.starts_with("../")
+        || body == "."
+        || body == ".."
+        || body.starts_with("~/")
+    {
+        return true;
+    }
+    if body.contains('/') && !body.contains(':') {
+        return true;
+    }
+    let mut chars = body.chars();
+    matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(drive), Some(':'), Some('/' | '\\')) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// Git ignores an alias that hides one of these commands.
+fn git_command(name: &str) -> bool {
+    const NAMES: &[&str] = &[
+        "add",
+        "am",
+        "apply",
+        "archive",
+        "bisect",
+        "blame",
+        "branch",
+        "bundle",
+        "checkout",
+        "cherry",
+        "cherry-pick",
+        "clean",
+        "clone",
+        "commit",
+        "config",
+        "credential",
+        "describe",
+        "diff",
+        "difftool",
+        "fetch",
+        "format-patch",
+        "gc",
+        "grep",
+        "init",
+        "log",
+        "ls-files",
+        "ls-remote",
+        "merge",
+        "mergetool",
+        "mv",
+        "notes",
+        "pull",
+        "push",
+        "range-diff",
+        "rebase",
+        "reflog",
+        "remote",
+        "reset",
+        "restore",
+        "revert",
+        "rm",
+        "shortlog",
+        "show",
+        "stash",
+        "status",
+        "submodule",
+        "switch",
+        "tag",
+        "worktree",
+    ];
+    let folded = name.to_ascii_lowercase();
+    NAMES.binary_search(&folded.as_str()).is_ok()
+}
+
+fn git_option_end(argv: &[String]) -> usize {
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" {
+            return (index + 1).min(argv.len());
+        }
+        if !token.starts_with('-') {
+            return index;
+        }
+        let takes = !token.contains('=') && option_takes_value(token);
+        index += 1;
+        if takes && index < argv.len() {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn git_subcommand(argv: &[String]) -> Option<&str> {
+    argv.get(git_option_end(argv)).map(String::as_str)
+}
+
+fn git_args_after_subcommand(argv: &[String]) -> &[String] {
+    let index = git_option_end(argv);
+    if index < argv.len() {
+        &argv[index + 1..]
+    } else {
+        &[]
+    }
+}
+
+fn quote_argv(argv: &[String]) -> String {
+    argv.iter()
+        .map(|word| quote_shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn quote_shell_word(word: &str) -> String {
+    if !word.is_empty()
+        && word.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '-' | '_' | '.' | '/' | ':' | '@' | '+' | ',' | '=' | '~'
+                )
+        })
+    {
+        return word.to_string();
+    }
+    let mut quoted = String::from("'");
+    for ch in word.chars() {
+        if ch == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(ch);
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+fn command_argv(command: &str) -> Vec<String> {
+    for part in tokenize_parts(command) {
+        if let ShellPart::Segment(segment) = part
+            && let Some(executed) = executed_argv(&segment.tokens, &[])
+        {
+            return executed.argv;
+        }
+    }
+    Vec::new()
 }
 
 fn fish_inline_script(token: &str) -> Option<String> {
@@ -2182,6 +2988,76 @@ fn c_argument(token: &str, next: Option<&String>) -> Option<String> {
         return None;
     }
     next.cloned()
+}
+
+/// `NAME=value` replaces the value. `NAME+=value` appends, and a name
+/// this command has not set yet becomes that text.
+fn apply_assignment(env: &mut Vec<(String, String)>, token: &str) -> bool {
+    if let Some((name, value)) = plain_assignment(token) {
+        set_env(env, name, value);
+        return true;
+    }
+    if let Some((name, value)) = append_assignment(token) {
+        append_env(env, name, value);
+        return true;
+    }
+    false
+}
+
+fn apply_assignment_token(token: &str) -> bool {
+    plain_assignment(token).is_some() || append_assignment(token).is_some() || is_assignment(token)
+}
+
+fn wrapper_sets_env(wrapper: &str) -> bool {
+    matches!(wrapper, "env" | "sudo" | "doas")
+}
+
+fn unset_env(env: &mut Vec<(String, String)>, name: &str) {
+    env.retain(|(key, _)| key != name);
+}
+
+fn set_env(env: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some(slot) = env.iter_mut().rev().find(|(key, _)| key == name) {
+        slot.1 = value.to_string();
+    } else {
+        env.push((name.to_string(), value.to_string()));
+    }
+}
+
+fn append_env(env: &mut Vec<(String, String)>, name: &str, extra: &str) {
+    if let Some(slot) = env.iter_mut().rev().find(|(key, _)| key == name) {
+        slot.1.push_str(extra);
+    } else {
+        env.push((name.to_string(), extra.to_string()));
+    }
+}
+
+fn append_assignment(token: &str) -> Option<(&str, &str)> {
+    let (name, value) = token.split_once("+=")?;
+    if !env_name(name) {
+        return None;
+    }
+    Some((name, value))
+}
+
+fn env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+fn plain_assignment(token: &str) -> Option<(&str, &str)> {
+    if !is_assignment(token) {
+        return None;
+    }
+    let (name, value) = token.split_once('=')?;
+    if name.ends_with('+') {
+        return None;
+    }
+    Some((name, value))
 }
 
 fn is_assignment(token: &str) -> bool {
@@ -2424,6 +3300,9 @@ struct ShellSegment {
     tokens: Vec<String>,
     heredocs: Vec<String>,
     substitutions: Vec<String>,
+    /// A pipeline stage or a background command. Its assignments do not
+    /// come back to the parent shell.
+    isolated: bool,
 }
 
 enum ShellPart {
@@ -2447,6 +3326,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
     let mut heredocs: Vec<PendingHeredoc> = Vec::new();
     let mut substitutions = Vec::new();
     let mut stdin_bodies = Vec::new();
+    let mut next_isolated = false;
     while let Some(ch) = chars.next() {
         // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
         if ch == '\0' {
@@ -2518,6 +3398,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                             tokens: Vec::new(),
                             heredocs: Vec::new(),
                             substitutions: std::mem::take(&mut substitutions),
+                            isolated: false,
                         }));
                     }
                     current.clear();
@@ -2567,12 +3448,22 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
             ' ' | '\t' | '\r' => push_token(&mut token, &mut current, &mut quoted),
             '\n' => {
                 push_token(&mut token, &mut current, &mut quoted);
-                push_shell_segment(
-                    &mut current,
-                    &mut substitutions,
-                    &mut stdin_bodies,
-                    &mut parts,
-                );
+                // A newline after `|` or `|&` is still that pipeline, so
+                // the next command stays isolated. A finished command is not.
+                let continues_pipeline = next_isolated
+                    && current.is_empty()
+                    && substitutions.is_empty()
+                    && stdin_bodies.is_empty();
+                if !continues_pipeline {
+                    push_shell_segment(
+                        &mut current,
+                        &mut substitutions,
+                        &mut stdin_bodies,
+                        &mut parts,
+                        next_isolated,
+                    );
+                    next_isolated = false;
+                }
                 for item in std::mem::take(&mut heredocs) {
                     let body = read_heredoc_body(&mut chars, &item.delim, item.dash);
                     if let Some(ShellPart::Segment(segment)) = parts.get_mut(item.owner) {
@@ -2581,15 +3472,27 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 }
             }
             '&' | '|' | ';' => {
-                if matches!(ch, '&' | '|') && chars.peek() == Some(&ch) {
+                // `|&` is one pipe. The `&` is not a background operator.
+                let pipe_both = ch == '|' && chars.peek() == Some(&'&');
+                if pipe_both {
                     chars.next();
                 }
+                let doubled = !pipe_both && matches!(ch, '&' | '|') && chars.peek() == Some(&ch);
+                if doubled {
+                    chars.next();
+                }
+                // A pipeline stage and a background command do not publish
+                // assignments. `&&`, `||`, and `;` stay in this shell.
+                let own_shell = pipe_both || (!doubled && matches!(ch, '&' | '|'));
+                let isolated = next_isolated || own_shell;
+                next_isolated = pipe_both || (!doubled && ch == '|');
                 push_token(&mut token, &mut current, &mut quoted);
                 push_shell_segment(
                     &mut current,
                     &mut substitutions,
                     &mut stdin_bodies,
                     &mut parts,
+                    isolated,
                 );
             }
             '#' if token.is_empty() => {
@@ -2609,6 +3512,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
         &mut substitutions,
         &mut stdin_bodies,
         &mut parts,
+        next_isolated,
     );
     parts
 }
@@ -3046,6 +3950,7 @@ fn push_shell_segment(
     substitutions: &mut Vec<String>,
     stdin_bodies: &mut Vec<String>,
     parts: &mut Vec<ShellPart>,
+    isolated: bool,
 ) {
     if current.is_empty() && substitutions.is_empty() && stdin_bodies.is_empty() {
         return;
@@ -3054,6 +3959,7 @@ fn push_shell_segment(
         tokens: std::mem::take(current),
         heredocs: std::mem::take(stdin_bodies),
         substitutions: std::mem::take(substitutions),
+        isolated,
     }));
 }
 
@@ -4189,5 +5095,238 @@ mod tests {
             .is_none(),
             "sshCommand is not used by status"
         );
+    }
+
+    /// OpenSSH accepts the keyword in any ASCII case, a space, or `=`.
+    /// `ssh -G` resolves these to one proxycommand line. The negative
+    /// rows are the near misses: empty, `none`, and a longer keyword.
+    #[test]
+    fn openssh_proxycommand_follows_the_option_grammar() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "ssh -o proxycommand='rm -rf /tmp/x' example.com",
+            "ssh -o PROXYCOMMAND='rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand =rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand= rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand = rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand\trm -rf /tmp/x' example.com",
+            "scp -o proxycommand='rm -rf /tmp/x' host:/tmp /tmp",
+            "sftp -o 'proxycommand rm -rf /tmp/x' host",
+            "ssh -oproxycommand='rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand=\"rm\" -rf /tmp/x' example.com",
+            "ssh -o StrictHostKeyChecking=no -o proxycommand='rm -rf /tmp/x' example.com",
+            "ssh -p 22 -o ProxyCommand='rm -rf /tmp/x' example.com",
+            "ssh -i ~/.ssh/id -o ProxyCommand='rm -rf /tmp/x' example.com",
+            "scp -P 22 -o ProxyCommand='rm -rf /tmp/x' host:/tmp /tmp",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "ssh -o ProxyCommand= example.com",
+            "ssh -o ProxyCommand example.com",
+            "ssh -o ProxyCommand=none example.com",
+            "ssh -o ProxyCommand=None example.com",
+            "ssh -o ProxyCommandFoo='rm -rf /tmp/x' example.com",
+            "ssh -o MyProxyCommand='rm -rf /tmp/x' example.com",
+            "ssh -o '你好ProxyCommand=rm -rf /tmp/x' example.com",
+            "ssh -o 'ProxyCommand=\"rm -rf /tmp/x\"' example.com",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// Git folds the section and the variable and keeps the subsection.
+    /// The rows are the forms `git config` and `credential fill` accept,
+    /// plus the near misses those programs reject or do not run.
+    #[test]
+    fn git_config_matches_the_key_git_stores() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let rm = [
+            "git -c Credential.Helper='!rm -rf /tmp/x' credential fill",
+            "git -c CREDENTIAL.HELPER='!rm -rf /tmp/x' credential fill",
+            "git -c 'credential.https://example.com.helper=!rm -rf /tmp/x' credential fill",
+            "git -c 'Credential.HTTPS://Example.com.Helper=!rm -rf /tmp/x' credential fill",
+            "git -c 'credential..helper=!rm -rf /tmp/x' credential fill",
+            "git -C repo -c Credential.Helper='!rm -rf /tmp/x' credential fill",
+            "git -c credential.helper= -c credential.helper='!rm -rf /tmp/x' credential fill",
+            "git -c credential.helper='!echo ok' -c credential.helper='!rm -rf /tmp/x' credential fill",
+            "HELPER='!rm -rf /tmp/x' git --config-env=credential.helper=HELPER credential fill",
+            "git -c Core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
+            "git -c core.sshcommand='rm -rf /tmp/x' fetch git@example.com:repo.git",
+            "git -c core.sshCommand=echo -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' push",
+            "git -c Diff.External='rm -rf /tmp/x' diff --no-index a b",
+            "git -c diff.external=echo -c Diff.External='rm -rf /tmp/x' diff --no-index a b",
+            "git -c Diff.Tool=x -c Difftool.x.Cmd='rm -rf /tmp/x' difftool a b",
+            "git -c Merge.Tool=x -c Mergetool.x.Cmd='rm -rf /tmp/x' mergetool file.txt",
+            "git -c Filter.probe.Clean='rm -rf /tmp/x' add file.txt",
+            "git -c filter.probe.CLEAN='rm -rf /tmp/x' add file.txt",
+            "git -c 'alias.P=!rm -rf /tmp/x' p",
+            "git -c 'alias.P=!rm -rf /tmp/x' P",
+            "git -c 'alias.Foo.Bar=!rm -rf /tmp/x' foo.bar",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
+            "env GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
+            "GIT_SSH=rm git ls-remote ssh://example/no.git",
+            "GIT_SSH=/bin/rm git ls-remote ssh://example/no.git",
+            "SSH='rm -rf /tmp/x' git --config-env=core.sshCommand=SSH ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x' bash -c 'git ls-remote ssh://example/no.git'",
+            "export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "builtin export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "command builtin export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND=rm builtin export GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x' nice git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND+=rm git ls-remote ssh://example/no.git",
+            "git -c alias.p=push -c core.sshCommand='rm -rf /tmp/x' p",
+            "git -c alias.c=credential -c credential.helper='!rm -rf /tmp/x' c fill",
+            "git -c alias.p='!git ls-remote ssh://example/no.git' -c core.sshCommand='rm -rf /tmp/x' p",
+            "HELPER='!rm -rf /tmp/x' bash -c 'git --config-env=credential.helper=HELPER credential fill'",
+            "git -c 'credential.https://example.com.helper=!echo' -c core.sshCommand='rm -rf /tmp/x' push",
+            "GIT_SSH_COMMAND=rm export GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
+            "eval 'export GIT_SSH_COMMAND=rm'; git ls-remote ssh://example/no.git",
+            "export GIT_SSH_COMMAND=rm && git ls-remote ssh://example/no.git",
+            "export -- GIT_SSH_COMMAND=rm; git ls-remote ssh://example/no.git",
+            "export() { rm -rf /tmp/x; }; export",
+            "export() { true; }; builtin export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "git -c 'alias.push=!true' -c core.sshCommand='rm -rf /tmp/x' push",
+            "git -c alias.credential=status -c credential.helper='!rm -rf /tmp/x' credential fill",
+        ];
+        for command in rm {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("git -c alias.P=push P")).map(|id| id.0.as_str()),
+            Some("git.push"),
+        );
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c core.sshCommand='rm -rf /tmp/x' push --repo=https://example/no.git")
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "an https remote does not run core.sshCommand"
+        );
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(
+                    "git -c alias.p='push --repo=https://example/no.git' -c core.sshCommand='rm -rf /tmp/x' p"
+                )
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "an alias expands before the ssh command is chosen"
+        );
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c \"alias.p=push 'a;rm -rf /tmp/x'\" p")
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "an alias argument is not a shell"
+        );
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some("git -c 'alias.push=!rm -rf /tmp/x' push --repo=https://example/no.git")
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "git ignores an alias that hides push"
+        );
+        for command in [
+            "git -c core.sshCommand='rm -rf /tmp/x' push /tmp/bare.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' push --repo=/tmp/bare.git",
+        ] {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "a local path does not run core.sshCommand: {command:?}"
+            );
+        }
+        let neither = [
+            "git -c Credential.Helper='!rm -rf /tmp/x' status",
+            "git -c 'credential.https://example.com.helper=!rm -rf /tmp/x' status",
+            "git -c credential.helper='rm -rf /tmp/x' credential fill",
+            "git -c 'credential.helper =!rm -rf /tmp/x' credential fill",
+            "git --config credential.helper='!rm -rf /tmp/x' credential fill",
+            "git -ccredential.helper='!rm -rf /tmp/x' credential fill",
+            "git -c credential.helper='!rm -rf /tmp/x' -c credential.helper= credential fill",
+            "git -c 'credential.https://example.com.helper=!rm -rf /tmp/x' -c credential.helper= credential fill",
+            "git --config-env=credential.helper=HELPER credential fill",
+            "git -c difftool.X.cmd='rm -rf /tmp/x' difftool --tool=x a b",
+            "git -c Difftool.x.Cmd='rm -rf /tmp/x' diff --no-index a b",
+            "git -c Core.sshCommand='rm -rf /tmp/x' status",
+            "git -c Core.sshCommand='rm -rf /tmp/x' ls-remote https://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' -c core.sshCommand=echo ls-remote ssh://example/no.git",
+            "git -c diff.external='rm -rf /tmp/x' -c diff.external=echo diff --no-index a b",
+            "git -c alias.P='!rm -rf /tmp/x' status",
+            "git -c alias.p='!rm -rf /tmp/x' -c alias.p=status p",
+            "GIT_SSH_COMMAND=echo git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND= git -c core.sshCommand='rm -rf /tmp/x' ls-remote ssh://example/no.git",
+            "GIT_SSH=rm git -c core.sshCommand=echo ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x' git status",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote https://example/no.git",
+            "nice GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "git -c alias.p='!rm -rf /tmp/x' status P",
+            "GIT_SSH='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND=rm GIT_SSH_COMMAND+=.safe git ls-remote ssh://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' ls-remote git://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' ls-remote ftps://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' ls-remote SSH://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' ls-remote https://example/ssh://no.git",
+            "env export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "nice -- GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
+            "( export GIT_SSH_COMMAND=rm ); git ls-remote ssh://example/no.git",
+            "export GIT_SSH_COMMAND=rm | true; git ls-remote ssh://example/no.git",
+            "export GIT_SSH_COMMAND=rm & git ls-remote ssh://example/no.git",
+            "git -c credential.helper='!rm -rf /tmp/x' status credential",
+            "git -C diff -c diff.external='rm -rf /tmp/x' status",
+            "git -c filter.probe.clean='rm -rf /tmp/x' status add",
+            "git -c Diff.Tool=x -c Difftool.x.Cmd='rm -rf /tmp/x' status difftool",
+            "git -c core.sshCommand='rm -rf /tmp/x' status push",
+            "env builtin export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "true |\nexport GIT_SSH_COMMAND='rm -rf /tmp/x'\ngit ls-remote ssh://example/no.git",
+            "true |\n\nexport GIT_SSH_COMMAND='rm -rf /tmp/x'\ngit ls-remote ssh://example/no.git",
+            "true | # note\nexport GIT_SSH_COMMAND='rm -rf /tmp/x'\ngit ls-remote ssh://example/no.git",
+            "export GIT_SSH_COMMAND='rm -rf /tmp/x' |& true; git ls-remote ssh://example/no.git",
+            "true |&\nexport GIT_SSH_COMMAND='rm -rf /tmp/x'\ngit ls-remote ssh://example/no.git",
+            "git -c core.sshCommand='rm -rf /tmp/x' clone /tmp/src",
+            "git -c core.sshCommand='rm -rf /tmp/x' fetch ./repo",
+            "git -c core.sshCommand='rm -rf /tmp/x' clone ~/src",
+            "git -c core.sshCommand='rm -rf /tmp/x' clone C:/repo",
+            "git -c core.sshCommand='rm -rf /tmp/x' clone foo/bar",
+            "git -c diff.tool=vimdiff -c difftool.x.cmd='rm -rf /tmp/x' difftool -- --tool=x",
+            "export GIT_SSH_COMMAND=rm; export -n GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
+            "export -n GIT_SSH_COMMAND=rm; git ls-remote ssh://example/no.git",
+            "export GIT_SSH_COMMAND=rm; export -n -- GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
+            "export() { true; }; export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
     }
 }
