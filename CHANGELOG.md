@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.4](https://github.com/snapif/snapif/compare/snapif-v0.2.3...snapif-v0.2.4) (2026-10-17)
+
+
+### Bug Fixes
+
+* accept a score legend that is a list of labels ([#228](https://github.com/snapif/snapif/issues/228)) ([8ebc406](https://github.com/snapif/snapif/commit/8ebc406eac846a9d041148dd71e6a00274f21be1))
+* keep a hook prompt when gate has no trusted object ([#230](https://github.com/snapif/snapif/issues/230)) ([09eedf3](https://github.com/snapif/snapif/commit/09eedf30593afdd348b0213e0c8d4ee939e42b72))
+* match powershell -EncodedCommand as the script ([#229](https://github.com/snapif/snapif/issues/229)) ([70abb92](https://github.com/snapif/snapif/commit/70abb92cf4d4991636fa94cfbec10b5cd42d7243))
+* post SNAPIF_MODEL from snapif test --base-url ([#225](https://github.com/snapif/snapif/issues/225)) ([e7016be](https://github.com/snapif/snapif/commit/e7016beca4f7d0a3d8bdfbbe95ce649bfa0d2b95))
+
 ## [0.2.3](https://github.com/snapif/snapif/compare/snapif-v0.2.2...snapif-v0.2.3) (2026-10-07)
 
 
