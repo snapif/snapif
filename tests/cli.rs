@@ -2086,6 +2086,42 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
 }
 
 #[test]
+fn hook_denies_stdin_over_8_mib_and_exits_0() {
+    const CAP: usize = 8 * 1024 * 1024;
+    let mut body = vec![b'x'; CAP];
+    let at_cap = hook_output(&body, false);
+    let at_out = String::from_utf8_lossy(&at_cap.stdout);
+    assert_eq!(at_cap.status.code(), Some(0), "{at_out}");
+    assert!(at_out.contains("invalid json"), "{at_out}");
+    assert!(!at_out.contains("hook input too large"), "{at_out}");
+    body.push(b'x');
+    let over = hook_output(&body, false);
+    let over_out = String::from_utf8_lossy(&over.stdout);
+    assert_eq!(over.status.code(), Some(0), "{over_out}");
+    assert!(
+        over_out.contains("\"permissionDecision\":\"deny\""),
+        "{over_out}"
+    );
+    assert!(over_out.contains("hook input too large"), "{over_out}");
+    assert!(
+        !over_out.contains("\"permissionDecision\":\"allow\""),
+        "{over_out}"
+    );
+    let shadow = hook_output(&body, true);
+    let shadow_out = String::from_utf8_lossy(&shadow.stdout);
+    assert_eq!(shadow.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"deny\""),
+        "{shadow_out}"
+    );
+    assert!(shadow_out.contains("hook input too large"), "{shadow_out}");
+    assert!(
+        !shadow_out.contains("\"permissionDecision\":\"allow\""),
+        "{shadow_out}"
+    );
+}
+
+#[test]
 fn hook_denies_a_script_that_is_not_an_object_or_not_a_score() {
     let text = hook_output(
         br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp"},"script":"rm"}"#,
