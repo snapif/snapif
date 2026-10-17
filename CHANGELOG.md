@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/snapif/snapif/compare/snapif-v0.2.4...snapif-v0.2.5) (2026-10-17)
+
+
+### Bug Fixes
+
+* match OpenSSH ProxyCommand and git config the way those programs read them ([#234](https://github.com/snapif/snapif/issues/234)) ([b3d9ac9](https://github.com/snapif/snapif/commit/b3d9ac911544a6d7e3db428418d52d2acc003168)), closes [#231](https://github.com/snapif/snapif/issues/231) [#232](https://github.com/snapif/snapif/issues/232) [#233](https://github.com/snapif/snapif/issues/233)
+
 ## [0.2.4](https://github.com/snapif/snapif/compare/snapif-v0.2.3...snapif-v0.2.4) (2026-10-17)
 
 
