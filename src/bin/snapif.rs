@@ -583,6 +583,12 @@ fn finish_checked(count: usize, what: &str) -> u8 {
     0
 }
 
+/// A padded id misses the policy row. The default row can then auto.
+fn trimmed_action_id(raw: &str) -> Option<&str> {
+    let id = raw.trim();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool) -> u8 {
     let spec = policy;
     let policy = match load_policy(spec) {
@@ -655,8 +661,12 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
                 return 1;
             }
         };
+        let Some(action_id) = trimmed_action_id(&row.gate_request.action_id) else {
+            eprintln!("{}: action id must not be blank", row.id);
+            return 1;
+        };
         let name = if row.gate_request.prepared.name.is_empty() {
-            row.gate_request.action_id.clone()
+            action_id.to_string()
         } else {
             row.gate_request.prepared.name.clone()
         };
@@ -678,7 +688,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             client = client.shadow(true);
         }
         let verdict = match block_on(client.gate(GateRequest {
-            action_id: ActionId::new(&row.gate_request.action_id),
+            action_id: ActionId::new(action_id),
             prepared: PreparedCall {
                 name,
                 args: row.gate_request.prepared.args,
@@ -709,7 +719,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
         }
         if summary {
             let slot = counts
-                .entry((row.gate_request.action_id.clone(), row.policy.clone()))
+                .entry((action_id.to_string(), row.policy.clone()))
                 .or_insert([0, 0, 0]);
             match got {
                 "auto" => slot[0] += 1,
@@ -1733,8 +1743,15 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 return 1;
             }
         };
+        let Some(action_id) = trimmed_action_id(&row.gate_request.action_id) else {
+            eprintln!(
+                "{}: line {line_no}: action id must not be blank",
+                path.display()
+            );
+            return 1;
+        };
         let name = if row.gate_request.prepared.name.is_empty() {
-            row.gate_request.action_id.clone()
+            action_id.to_string()
         } else {
             row.gate_request.prepared.name.clone()
         };
@@ -1753,7 +1770,7 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         };
         let client = Client::new(backend).policy(policy.clone());
         let verdict = match block_on(client.gate(GateRequest {
-            action_id: ActionId::new(&row.gate_request.action_id),
+            action_id: ActionId::new(action_id),
             prepared: PreparedCall {
                 name,
                 args: row.gate_request.prepared.args,

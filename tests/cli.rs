@@ -1251,6 +1251,119 @@ fn script_must_be_an_object() {
 }
 
 #[test]
+fn padded_action_id_keeps_the_bash_rm_floor() {
+    let dir = std::env::temp_dir().join(format!("snapif-pad-id-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        r#"{"action_id":" bash.rm","name":"bash","args":{"command":"rm -rf /tmp/x"},"script":{"harm":"read","confidence":0.95}}"#,
+    )
+    .expect("write");
+    let gated = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("gate");
+    let gate_out = String::from_utf8_lossy(&gated.stdout);
+    let gate_err = String::from_utf8_lossy(&gated.stderr);
+    assert_eq!(gated.status.code(), Some(10), "{gate_out}{gate_err}");
+    assert_eq!(gate_out.trim(), "review");
+
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"pad","gate_request":{"action_id":" bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_out = String::from_utf8_lossy(&replayed.stdout);
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(0), "{replay_out}{replay_err}");
+    assert!(replay_out.contains(r#""got":"review""#), "{replay_out}");
+    assert!(!replay_out.contains("auto"), "{replay_out}");
+
+    fs::write(
+        &replay,
+        r#"{"id":"blank","gate_request":{"action_id":"   ","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let blank = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("blank");
+    let blank_out = String::from_utf8_lossy(&blank.stdout);
+    let blank_err = String::from_utf8_lossy(&blank.stderr);
+    assert_eq!(blank.status.code(), Some(1), "{blank_out}{blank_err}");
+    assert!(
+        blank_err.contains("blank: action id must not be blank"),
+        "{blank_err}"
+    );
+    assert!(!blank_out.contains("auto"), "{blank_out}");
+    assert!(!blank_err.contains("auto"), "{blank_err}");
+
+    let cal = dir.join("cal.jsonl");
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":" bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_out = String::from_utf8_lossy(&calibrated.stdout);
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(0), "{cal_out}{cal_err}");
+    assert!(
+        cal_out.contains("expected review predicted review 1"),
+        "{cal_out}"
+    );
+    assert!(cal_out.contains("gate_missed 0"), "{cal_out}");
+    assert!(!cal_out.contains("predicted auto"), "{cal_out}");
+
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":"   ","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let cal_blank = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate blank");
+    let cal_blank_out = String::from_utf8_lossy(&cal_blank.stdout);
+    let cal_blank_err = String::from_utf8_lossy(&cal_blank.stderr);
+    assert_eq!(
+        cal_blank.status.code(),
+        Some(1),
+        "{cal_blank_out}{cal_blank_err}"
+    );
+    assert!(
+        cal_blank_err.contains("line 1: action id must not be blank"),
+        "{cal_blank_err}"
+    );
+    assert!(!cal_blank_out.contains("auto"), "{cal_blank_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([
