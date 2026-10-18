@@ -1715,6 +1715,7 @@ fn ask_unknown_question_exits_2_and_unset_backend_exits_1() {
     assert_eq!(decoded.status.code(), Some(2), "{decoded_err}");
     assert!(
         decoded_err.contains("unknown question/answer type boolean")
+            && decoded_err.contains("boolean on flag")
             && decoded_err.contains("expected choice, score, or noul"),
         "{decoded_err}"
     );
@@ -1754,7 +1755,85 @@ fn ask_missing_type_names_it() {
         err.contains("unknown question/answer type missing"),
         "{err}"
     );
+    assert!(err.contains("missing on q"), "{err}");
     assert!(err.contains("expected choice, score, or noul"), "{err}");
+}
+
+#[test]
+fn ask_short_score_names_the_question() {
+    let path = std::env::temp_dir().join(format!("snapif-short-score-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        r#"{"trusted":{},"untrusted":null,"questions":{"mood":{"type":"score","instructions":"mood","criteria":["only"]},"flag":{"type":"noul","instructions":"ok"}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("mood: score criteria must be 2..=10, got 1"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ask_empty_choice_names_the_question() {
+    let path =
+        std::env::temp_dir().join(format!("snapif-empty-choice-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        r#"{"trusted":{},"untrusted":null,"questions":{"bucket":{"type":"choice","instructions":"which","criteria":{}},"flag":{"type":"noul","instructions":"ok"}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("bucket: empty choice criteria"), "{err}");
+}
+
+#[test]
+fn ask_wide_choice_names_the_question() {
+    let mut criteria = String::from("{");
+    for index in 0..256 {
+        if index > 0 {
+            criteria.push(',');
+        }
+        criteria.push_str(&format!(r#""o{index}":"x""#));
+    }
+    criteria.push('}');
+    let path = std::env::temp_dir().join(format!("snapif-wide-choice-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        format!(
+            r#"{{"trusted":{{}},"untrusted":null,"questions":{{"bucket":{{"type":"choice","instructions":"which","criteria":{criteria}}},"flag":{{"type":"noul","instructions":"ok"}}}}}}"#
+        ),
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("bucket: choice has more than 255 options"),
+        "{err}"
+    );
 }
 
 #[test]

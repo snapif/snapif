@@ -1961,12 +1961,52 @@ fn wire_questions(map: &serde_json::Map<String, Value>) -> Result<Vec<Question>,
     });
     let bytes =
         serde_json::to_vec(&body).map_err(|err| Error::Wire(WireError::Json(err.to_string())))?;
-    let request = wire::decode_request(&bytes)?;
+    let request = wire::decode_request(&bytes)
+        .map_err(|err| Error::Wire(question_bound_message(map, err)))?;
     Ok(request
         .questions
         .into_iter()
         .map(|(id, question)| question_from_wire(id, question))
         .collect())
+}
+
+fn question_bound_message(map: &serde_json::Map<String, Value>, err: WireError) -> WireError {
+    let id = match &err {
+        WireError::EmptyChoice => first_question(map, "choice", |criteria| {
+            criteria.as_object().is_some_and(|object| object.is_empty())
+        }),
+        WireError::ChoiceTooWide => first_question(map, "choice", |criteria| {
+            criteria
+                .as_object()
+                .is_some_and(|object| object.len() > 255)
+        }),
+        WireError::ScoreLen(len) => {
+            let len = *len;
+            first_question(map, "score", |criteria| {
+                criteria.as_array().is_some_and(|items| items.len() == len)
+            })
+        }
+        _ => None,
+    };
+    match id {
+        Some(id) => WireError::Json(format!("{id}: {err}")),
+        None => err,
+    }
+}
+
+fn first_question<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    kind: &str,
+    criteria_matches: impl Fn(&Value) -> bool,
+) -> Option<&'a str> {
+    map.iter().find_map(|(id, value)| {
+        let object = value.as_object()?;
+        if object.get("type").and_then(Value::as_str) != Some(kind) {
+            return None;
+        }
+        let criteria = object.get("criteria")?;
+        criteria_matches(criteria).then_some(id.as_str())
+    })
 }
 
 fn question_from_wire(id: String, question: WireQuestion) -> Question {

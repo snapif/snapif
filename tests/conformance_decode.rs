@@ -163,7 +163,12 @@ fn json_failures_are_not_unknown_type() {
 fn boolean_type_is_unknown() {
     let raw = r#"{"state":"x","model":"jev-latest","questions":{"flag":{"type":"boolean","instructions":"yes?"}}}"#;
     match decode_request(raw.as_bytes()) {
-        Err(WireError::UnknownType(kind)) => assert_eq!(kind, "boolean"),
+        Err(WireError::UnknownType(kind)) => assert_eq!(kind, "boolean on flag"),
+        other => panic!("expected UnknownType, got {other:?}"),
+    }
+    let answer = r#"{"model":"m","answers":{"department":{"type":"boolean"}},"usage":{"input_tokens":0,"output_tokens":0}}"#;
+    match decode_response(answer.as_bytes()) {
+        Err(WireError::UnknownType(kind)) => assert_eq!(kind, "boolean on department"),
         other => panic!("expected UnknownType, got {other:?}"),
     }
 }
