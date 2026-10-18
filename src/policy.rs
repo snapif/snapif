@@ -447,7 +447,9 @@ fn check_action(
 /// of a short file prints that file. `tail -c +1` prints it too.
 /// `cat -u` still prints the file. `stdbuf -o0 cat` prints it too.
 /// `gcat`, `ghead -c`, `gtail -c +1`, `gfold`, `gfmt`, `gpaste`, and `gsort`
-/// print that file. `timeout 1 cat`
+/// print that file. `gcut -c 1-`, `gdd if=path`, `gtac`, `guniq`,
+/// `gexpand`, `gunexpand`, `gpr -t`, `gtr`, `gtee`, and `gbase64 -d`
+/// print it too. `timeout 1 cat`
 /// and `gxargs cat` print it too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
@@ -2925,6 +2927,16 @@ fn stage_command_name(token: &str) -> String {
         "gfmt" => "fmt".to_string(),
         "gpaste" => "paste".to_string(),
         "gsort" => "sort".to_string(),
+        "gcut" => "cut".to_string(),
+        "gdd" => "dd".to_string(),
+        "gtac" => "tac".to_string(),
+        "guniq" => "uniq".to_string(),
+        "gexpand" => "expand".to_string(),
+        "gunexpand" => "unexpand".to_string(),
+        "gpr" => "pr".to_string(),
+        "gtr" => "tr".to_string(),
+        "gtee" => "tee".to_string(),
+        "gbase64" => "base64".to_string(),
         _ => {
             if aliased == lowered && base != lowered {
                 base.to_string()
@@ -13273,6 +13285,16 @@ mod tests {
             format!("eval \"$(gfmt {push_s})\""),
             format!("eval \"$(gpaste {push_s})\""),
             format!("eval \"$(gsort {push_s})\""),
+            format!("eval \"$(gcut -c 1- {push_s})\""),
+            format!("eval \"$(gdd if={push_s})\""),
+            format!("eval \"$(gtac {push_s})\""),
+            format!("eval \"$(guniq {push_s})\""),
+            format!("eval \"$(gexpand {push_s})\""),
+            format!("eval \"$(gunexpand {push_s})\""),
+            format!("eval \"$(gpr -t {push_s})\""),
+            format!("eval \"$(gtr a a < {push_s})\""),
+            format!("eval \"$(gtee < {push_s})\""),
+            format!("eval \"$(gbase64 -d {coded_s})\""),
             format!("eval \"$(timeout 1 cat {push_s})\""),
             format!("eval \"$(gtimeout 1 cat {push_s})\""),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
@@ -13505,6 +13527,16 @@ mod tests {
             format!("eval \"$(gfmt {echo_s})\""),
             format!("eval \"$(gpaste {echo_s})\""),
             format!("eval \"$(gsort {echo_s})\""),
+            format!("eval \"$(gcut -c 1- {echo_s})\""),
+            format!("eval \"$(gdd if={echo_s})\""),
+            format!("eval \"$(gtac {echo_s})\""),
+            format!("eval \"$(guniq {echo_s})\""),
+            format!("eval \"$(gexpand {echo_s})\""),
+            format!("eval \"$(gunexpand {echo_s})\""),
+            format!("eval \"$(gpr -t {echo_s})\""),
+            format!("eval \"$(gtr a a < {echo_s})\""),
+            format!("eval \"$(gtee < {echo_s})\""),
+            format!("eval \"$(gbase64 -d {echo_s})\""),
             format!("eval \"$(timeout 1 cat {echo_s})\""),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
