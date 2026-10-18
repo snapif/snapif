@@ -433,7 +433,9 @@ fn check_action(
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. Without `-n`,
-/// `sed 3p` still prints every line. `source <(echo 'git push')` and `bash <(echo 'git push')` run
+/// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
+/// every line. `base64 -d` prints the decoded text.
+/// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
 /// function that name is global unless it is already local. `read` and
@@ -5939,6 +5941,10 @@ fn run_builtin(
         "sed" => sed_run(args, input, depth, substitutions),
         "awk" => awk_run(args, input, depth, substitutions),
         "cut" => cut_run(args, input, depth, substitutions),
+        "sort" => sort_run(args, input, depth, substitutions),
+        "uniq" => uniq_run(args, input, depth, substitutions),
+        "tac" => tac_run(args, input, depth, substitutions),
+        "base64" => base64_run(args, input, depth, substitutions),
         _ => Run::Unknown,
     }
 }
@@ -6834,6 +6840,214 @@ fn cut_query(args: &[String]) -> Option<CutQuery> {
     })
 }
 
+fn sort_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = sort_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn sort_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if let Some(flags) = arg.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.chars().all(|ch| matches!(ch, 'r' | 'u'))
+        {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    Some(args.get(index).cloned())
+}
+
+fn uniq_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = one_file_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn tac_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = one_file_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+/// No flags. One file, or stdin.
+fn one_file_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    if args.first().is_some_and(|arg| arg == "--") {
+        index = 1;
+    }
+    if index < args.len() && args[index].starts_with('-') {
+        return None;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    Some(args.get(index).cloned())
+}
+
+struct Base64Query {
+    file: Option<String>,
+}
+
+fn base64_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = base64_query(args) else {
+        return Run::Unknown;
+    };
+    let raw = match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        Run::Produced { text, ok: true } => text,
+        other => return other,
+    };
+    let Some(text) = b64_decode(&raw) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn base64_query(args: &[String]) -> Option<Base64Query> {
+    let mut index = 0usize;
+    let mut decode = false;
+    let mut file = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(arg.as_str(), "-d" | "-D" | "--decode") {
+            decode = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-i" || arg == "--input" {
+            if file.is_some() {
+                return None;
+            }
+            file = Some(args.get(index + 1)?.clone());
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--input=")
+            && !rest.is_empty()
+        {
+            if file.is_some() {
+                return None;
+            }
+            file = Some(rest.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if !decode || args.len() - index > 1 {
+        return None;
+    }
+    if file.is_none() {
+        file = args.get(index).cloned();
+    } else if index < args.len() {
+        return None;
+    }
+    Some(Base64Query { file })
+}
+
+fn b64_decode(text: &str) -> Option<String> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let filtered: Vec<u8> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    if filtered.is_empty() {
+        return Some(String::new());
+    }
+    if !filtered.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for chunk in filtered.chunks(4) {
+        let mut parts = [0u8; 4];
+        let mut pad = 0u8;
+        for (slot, byte) in chunk.iter().copied().enumerate() {
+            if byte == b'=' {
+                if slot < 2 {
+                    return None;
+                }
+                pad += 1;
+            } else if pad > 0 {
+                return None;
+            } else {
+                parts[slot] = value(byte)?;
+            }
+        }
+        let packed = ((parts[0] as u32) << 18)
+            | ((parts[1] as u32) << 12)
+            | ((parts[2] as u32) << 6)
+            | (parts[3] as u32);
+        out.push((packed >> 16) as u8);
+        if pad < 2 {
+            out.push((packed >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(packed as u8);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 enum StdinFor {
     Ready(Option<String>),
     Failed,
@@ -6880,6 +7094,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "sed" => sed_query(args).is_none_or(|query| query.file.is_none()),
         "awk" => awk_query(args).is_none_or(|query| query.file.is_none()),
         "cut" => cut_query(args).is_none_or(|query| query.file.is_none()),
+        "sort" => sort_query(args).is_none_or(|query| query.is_none()),
+        "uniq" => one_file_query(args).is_none_or(|query| query.is_none()),
+        "tac" => one_file_query(args).is_none_or(|query| query.is_none()),
+        "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
         _ => false,
     }
 }
@@ -9256,6 +9474,8 @@ mod tests {
             "eval \"$(cat <(echo 'git push origin main'))\"",
             "eval \"$(tail -n 1 <(echo 'git push origin main'))\"",
             "read x < <(echo 'git push origin main'); eval \"$x\"",
+            "eval \"$(printf '%s' 'Z2l0IHB1c2ggb3JpZ2luIG1haW4K' | base64 -d)\"",
+            "eval \"$(printf '%s' 'Z2l0IHB1c2ggb3JpZ2luIG1haW4K' | base64 --decode)\"",
         ];
         for command in push {
             let want = if command.contains("rm -rf") {
@@ -10305,6 +10525,8 @@ mod tests {
         std::fs::write(&echo, "echo hello\n").expect("echo script");
         std::fs::write(&assign, "x='git push origin main'\n").expect("assign script");
         std::fs::write(&multi, "alpha\nbeta\ngit push origin main\n").expect("multi script");
+        let coded = dir.join(format!("snapif-c30-b64-{pid}.txt"));
+        std::fs::write(&coded, "Z2l0IHB1c2ggb3JpZ2luIG1haW4K\n").expect("b64");
         let mut big_body = b"git push origin main\n".to_vec();
         big_body.resize(super::SCRIPT_FILE_CAP as usize + 1, b' ');
         std::fs::write(&big, &big_body).expect("big script");
@@ -10312,6 +10534,7 @@ mod tests {
         let echo_s = plain_script_path(&echo);
         let assign_s = plain_script_path(&assign);
         let multi_s = plain_script_path(&multi);
+        let coded_s = plain_script_path(&coded);
         let big_s = plain_script_path(&big);
         let missing = dir.join(format!("snapif-c29-missing-{pid}.sh"));
         let missing2 = dir.join(format!("snapif-c29-missing2-{pid}.sh"));
@@ -10359,6 +10582,15 @@ mod tests {
             format!("eval \"$(cat {push_s} < {sub_s})\""),
             format!("eval \"$(echo 'git push origin main' < {sub_s})\""),
             format!("eval \"$(tail -n 1 {push_s})\""),
+            format!("eval \"$(sort {push_s})\""),
+            format!("eval \"$(sort -u {push_s})\""),
+            format!("eval \"$(sort -r {push_s})\""),
+            format!("eval \"$(uniq {push_s})\""),
+            format!("eval \"$(tac {push_s})\""),
+            format!("eval \"$(sort {multi_s})\""),
+            format!("eval \"$(base64 -d {coded_s})\""),
+            format!("eval \"$(base64 --decode {coded_s})\""),
+            format!("eval \"$(base64 -d -i {coded_s})\""),
             format!("eval \"$(tail {push_s})\""),
             format!("eval \"$(tail -n1 {push_s})\""),
             format!("eval \"$(tail -1 {push_s})\""),
@@ -10469,6 +10701,9 @@ mod tests {
             format!("eval \"$(cut -c 1-5 {push_s})\""),
             format!("eval \"$(cut -c1-5 {push_s})\""),
             format!("eval \"$(tail -n 0 {push_s})\""),
+            format!("eval \"$(rev {push_s})\""),
+            format!("eval \"$(nl {push_s})\""),
+            format!("eval \"$(base64 {coded_s})\""),
             format!("mapfile -t x < {multi_s}; eval \"${{x[0]}}\""),
             format!("mapfile -O 2 -t x < {push_s}; eval \"${{x[0]}}\""),
             format!("mapfile -O 2 -t x < {multi_s}; eval \"${{x[2]}}\""),
@@ -10519,7 +10754,7 @@ mod tests {
             let _ = std::fs::remove_file(&link);
             let _ = std::fs::remove_file(&fifo);
         }
-        for path in [&push, &echo, &assign, &multi, &big] {
+        for path in [&push, &echo, &assign, &multi, &coded, &big] {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(&sub);
