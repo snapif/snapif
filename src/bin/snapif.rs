@@ -2243,7 +2243,7 @@ struct ReplayState {
 
 #[derive(Debug, Deserialize)]
 struct ReplayScript {
-    #[serde(default = "default_harm")]
+    #[serde(default = "default_harm", deserialize_with = "script_harm")]
     harm: String,
     #[serde(default)]
     confidence: f64,
@@ -2264,6 +2264,19 @@ fn default_name() -> String {
 
 fn default_harm() -> String {
     "read".to_string()
+}
+
+fn script_harm<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value.as_str() {
+        Some(word) => Ok(word.to_string()),
+        None => Err(serde::de::Error::custom(format!(
+            "script harm must be none, read, write, exec, network, or money, got {value}"
+        ))),
+    }
 }
 
 #[cfg(test)]

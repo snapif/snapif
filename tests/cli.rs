@@ -979,6 +979,99 @@ fn gate_script_harm_names_an_unknown_label() {
 }
 
 #[test]
+fn script_harm_names_a_non_string() {
+    let dir = std::env::temp_dir().join(format!("snapif-harm-type-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let sentence = "script harm must be none, read, write, exec, network, or money";
+    for (name, harm, shown) in [
+        ("num", "1", "got 1"),
+        ("null", "null", "got null"),
+        ("arr", "[\"read\"]", "got [\"read\"]"),
+    ] {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"script":{{"harm":{harm},"confidence":0.95}}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains(sentence), "{name} {err}");
+        assert!(err.contains(shown), "{name} {err}");
+        assert!(!err.contains("invalid type"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+
+    let denied = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/demo"},"script":{"harm":1,"confidence":0.95}}"#,
+        false,
+    );
+    let hook_out = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{hook_out}");
+    assert!(
+        hook_out.contains("\"permissionDecision\":\"deny\""),
+        "{hook_out}"
+    );
+    assert!(hook_out.contains(sentence), "{hook_out}");
+    assert!(hook_out.contains("got 1"), "{hook_out}");
+    assert!(!hook_out.contains("invalid type"), "{hook_out}");
+    assert!(
+        !hook_out.contains("\"permissionDecision\":\"allow\""),
+        "{hook_out}"
+    );
+
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"one","gate_request":{"action_id":"bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/demo"}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":1,"confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_err}");
+    assert!(replay_err.contains("line 1:"), "{replay_err}");
+    assert!(replay_err.contains(sentence), "{replay_err}");
+    assert!(replay_err.contains("got 1"), "{replay_err}");
+    assert!(!replay_err.contains("invalid type"), "{replay_err}");
+    assert!(!replay_err.contains("a replay row needs"), "{replay_err}");
+
+    let cal = dir.join("cal.jsonl");
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":"bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/demo"}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":1,"confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(1), "{cal_err}");
+    assert!(cal_err.contains("line 1:"), "{cal_err}");
+    assert!(cal_err.contains(sentence), "{cal_err}");
+    assert!(cal_err.contains("got 1"), "{cal_err}");
+    assert!(!cal_err.contains("invalid type"), "{cal_err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([
