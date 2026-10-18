@@ -610,7 +610,21 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             continue;
         }
         checked += 1;
-        let row: ReplayRow = match serde_json::from_str(line) {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                return 1;
+            }
+        };
+        if !value.is_object() {
+            eprintln!(
+                "line {}: a replay row needs id, gate_request, script, and expected",
+                line_no + 1
+            );
+            return 1;
+        }
+        let row: ReplayRow = match serde_json::from_value(value) {
             Ok(row) => row,
             Err(err) => {
                 eprintln!("line {}: {err}", line_no + 1);
@@ -1658,7 +1672,22 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
     let mut matched = 0usize;
     let mut missed = 0usize;
     for (path, line_no, line) in &rows {
-        let row: GateCalRow = match serde_json::from_str(line) {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{}: line {line_no}: {err}", path.display());
+                eprintln!("a gate calibration row needs gate_request and script");
+                return 1;
+            }
+        };
+        if !value.is_object() {
+            eprintln!(
+                "{}: line {line_no}: a gate calibration row needs gate_request and script",
+                path.display()
+            );
+            return 1;
+        }
+        let row: GateCalRow = match serde_json::from_value(value) {
             Ok(row) => row,
             Err(err) => {
                 eprintln!("{}: line {line_no}: {err}", path.display());

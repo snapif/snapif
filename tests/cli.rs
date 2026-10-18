@@ -390,6 +390,23 @@ fn replay_gate_call_names_the_row_fields() {
 }
 
 #[test]
+fn replay_array_names_the_row_fields() {
+    let path =
+        std::env::temp_dir().join(format!("snapif-replay-array-{}.jsonl", std::process::id()));
+    fs::write(&path, "[]\n").expect("write");
+    let output = bin().arg("replay").arg(&path).output().expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("line 1: a replay row needs id, gate_request, script, and expected"),
+        "{err}"
+    );
+    assert!(!err.contains("invalid length"), "{err}");
+    assert!(!err.contains("ReplayRow"), "{err}");
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")
@@ -3944,6 +3961,46 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{err}");
     assert!(err.contains("line 3:"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn calibrate_gate_array_names_the_row_fields() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-gate-array-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let array = dir.join("array.jsonl");
+    fs::write(&array, "[]\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&array)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("line 1: a gate calibration row needs gate_request and script"),
+        "{err}"
+    );
+    assert!(!err.contains("invalid length"), "{err}");
+    assert!(!err.contains("GateCalRow"), "{err}");
+    let empty = dir.join("empty.jsonl");
+    fs::write(&empty, "{}\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&empty)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("missing field `gate_request`"), "{err}");
+    assert!(
+        err.contains("a gate calibration row needs gate_request and script"),
+        "{err}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
