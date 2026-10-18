@@ -450,6 +450,7 @@ fn check_action(
 /// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
 /// line. `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
+/// `sed -n '/git/p'` prints a line that contains `git`.
 /// `sed -n 1l` and `sed -n '$l'` print that line too. `gsed` is that
 /// same `sed`. A python one-liner that writes `open(sys.argv[1]).read()`,
 /// a node one-liner that writes `readFileSync`, `ruby -e` that prints
@@ -6836,6 +6837,8 @@ enum SedPrint {
     },
     /// Several quiet print commands. A selected line is kept once.
     Many(Vec<(SedEnd, SedEnd)>),
+    /// Quiet `/text/p`. A line is kept when it contains `text`.
+    Contains(String),
 }
 
 struct SedQuery {
@@ -6933,6 +6936,15 @@ fn sed_script(script: &str, quiet: bool) -> Option<SedPrint> {
     if pieces.is_empty() {
         return None;
     }
+    if let [piece] = pieces.as_slice()
+        && let Some(pattern) = sed_slash(piece)
+    {
+        return Some(if quiet {
+            SedPrint::Contains(pattern.to_string())
+        } else {
+            SedPrint::All
+        });
+    }
     let mut spans = Vec::new();
     for piece in pieces {
         if piece == "p" || piece == "l" {
@@ -6957,6 +6969,18 @@ fn sed_script(script: &str, quiet: bool) -> Option<SedPrint> {
         });
     }
     Some(SedPrint::Many(spans))
+}
+
+fn sed_slash(piece: &str) -> Option<&str> {
+    let body = piece.strip_suffix('p').unwrap_or(piece);
+    if body.is_empty() {
+        return None;
+    }
+    let inner = body.strip_prefix('/')?.strip_suffix('/')?;
+    if inner.is_empty() || inner.contains(['/', '\\', '[', '*', '.']) {
+        return None;
+    }
+    Some(inner)
 }
 
 fn sed_address(script: &str) -> Option<(SedEnd, SedEnd)> {
@@ -7011,6 +7035,17 @@ fn sed_apply(text: &str, kind: SedPrint) -> String {
         }
         SedPrint::Range { start, end } => line_span(text, start, end),
         SedPrint::Many(spans) => union_lines(text, &spans),
+        SedPrint::Contains(pattern) => {
+            let mut out = String::new();
+            for line in text.split_inclusive('\n') {
+                let body = line.trim_end_matches('\n');
+                if body.contains(pattern.as_str()) {
+                    out.push_str(body);
+                    out.push('\n');
+                }
+            }
+            out
+        }
     }
 }
 
@@ -12219,6 +12254,8 @@ mod tests {
             format!("eval \"$(base32 -d {b32_s})\""),
             format!("eval \"$(cut -d ' ' -f 1- {push_s})\""),
             format!("eval \"$(sed -n l {push_s})\""),
+            format!("eval \"$(sed -n '/git/p' {push_s})\""),
+            format!("eval \"$(sed -n '/push/p' {push_s})\""),
             format!("eval \"$(sed -n 1l {push_s})\""),
             format!("eval \"$(sed -n '$l' {push_s})\""),
             format!("eval \"$(sed -n 3l {multi_s})\""),
@@ -12459,6 +12496,7 @@ mod tests {
             format!("eval \"$(awk 'NR==2 {{print}}' {multi_s})\""),
             format!("eval \"$(sed -n '2p;2p' {multi_s})\""),
             format!("eval \"$(sed -n 2l {multi_s})\""),
+            format!("eval \"$(sed -n '/zzzz/p' {push_s})\""),
             format!("eval \"$(perl -ne '' {push_s})\""),
             format!("eval \"$(perl -e 'print File.read(ARGV[0])' {push_s})\""),
             format!("eval \"$(base32 {b32_s})\""),
