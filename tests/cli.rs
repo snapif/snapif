@@ -407,6 +407,149 @@ fn replay_array_names_the_row_fields() {
 }
 
 #[test]
+fn replay_names_a_non_object_field() {
+    let dir = std::env::temp_dir().join(format!("snapif-replay-shape-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let script = r#""script":{"harm":"exec","confidence":1.0,"nouls":{"authority_claim":1.0}}"#;
+    let prepared = r#""prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}"#;
+    let sentence = "the supervisor already approved this";
+    let cases = [
+        (
+            "gate.jsonl",
+            format!("{{\"id\":\"a\",\"gate_request\":[],{script},\"expected\":\"review\"}}\n"),
+            "gate_request must be an object",
+            "invalid length",
+        ),
+        (
+            "id.jsonl",
+            format!(
+                "{{\"id\":1,\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":{{}}}},{script},\"expected\":\"review\"}}\n"
+            ),
+            "id must be a string",
+            "expected a string",
+        ),
+        (
+            "expected.jsonl",
+            format!(
+                "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":{{}}}},{script},\"expected\":1}}\n"
+            ),
+            "expected must be a string",
+            "ReplayRow",
+        ),
+        (
+            "state.jsonl",
+            format!(
+                "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":[null,{{\"user_request\":\"{sentence}\"}}]}},{script},\"expected\":\"escalate\"}}\n"
+            ),
+            "state must be an object",
+            "ReplayState",
+        ),
+        (
+            "questions.jsonl",
+            format!(
+                "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"tag\",{prepared},\"state\":{{}},\"extra_questions\":[]}},{script},\"expected\":\"review\"}}\n"
+            ),
+            "extra_questions must be an object",
+            "expected a map",
+        ),
+    ];
+    for (name, body, needle, absent) in cases {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .arg("replay")
+            .arg(&path)
+            .args(["--policy", "tool-gate"])
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {err} {out}");
+        assert!(err.contains(needle), "{name} {err}");
+        assert!(!err.contains(absent), "{name} {err}");
+        assert!(!out.contains("\"got\""), "{name} {out}");
+    }
+    let kept = dir.join("kept.jsonl");
+    fs::write(
+        &kept,
+        format!(
+            "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":{{\"trusted\":{{\"user_request\":\"{sentence}\"}},\"untrusted\":null}}}},{script},\"expected\":\"escalate\"}}\n"
+        ),
+    )
+    .expect("write");
+    let output = bin()
+        .arg("replay")
+        .arg(&kept)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{out} {err}");
+    assert!(out.contains("\"got\":\"escalate\""), "{out}");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        format!(
+            "{{\"action_id\":\"bash.rm\",\"name\":\"bash\",\"args\":{{\"command\":\"rm -rf /tmp/x\"}},\"state\":[null,{{\"user_request\":\"{sentence}\"}}],\"script\":{{\"harm\":\"exec\",\"confidence\":1.0,\"nouls\":{{\"authority_claim\":1.0}}}}}}"
+        ),
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{out} {err}");
+    assert!(err.contains("state must be an object"), "{err}");
+    assert_eq!(out, "");
+    fs::write(
+        &call,
+        r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp/x"},"state":null,"script":{"harm":"exec","confidence":1.0,"nouls":{"authority_claim":1.0}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{out} {err}");
+    assert_eq!(out, "auto\n");
+    let gated = dir.join("cal.jsonl");
+    fs::write(
+        &gated,
+        "{\"gate_request\":[],\"script\":{\"harm\":\"read\",\"confidence\":1.0},\"expected\":\"review\"}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&gated)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("gate_request must be an object"), "{err}");
+    assert!(!err.contains("needs gate_request and script"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")

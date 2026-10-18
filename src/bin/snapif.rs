@@ -184,6 +184,22 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
         eprintln!("script must be an object");
         return 1;
     }
+    // JSON null is an absent state or prepared value. An array is
+    // positional and can drop a sentence that an object would score.
+    if value
+        .get("state")
+        .is_some_and(|item| !item.is_null() && !item.is_object())
+    {
+        eprintln!("state must be an object");
+        return 1;
+    }
+    if value
+        .get("prepared")
+        .is_some_and(|item| !item.is_null() && !item.is_object())
+    {
+        eprintln!("prepared must be an object");
+        return 1;
+    }
     let file: CallFile = match serde_json::from_value(value.clone()) {
         Ok(file) => file,
         Err(err) => {
@@ -583,6 +599,27 @@ fn finish_checked(count: usize, what: &str) -> u8 {
     0
 }
 
+/// A JSON array in these fields is positional. `state: [null, sentence]`
+/// then scores as if the sentence were absent.
+fn replay_shape_message(value: &Value) -> Option<String> {
+    if value.get("id").is_some_and(|item| !item.is_string()) {
+        return Some("id must be a string".to_string());
+    }
+    if value.get("expected").is_some_and(|item| !item.is_string()) {
+        return Some("expected must be a string".to_string());
+    }
+    let gate = value.get("gate_request")?;
+    if !gate.is_object() {
+        return Some("gate_request must be an object".to_string());
+    }
+    for key in ["prepared", "state", "extra_questions"] {
+        if gate.get(key).is_some_and(|item| !item.is_object()) {
+            return Some(format!("{key} must be an object"));
+        }
+    }
+    None
+}
+
 /// A padded id misses the policy row. The default row can then auto.
 fn trimmed_action_id(raw: &str) -> Option<&str> {
     let id = raw.trim();
@@ -642,6 +679,10 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             .is_some_and(|script| !script.is_object())
         {
             eprintln!("line {}: script must be an object", line_no + 1);
+            return 1;
+        }
+        if let Some(message) = replay_shape_message(&value) {
+            eprintln!("line {}: {message}", line_no + 1);
             return 1;
         }
         let row: ReplayRow = match serde_json::from_value(value) {
@@ -1729,6 +1770,10 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 "{}: line {line_no}: labels must be an object",
                 path.display()
             );
+            return 1;
+        }
+        if let Some(message) = replay_shape_message(&value) {
+            eprintln!("{}: line {line_no}: {message}", path.display());
             return 1;
         }
         let row: GateCalRow = match serde_json::from_value(value) {
