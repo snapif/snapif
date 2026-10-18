@@ -424,6 +424,8 @@ fn check_action(
 /// body in the same shell. `cat` and `bash -c` do not run that body.
 /// An unquoted heredoc still expands `$(...)` and backticks first, so
 /// `cat <<EOF` with `$(rm)` matches. A quoted delimiter does not.
+/// Any quote in that word quotes it, so `cat <<E'OF'` and `cat <<$'EOF'`
+/// do not expand, and the next command is still scored.
 /// The here-string word is expanded first, so `cat <<< $(rm)` matches.
 /// Inside double quotes, a backslash immediately before a newline is
 /// removed, so a wrapped `bash -c "git push"` matches `git.push`.
@@ -3465,7 +3467,8 @@ struct PendingHeredoc {
     owner: usize,
     delim: String,
     dash: bool,
-    /// `<<'EOF'`, `<<"EOF"`, and `<<\EOF` do not expand the body.
+    /// Any quote in the delimiter word. `<<'EOF'`, `<<E'OF'`, `<<$'EOF'`,
+    /// `<<$"EOF"`, and `<<\EOF` do not expand the body.
     quoted: bool,
 }
 
@@ -4124,6 +4127,10 @@ fn read_here_string<I: Iterator<Item = char>>(
     if body.is_empty() { None } else { Some(body) }
 }
 
+/// Bash removes quotes from the delimiter word and does not expand `$name`
+/// or `$(...)` there. One quote in the word quotes the body. `$'...'` is
+/// ANSI-C. `$"..."` and `"..."` keep `\$`, `` \` ``, `\"`, `\\`, and a
+/// continued line, and they leave other backslashes in place.
 fn read_heredoc_delim<I: Iterator<Item = char>>(
     chars: &mut std::iter::Peekable<I>,
 ) -> Option<(String, bool, bool)> {
@@ -4136,37 +4143,80 @@ fn read_heredoc_delim<I: Iterator<Item = char>>(
     }
     let mut delim = String::new();
     let mut quoted = false;
-    if matches!(chars.peek(), Some('\'' | '"')) {
-        quoted = true;
-        let quote = chars.next().unwrap_or('"');
-        for ch in chars.by_ref() {
-            if ch == quote {
-                break;
-            }
-            delim.push(ch);
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            break;
         }
-    } else {
-        while let Some(&ch) = chars.peek() {
-            if ch.is_whitespace() {
-                break;
+        chars.next();
+        if ch == '\\' {
+            quoted = true;
+            match chars.next() {
+                Some('\n') | None => {}
+                Some(next) => delim.push(next),
             }
-            chars.next();
-            if ch == '\\' {
-                // A backslash quotes the next character and the whole word.
-                quoted = true;
-                match chars.next() {
-                    Some('\n') | None => {}
-                    Some(next) => delim.push(next),
+            continue;
+        }
+        if ch == '\'' {
+            quoted = true;
+            for inner in chars.by_ref() {
+                if inner == '\'' {
+                    break;
                 }
-                continue;
+                delim.push(inner);
             }
-            delim.push(ch);
+            continue;
         }
+        if ch == '"' {
+            quoted = true;
+            push_double_quoted_delim(chars, &mut delim);
+            continue;
+        }
+        if ch == '$' {
+            match chars.peek().copied() {
+                Some('\'') => {
+                    quoted = true;
+                    chars.next();
+                    read_ansi_c(chars, &mut delim);
+                    continue;
+                }
+                Some('"') => {
+                    quoted = true;
+                    chars.next();
+                    push_double_quoted_delim(chars, &mut delim);
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        delim.push(ch);
     }
     if delim.is_empty() {
         None
     } else {
         Some((delim, dash, quoted))
+    }
+}
+
+fn push_double_quoted_delim<I: Iterator<Item = char>>(
+    chars: &mut std::iter::Peekable<I>,
+    delim: &mut String,
+) {
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            return;
+        }
+        if ch != '\\' {
+            delim.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('\n') | None => {}
+            Some(next @ ('\\' | '$' | '`' | '"')) => delim.push(next),
+            Some(next) => {
+                delim.push('\\');
+                delim.push(next);
+            }
+        }
     }
 }
 
@@ -4836,6 +4886,48 @@ mod tests {
             "cat <<\\EOF\n$(git push origin main)\nEOF",
             "cat <<EOF\n\\$(git push origin main)\nEOF",
             "cat <<EOF\nrm -rf /tmp/x\nEOF",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_heredoc_word_does_not_hide_the_next_command() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let push = [
+            "cat <<E'OF'\necho hello\nEOF\ngit push origin main",
+            "cat <<E\"OF\"\necho hello\nEOF\ngit push origin main",
+            "cat <<'EO'F\necho hello\nEOF\ngit push origin main",
+            "cat <<\"EO\"F\necho hello\nEOF\ngit push origin main",
+            "cat <<E'O'F\necho hello\nEOF\ngit push origin main",
+            "cat <<$'EOF'\necho hello\nEOF\ngit push origin main",
+            "cat <<$\"EOF\"\necho hello\nEOF\ngit push origin main",
+            "cat <<$'EO\\x46'\necho hello\nEOF\ngit push origin main",
+            "cat <<$'EO\\106'\necho hello\nEOF\ngit push origin main",
+            "cat <<-E'OF'\necho hello\n\tEOF\ngit push origin main",
+            "cat <<E\\OF\necho hello\nEOF\ngit push origin main",
+            "cat <<E\"O\\\"F\"\necho hello\nEO\"F\ngit push origin main",
+            "cat <<''\necho hello\n\ngit push origin main",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "cat <<E'OF'\n$(git push origin main)\nEOF",
+            "cat <<$'EOF'\n$(git push origin main)\nEOF",
+            "cat <<$\"EOF\"\n$(git push origin main)\nEOF",
+            "cat <<$'EO\\x46'\n$(git push origin main)\nEOF",
+            "EOF=END; cat <<$EOF\necho hello\nEND\ngit push origin main",
+            "cat <<\"$(git push origin DELIM)\"\necho hello\nEOF\ngit push origin AFTER",
+            "cat <<$\"EO\\x46\"\necho hello\nEOF\ngit push origin main",
         ];
         for command in neither {
             assert!(
