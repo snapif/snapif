@@ -2068,6 +2068,55 @@ fn explain_bash_rm_names_the_floor_that_raised_auto() {
 }
 
 #[test]
+fn explain_trims_a_padded_action_id() {
+    for action in [" bash.rm ", "bash.rm\t"] {
+        let output = bin()
+            .args(["explain", "--action", action])
+            .env_remove("SNAPIF_BACKEND")
+            .env_remove("SNAPIF_POLICY")
+            .env_remove("SNAPIF_MODEL")
+            .output()
+            .expect("run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "{action:?} {stdout}");
+        assert!(
+            stdout.lines().any(|line| line == "action bash.rm"),
+            "{action:?} {stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line == "class exec"),
+            "{action:?} {stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line == "auto 1"),
+            "{action:?} {stdout}"
+        );
+        assert!(
+            !stdout.contains("source default_action"),
+            "{action:?} {stdout}"
+        );
+    }
+    let host = bin()
+        .args(["explain", "--action", " Bash ", "--command", "rm -rf /tmp"])
+        .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_POLICY")
+        .env_remove("SNAPIF_MODEL")
+        .output()
+        .expect("run");
+    let host_out = String::from_utf8_lossy(&host.stdout);
+    assert_eq!(host.status.code(), Some(0), "{host_out}");
+    assert!(
+        host_out.lines().any(|line| line == "matched bash.rm"),
+        "{host_out}"
+    );
+    assert!(
+        host_out.lines().any(|line| line == "class exec"),
+        "{host_out}"
+    );
+    assert!(!host_out.contains("source default_action"), "{host_out}");
+}
+
+#[test]
 fn log_failure_names_the_path_and_cache_rejects_words() {
     let call = std::env::temp_dir().join(format!("snapif-logfail-{}.json", std::process::id()));
     fs::write(

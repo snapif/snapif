@@ -971,6 +971,7 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
         eprintln!("action id must not be blank");
         return 1;
     }
+    let action = action.trim();
     let model = match explain_model() {
         Ok(model) => model,
         Err(()) => return 1,
