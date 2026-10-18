@@ -454,7 +454,9 @@ fn check_action(
 /// print the file. `genv`, `gnice`, and `gnohup` do too. `time cat`,
 /// `exec cat`, and `sudo cat` print the file. `gsplit --filter=cat`
 /// and `split --filter=cat` print the file. `gsplit -n 1/1` prints it
-/// too. `gsplit --filter` runs that command. Without `-n`,
+/// too. `gsplit --filter` runs that command. `while read -r`
+/// then `printf` of that name prints the file. `mapfile -t` then
+/// `printf` of the first element prints that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -5700,6 +5702,188 @@ enum Printed {
     Unknown,
 }
 
+/// `while read` then `printf` of that name prints the redirected file.
+/// `mapfile -t` then `printf` of the first element prints that line.
+fn read_back_print(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Option<Printed> {
+    let words = loose_words(body)?;
+    if let Some(path) = while_read_path(&words) {
+        return Some(loaded_print(path, depth, substitutions, false));
+    }
+    if let Some(path) = mapfile_first_path(&words) {
+        return Some(loaded_print(path, depth, substitutions, true));
+    }
+    None
+}
+
+fn loaded_print(
+    path: &str,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+    first_line: bool,
+) -> Printed {
+    match load_text_operand(path, depth, substitutions) {
+        Loaded::Text(text) => {
+            if first_line {
+                Printed::Text(text.lines().next().unwrap_or("").to_string())
+            } else {
+                Printed::Text(text)
+            }
+        }
+        Loaded::Unscanned => Printed::Unscanned,
+        Loaded::Missing
+        | Loaded::Dir
+        | Loaded::Null
+        | Loaded::Fifo
+        | Loaded::Hang
+        | Loaded::Unknown => Printed::Unknown,
+    }
+}
+
+fn loose_words(body: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = body.chars().collect();
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        while index < chars.len() && (chars[index].is_whitespace() || chars[index] == ';') {
+            index += 1;
+        }
+        if index >= chars.len() || chars[index] == '#' {
+            break;
+        }
+        let mut word = String::new();
+        if chars[index] == '\'' || chars[index] == '"' {
+            let quote = chars[index];
+            index += 1;
+            while index < chars.len() && chars[index] != quote {
+                if quote == '"' && chars[index] == '\\' {
+                    index += 1;
+                    if index >= chars.len() {
+                        return None;
+                    }
+                }
+                word.push(chars[index]);
+                index += 1;
+            }
+            if index >= chars.len() {
+                return None;
+            }
+            index += 1;
+        } else {
+            while index < chars.len()
+                && !chars[index].is_whitespace()
+                && chars[index] != ';'
+                && chars[index] != '\''
+                && chars[index] != '"'
+            {
+                word.push(chars[index]);
+                index += 1;
+            }
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+    }
+    Some(words)
+}
+
+fn shell_name(token: &str) -> bool {
+    let mut chars = token.chars();
+    match chars.next() {
+        Some(ch) if ch == '_' || ch.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn while_read_path(words: &[String]) -> Option<&str> {
+    if words.first().map(String::as_str) != Some("while")
+        || words.get(1).map(String::as_str) != Some("read")
+    {
+        return None;
+    }
+    let mut index = 2usize;
+    if words.get(index).map(String::as_str) == Some("-r") {
+        index += 1;
+    }
+    let name = words.get(index)?;
+    if !shell_name(name) {
+        return None;
+    }
+    index += 1;
+    if words.get(index).map(String::as_str) != Some("do") {
+        return None;
+    }
+    index += 1;
+    if words.get(index).map(String::as_str) != Some("printf") {
+        return None;
+    }
+    index += 1;
+    if words.get(index).map(String::as_str) != Some("%s\\n") {
+        return None;
+    }
+    index += 1;
+    let expect = format!("${name}");
+    if words.get(index).map(String::as_str) != Some(expect.as_str()) {
+        return None;
+    }
+    index += 1;
+    redirect_path(words, index)
+}
+
+fn mapfile_first_path(words: &[String]) -> Option<&str> {
+    if words.first().map(String::as_str) != Some("mapfile")
+        || words.get(1).map(String::as_str) != Some("-t")
+    {
+        return None;
+    }
+    let name = words.get(2)?;
+    if !shell_name(name) {
+        return None;
+    }
+    let (path, next) = split_redirect(words, 3)?;
+    if words.get(next).map(String::as_str) != Some("printf") {
+        return None;
+    }
+    if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
+        return None;
+    }
+    let expect = format!("${{{name}[0]}}");
+    if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
+        return None;
+    }
+    if words.len() != next + 3 {
+        return None;
+    }
+    Some(path)
+}
+
+fn redirect_path(words: &[String], index: usize) -> Option<&str> {
+    if words.get(index).map(String::as_str) != Some("done") {
+        return None;
+    }
+    let (path, next) = split_redirect(words, index + 1)?;
+    if words.len() != next {
+        return None;
+    }
+    Some(path)
+}
+
+fn split_redirect(words: &[String], index: usize) -> Option<(&str, usize)> {
+    let token = words.get(index)?;
+    if token == "<" {
+        let path = words.get(index + 1)?;
+        if path.starts_with('<') || path.contains('$') {
+            return None;
+        }
+        return Some((path.as_str(), index + 2));
+    }
+    let path = token.strip_prefix('<')?;
+    if path.is_empty() || path.contains('$') {
+        return None;
+    }
+    Some((path, index + 1))
+}
+
 enum Run {
     Produced { text: String, ok: bool },
     Unscanned,
@@ -5718,6 +5902,12 @@ struct Piece {
 }
 
 fn printed_output(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Printed {
+    if let Some(found) = read_back_print(body, depth, substitutions) {
+        return match found {
+            Printed::Text(text) => Printed::Text(strip_trailing_newlines(text)),
+            other => other,
+        };
+    }
     match fold_print(body, depth, substitutions) {
         Printed::Text(text) => Printed::Text(strip_trailing_newlines(text)),
         other => other,
@@ -13820,6 +14010,9 @@ mod tests {
             format!("eval \"$(gsplit -n r/1/1 {push_s})\""),
             format!("eval \"$(gsplit -n l/2/3 {multi_s})\""),
             format!("eval \"$(gsplit -n r/3/3 {multi_s})\""),
+            format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {push_s})""#),
+            format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {multi_s})""#),
+            format!(r#"eval "$(mapfile -t x < {push_s}; printf '%s\n' "${{x[0]}}")""#),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
             format!("eval \"$(printf '%s\\n' {push_s} | xargs cat)\""),
             format!("eval \"$(gxargs cat {push_s})\""),
@@ -14084,6 +14277,9 @@ mod tests {
             format!("eval \"$(gsplit -n 1/2 {echo_s})\""),
             format!("eval \"$(gsplit -n l/1/3 {multi_s})\""),
             format!("eval \"$(gsplit -n r/1/3 {multi_s})\""),
+            format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {echo_s})""#),
+            format!(r#"eval "$(mapfile -t x < {echo_s}; printf '%s\n' "${{x[0]}}")""#),
+            format!(r#"eval "$(mapfile -t x < {multi_s}; printf '%s\n' "${{x[0]}}")""#),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
