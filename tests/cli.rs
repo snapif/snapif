@@ -2877,6 +2877,72 @@ fn hook_keeps_the_prompt_and_drops_the_session_id() {
 }
 
 #[test]
+fn hook_denies_an_unreadable_transcript_and_keeps_an_empty_file() {
+    let dir = std::env::temp_dir().join(format!("snapif-unread-transcript-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let missing = dir.join("missing.jsonl");
+    let empty = dir.join("empty.jsonl");
+    fs::write(&empty, "").expect("empty");
+    let script = r#""script":{"harm":"read","confidence":1.0,"nouls":{"authority_claim":0.95}}"#;
+    let missing_body = format!(
+        "{{\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{},{script}}}",
+        serde_json::to_string(missing.to_str().unwrap()).unwrap()
+    );
+    let denied = hook_output(missing_body.as_bytes(), false);
+    let stdout = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("transcript unreadable"), "{stdout}");
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let shadowed = hook_output(missing_body.as_bytes(), true);
+    let shadow_out = String::from_utf8_lossy(&shadowed.stdout);
+    assert_eq!(shadowed.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"deny\""),
+        "{shadow_out}"
+    );
+    assert!(shadow_out.contains("transcript unreadable"), "{shadow_out}");
+
+    let empty_body = format!(
+        "{{\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{},{script}}}",
+        serde_json::to_string(empty.to_str().unwrap()).unwrap()
+    );
+    let allowed = hook_output(empty_body.as_bytes(), false);
+    let allowed_out = String::from_utf8_lossy(&allowed.stdout);
+    assert_eq!(allowed.status.code(), Some(0), "{allowed_out}");
+    assert!(
+        allowed_out.contains("\"permissionDecision\":\"allow\""),
+        "{allowed_out}"
+    );
+    assert!(
+        !allowed_out.contains("transcript unreadable"),
+        "{allowed_out}"
+    );
+
+    let call = dir.join("call.json");
+    fs::write(&call, &missing_body).expect("call");
+    let gate = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("gate");
+    let gate_out = String::from_utf8_lossy(&gate.stdout);
+    let gate_err = String::from_utf8_lossy(&gate.stderr);
+    assert_eq!(gate.status.code(), Some(1), "{gate_out}{gate_err}");
+    assert!(gate_err.contains("transcript unreadable"), "{gate_err}");
+    assert!(gate_out.trim().is_empty(), "{gate_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn hook_strips_a_leading_bom() {
     let body = format!(
         "\u{feff}{}",

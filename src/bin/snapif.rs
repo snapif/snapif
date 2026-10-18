@@ -260,14 +260,23 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     // copies that text. Gate already accepts the same body for the
     // command, so a missing trusted object uses the same copy.
     // An explicit object still wins, including an empty one.
-    let trusted = if has("trusted") {
+    let trusted_from_state = if has("trusted") {
         file.trusted.filter(|item| item.is_object())
     } else {
         file.state
             .as_ref()
             .and_then(|state| state.trusted.as_object().map(|_| state.trusted.clone()))
-    }
-    .unwrap_or_else(|| hook_trusted(&value));
+    };
+    let trusted = match trusted_from_state {
+        Some(trusted) => trusted,
+        None => match hook_trusted(&value) {
+            Ok(trusted) => trusted,
+            Err(err) => {
+                eprintln!("{err}");
+                return 1;
+            }
+        },
+    };
     let untrusted = if has("untrusted") {
         file.untrusted.unwrap_or(Value::Null)
     } else {
@@ -1117,7 +1126,13 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
         .get("tool_input")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let trusted = hook_trusted(&value);
+    let trusted = match hook_trusted(&value) {
+        Ok(trusted) => trusted,
+        Err(err) => {
+            hook_decision("deny", &err.to_string());
+            return 0;
+        }
+    };
     let mut client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
@@ -1331,16 +1346,16 @@ fn reason_tag(reason: &snapif::verdict::UnsureReason) -> String {
     }
 }
 
-fn hook_trusted(value: &Value) -> Value {
+fn hook_trusted(value: &Value) -> Result<Value, std::io::Error> {
     if let Some(trusted) = value.get("trusted").filter(|item| item.is_object()) {
-        return trusted.clone();
+        return Ok(trusted.clone());
     }
-    let Some(full) = hook_user_turn(value) else {
-        return serde_json::json!({});
+    let Some(full) = hook_user_turn(value)? else {
+        return Ok(serde_json::json!({}));
     };
     let clipped = clip_turn(&full);
     if clipped.is_empty() {
-        return serde_json::json!({});
+        return Ok(serde_json::json!({}));
     }
     let mut trusted = serde_json::Map::new();
     trusted.insert(
@@ -1355,25 +1370,30 @@ fn hook_trusted(value: &Value) -> Value {
             serde_json::Value::String(excerpt),
         );
     }
-    serde_json::Value::Object(trusted)
+    Ok(serde_json::Value::Object(trusted))
 }
 
-fn hook_user_turn(value: &Value) -> Option<String> {
+fn hook_user_turn(value: &Value) -> Result<Option<String>, std::io::Error> {
     for key in ["prompt", "user_prompt"] {
         if let Some(text) = value.get(key).and_then(Value::as_str) {
             let text = text.trim();
             if !text.is_empty() {
-                return Some(text.to_string());
+                return Ok(Some(text.to_string()));
             }
         }
     }
     if let Some(text) = transcript_tail(value.get("transcript")) {
-        return Some(text);
+        return Ok(Some(text));
     }
-    value
+    let Some(path) = value
         .get("transcript_path")
         .and_then(Value::as_str)
-        .and_then(transcript_file_tail)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    transcript_file_tail(path)
 }
 
 fn clip_turn(text: &str) -> String {
@@ -1453,18 +1473,30 @@ fn content_text(content: &Value) -> Option<String> {
     }
 }
 
-fn transcript_file_tail(path: &str) -> Option<String> {
+fn transcript_file_tail(path: &str) -> Result<Option<String>, std::io::Error> {
+    match read_transcript_file_tail(path) {
+        Ok(text) => Ok(text),
+        Err(err) => Err(std::io::Error::new(
+            err.kind(),
+            format!("{path}: transcript unreadable"),
+        )),
+    }
+}
+
+fn read_transcript_file_tail(path: &str) -> Result<Option<String>, std::io::Error> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL_BYTES: u64 = 1024 * 1024;
     const TAIL_LINES: usize = 4_000;
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
     let start = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
+    file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
     if start > 0 {
-        let pos = bytes.iter().position(|byte| *byte == b'\n')?;
+        let Some(pos) = bytes.iter().position(|byte| *byte == b'\n') else {
+            return Ok(None);
+        };
         bytes.drain(..=pos);
     }
     let raw = String::from_utf8_lossy(&bytes);
@@ -1474,10 +1506,10 @@ fn transcript_file_tail(path: &str) -> Option<String> {
             continue;
         };
         if let Some(turn) = user_row_text(&row) {
-            return Some(turn);
+            return Ok(Some(turn));
         }
     }
-    None
+    Ok(None)
 }
 
 fn hook_decision(decision: &str, reason: &str) {
