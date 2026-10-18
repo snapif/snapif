@@ -2245,11 +2245,11 @@ struct ReplayState {
 struct ReplayScript {
     #[serde(default = "default_harm", deserialize_with = "script_harm")]
     harm: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "script_confidence")]
     confidence: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "script_nouls")]
     nouls: serde_json::Map<String, Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "script_timeout")]
     timeout: bool,
 }
 
@@ -2275,6 +2275,44 @@ where
         Some(word) => Ok(word.to_string()),
         None => Err(serde::de::Error::custom(format!(
             "script harm must be none, read, write, exec, network, or money, got {value}"
+        ))),
+    }
+}
+
+fn script_confidence<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value.as_f64() {
+        Some(number) => Ok(number),
+        None => Err(serde::de::Error::custom(format!(
+            "script confidence must be from 0 to 1, got {value}"
+        ))),
+    }
+}
+
+fn script_nouls<'de, D>(deserializer: D) -> Result<serde_json::Map<String, Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Object(map) => Ok(map),
+        value => Err(serde::de::Error::custom(format!(
+            "script nouls must be an object, got {value}"
+        ))),
+    }
+}
+
+fn script_timeout<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value.as_bool() {
+        Some(flag) => Ok(flag),
+        None => Err(serde::de::Error::custom(format!(
+            "script timeout must be a bool, got {value}"
         ))),
     }
 }

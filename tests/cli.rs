@@ -1072,6 +1072,111 @@ fn script_harm_names_a_non_string() {
 }
 
 #[test]
+fn script_confidence_nouls_and_timeout_name_a_wrong_type() {
+    let dir = std::env::temp_dir().join(format!("snapif-script-type-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let cases = [
+        (
+            "confidence-word",
+            r#"{"harm":"read","confidence":"high"}"#,
+            "script confidence must be from 0 to 1",
+            "high",
+        ),
+        (
+            "confidence-bool",
+            r#"{"harm":"read","confidence":true}"#,
+            "script confidence must be from 0 to 1",
+            "got true",
+        ),
+        (
+            "nouls-array",
+            r#"{"harm":"read","confidence":0.9,"nouls":[]}"#,
+            "script nouls must be an object",
+            "got []",
+        ),
+        (
+            "nouls-string",
+            r#"{"harm":"read","confidence":0.9,"nouls":"destructive"}"#,
+            "script nouls must be an object",
+            "destructive",
+        ),
+        (
+            "timeout-string",
+            r#"{"harm":"read","confidence":0.9,"timeout":"yes"}"#,
+            "script timeout must be a bool",
+            "yes",
+        ),
+    ];
+    for (name, script, sentence, shown) in cases {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"script":{script}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains(sentence), "{name} {err}");
+        assert!(err.contains(shown), "{name} {err}");
+        assert!(!err.contains("invalid type"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+
+    let denied = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/demo"},"script":{"harm":"read","confidence":"high"}}"#,
+        false,
+    );
+    let hook_out = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{hook_out}");
+    assert!(
+        hook_out.contains("\"permissionDecision\":\"deny\""),
+        "{hook_out}"
+    );
+    assert!(
+        hook_out.contains("script confidence must be from 0 to 1"),
+        "{hook_out}"
+    );
+    assert!(hook_out.contains("high"), "{hook_out}");
+    assert!(!hook_out.contains("invalid type"), "{hook_out}");
+    assert!(
+        !hook_out.contains("\"permissionDecision\":\"allow\""),
+        "{hook_out}"
+    );
+
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"one","gate_request":{"action_id":"bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/demo"}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.9,"nouls":[]},"expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_err}");
+    assert!(
+        replay_err.contains("script nouls must be an object"),
+        "{replay_err}"
+    );
+    assert!(replay_err.contains("got []"), "{replay_err}");
+    assert!(!replay_err.contains("invalid type"), "{replay_err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([
