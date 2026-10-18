@@ -442,7 +442,9 @@ fn check_action(
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
 /// `iconv -f utf-8 -t utf-8` print that text. `join` of a file with
-/// itself prints the line.
+/// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
+/// line. `base32 -d` prints the decoded text. `dd if=path` copies that
+/// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
@@ -5959,6 +5961,10 @@ fn run_builtin(
         "uniq" => uniq_run(args, input, depth, substitutions),
         "tac" => tac_run(args, input, depth, substitutions),
         "base64" => base64_run(args, input, depth, substitutions),
+        "base32" => base32_run(args, input, depth, substitutions),
+        "dd" => dd_run(args, input, depth, substitutions),
+        "perl" | "ruby" => line_print_run(args, input, depth, substitutions),
+        "python" | "python3" => python_cat_run(args, input, depth, substitutions),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_run(&words[0], args, input, depth, substitutions)
         }
@@ -6718,8 +6724,9 @@ fn sed_script(script: &str, quiet: bool) -> Option<SedPrint> {
     }
     let mut spans = Vec::new();
     for piece in pieces {
-        if piece == "p" {
-            return Some(if quiet {
+        if piece == "p" || piece == "l" {
+            // `l` prints the line and a `$`. Eval expands that `$` away.
+            return Some(if quiet || piece == "l" {
                 SedPrint::All
             } else {
                 SedPrint::Double
@@ -6996,6 +7003,44 @@ fn cut_query(args: &[String]) -> Option<CutQuery> {
         if arg == "--" {
             index += 1;
             break;
+        }
+        if arg == "-d" || arg == "--delimiter" {
+            index += 1;
+            args.get(index)?;
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-d")
+            && !rest.is_empty()
+            && !rest.starts_with('-')
+        {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--delimiter=") {
+            if rest.is_empty() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "-f" {
+            if args.get(index + 1).is_some_and(|spec| spec == "1-") {
+                identity = true;
+                index += 2;
+                continue;
+            }
+            return None;
+        }
+        if let Some(rest) = arg.strip_prefix("-f")
+            && !rest.is_empty()
+        {
+            if rest != "1-" {
+                return None;
+            }
+            identity = true;
+            index += 1;
+            continue;
         }
         if arg == "-c" {
             if args.get(index + 1).is_some_and(|spec| spec == "1-") {
@@ -7840,6 +7885,278 @@ struct Base64Query {
     file: Option<String>,
 }
 
+fn base32_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = base32_query(args) else {
+        return Run::Unknown;
+    };
+    let raw = match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        Run::Produced { text, ok: true } => text,
+        other => return other,
+    };
+    let Some(text) = b32_decode(&raw) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn base32_query(args: &[String]) -> Option<Base64Query> {
+    let mut index = 0usize;
+    let mut decode = false;
+    let mut file = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-d" || arg == "--decode" {
+            decode = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-w" || arg == "--wrap" {
+            index += 1;
+            args.get(index)?;
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-w")
+            && !rest.is_empty()
+        {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--wrap=") {
+            if rest.is_empty() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if !decode || args.len() - index > 1 {
+        return None;
+    }
+    if file.is_none() {
+        file = args.get(index).cloned();
+    }
+    Some(Base64Query { file })
+}
+
+fn b32_decode(text: &str) -> Option<String> {
+    fn value(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a'),
+            b'2'..=b'7' => Some(byte - b'2' + 26),
+            _ => None,
+        }
+    }
+    let filtered: Vec<u8> = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace() && *byte != b'=')
+        .collect();
+    if filtered.is_empty() {
+        return Some(String::new());
+    }
+    let mut out = Vec::new();
+    let mut buffer = 0u64;
+    let mut bits = 0u32;
+    for byte in filtered {
+        buffer = (buffer << 5) | u64::from(value(byte)?);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+            buffer &= (1u64 << bits) - 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn dd_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = dd_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn dd_query(args: &[String]) -> Option<Option<String>> {
+    let mut file = None;
+    let mut saw_if = false;
+    for arg in args {
+        if let Some(path) = arg.strip_prefix("if=") {
+            if saw_if {
+                return None;
+            }
+            saw_if = true;
+            if path != "-" {
+                file = Some(path.to_string());
+            }
+            continue;
+        }
+        if arg.starts_with("of=")
+            || arg.starts_with("count=")
+            || arg.starts_with("skip=")
+            || arg.starts_with("seek=")
+            || arg.starts_with("iseek=")
+            || arg.starts_with("oseek=")
+            || arg.starts_with("conv=")
+        {
+            return None;
+        }
+        if arg.starts_with("status=")
+            || arg.starts_with("bs=")
+            || arg.starts_with("ibs=")
+            || arg.starts_with("obs=")
+            || arg.starts_with("cbs=")
+        {
+            continue;
+        }
+        return None;
+    }
+    Some(file)
+}
+
+fn line_print_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = line_print_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+/// `perl -pe ''` and `ruby -pe ''` print each line unchanged.
+fn line_print_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut print_lines = false;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "--" {
+            index += 1;
+            files.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "-p" {
+            print_lines = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-e" || arg == "-pe" || arg == "-ep" {
+            if arg != "-e" {
+                print_lines = true;
+            }
+            index += 1;
+            let text = args.get(index)?.clone();
+            if script.is_some() {
+                return None;
+            }
+            script = Some(text);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-pe")
+            && !rest.is_empty()
+        {
+            print_lines = true;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(rest.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(arg);
+        index += 1;
+    }
+    if !print_lines || files.len() > 1 {
+        return None;
+    }
+    let text = script?;
+    if !text.trim().is_empty() {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
+fn python_cat_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = python_cat_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn python_cat_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "-c" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-u" | "-E" | "-B" | "-s") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(arg);
+        index += 1;
+    }
+    let script = script?;
+    if !python_reads_argv1(&script) || files.len() != 1 {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
+fn python_reads_argv1(script: &str) -> bool {
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact == "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
+}
+
 fn base64_run(
     args: &[String],
     input: Option<&str>,
@@ -8007,6 +8324,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             cat_operands(args).is_none_or(|ops| ops.is_empty() || ops.iter().any(|op| op == "-"))
         }
         "tee" | "tr" => true,
+        "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
+        "dd" => dd_query(args).is_none_or(|query| query.is_none()),
+        "perl" | "ruby" => line_print_query(args).is_none_or(|query| query.is_none()),
+        "python" | "python3" => python_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
         "grep" => grep_query(args).is_none_or(|query| query.file.is_none()),
@@ -11492,6 +11813,8 @@ mod tests {
         std::fs::write(&multi, "alpha\nbeta\ngit push origin main\n").expect("multi script");
         let coded = dir.join(format!("snapif-c30-b64-{pid}.txt"));
         std::fs::write(&coded, "Z2l0IHB1c2ggb3JpZ2luIG1haW4K\n").expect("b64");
+        let b32 = dir.join(format!("snapif-c31-b32-{pid}.txt"));
+        std::fs::write(&b32, "M5UXIIDQOVZWQIDPOJUWO2LOEBWWC2LOBI======\n").expect("b32");
         let dup = dir.join(format!("snapif-c30-dup-{pid}.txt"));
         std::fs::write(&dup, "git push origin main\ngit push origin main\n").expect("dup");
         let mut big_body = b"git push origin main\n".to_vec();
@@ -11502,6 +11825,7 @@ mod tests {
         let assign_s = plain_script_path(&assign);
         let multi_s = plain_script_path(&multi);
         let coded_s = plain_script_path(&coded);
+        let b32_s = plain_script_path(&b32);
         let dup_s = plain_script_path(&dup);
         let big_s = plain_script_path(&big);
         let names = dir.join(format!("snapif-c30-names-{pid}.txt"));
@@ -11547,6 +11871,15 @@ mod tests {
             format!("eval \"$(iconv -f utf-8 -t utf-8 {push_s})\""),
             format!("eval \"$(iconv -f UTF-8 -t utf8 {push_s})\""),
             format!("eval \"$(join {push_s} {push_s})\""),
+            format!("eval \"$(perl -pe '' {push_s})\""),
+            format!("eval \"$(ruby -pe '' {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())' {push_s})\""
+            ),
+            format!("eval \"$(base32 -d {b32_s})\""),
+            format!("eval \"$(cut -d ' ' -f 1- {push_s})\""),
+            format!("eval \"$(sed -n l {push_s})\""),
+            format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
             format!("eval \"$(command cat {push_s})\""),
             format!("x=$(cat {push_s}); eval \"$x\""),
