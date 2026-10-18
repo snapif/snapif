@@ -445,7 +445,9 @@ fn check_action(
 /// `awk 'gsub(/git/,"git")'` prints that line too. `awk '{printf "%s\n", $0}'`
 /// prints each line. `awk 'END {print}'` prints the last line. `head -c`
 /// of a short file prints that file. `tail -c +1` prints it too.
-/// `cat -u` still prints the file. `stdbuf -o0 cat` prints it too. Without `-n`,
+/// `cat -u` still prints the file. `stdbuf -o0 cat` prints it too.
+/// `gcat`, `ghead -c`, and `gtail -c +1` print that file. `timeout 1 cat`
+/// and `gxargs cat` print it too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -2905,6 +2907,26 @@ fn gnu_alias(name: &str) -> &str {
         "gtimeout" => "timeout",
         "gxargs" => "xargs",
         other => other,
+    }
+}
+
+/// Command substitution sees the same Homebrew names. `Cat` stays `Cat`
+/// because bash does not run that spelling as `cat`.
+fn stage_command_name(token: &str) -> String {
+    let base = command_basename(token);
+    let lowered = base.to_ascii_lowercase();
+    let aliased = gnu_alias(&lowered);
+    match aliased {
+        "gcat" => "cat".to_string(),
+        "ghead" => "head".to_string(),
+        "gtail" => "tail".to_string(),
+        _ => {
+            if aliased == lowered && base != lowered {
+                base.to_string()
+            } else {
+                aliased.to_string()
+            }
+        }
     }
 }
 
@@ -5923,6 +5945,10 @@ fn run_stage(stage: &str, pipe: Option<&str>, depth: u32, substitutions: &mut Ve
             }
         };
     }
+    peel_stage_wrappers(&mut words);
+    if words.is_empty() {
+        return Run::Unknown;
+    }
     let ready = match stdin_for(&words, peeled.stdin, pipe) {
         StdinFor::Ready(text) => text,
         StdinFor::Failed => {
@@ -5953,14 +5979,37 @@ fn mask_stdout(run: Run, stdout_lost: bool) -> Run {
     }
 }
 
+fn peel_stage_wrappers(words: &mut Vec<String>) {
+    for _ in 0..8 {
+        if words.is_empty() {
+            return;
+        }
+        let name = stage_command_name(&words[0]);
+        if name != "stdbuf" && name != "timeout" {
+            if name != words[0] {
+                words[0] = name;
+            }
+            return;
+        }
+        let Some((next, script)) = skip_wrapper_flags(&name, words, 1, &mut Vec::new()) else {
+            return;
+        };
+        if script.is_some() || next >= words.len() {
+            return;
+        }
+        words.drain(0..next);
+    }
+}
+
 fn run_builtin(
     words: &[String],
     input: Option<&str>,
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
+    let name = stage_command_name(&words[0]);
     let args = &words[1..];
-    match command_basename(&words[0]) {
+    match name.as_str() {
         "echo" => match echo_output(args) {
             Some(text) => Run::Produced { text, ok: true },
             None => Run::Unknown,
@@ -5979,6 +6028,7 @@ fn run_builtin(
         },
         "cat" => cat_run(args, input, depth, substitutions),
         "stdbuf" => stdbuf_run(args, input, depth, substitutions),
+        "xargs" => xargs_run(words, input, depth, substitutions),
         "tee" => tee_run(args, input),
         "tr" => tr_run(args, input),
         "iconv" => iconv_run(args, input, depth, substitutions),
@@ -6022,6 +6072,30 @@ fn printf_stdout(args: &[String]) -> Option<String> {
         }
     }
     printf_literal(&args[index..])
+}
+
+fn xargs_run(
+    words: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some((next, script)) = skip_wrapper_flags("xargs", words, 1, &mut Vec::new()) else {
+        return Run::Unknown;
+    };
+    if script.is_some() || next >= words.len() {
+        return Run::Unknown;
+    }
+    let mut command = words[next..].to_vec();
+    if stage_command_name(&command[0]) == "xargs" {
+        return Run::Unknown;
+    }
+    if let Some(text) = input {
+        for arg in text.split_whitespace() {
+            command.push(arg.to_string());
+        }
+    }
+    run_builtin(&command, None, depth, substitutions)
 }
 
 fn cat_run(
@@ -9472,17 +9546,25 @@ fn stdin_for(words: &[String], redirect: Option<InSrc>, pipe: Option<&str>) -> S
     }
     match pipe {
         Some(text) => StdinFor::Ready(Some(text.to_string())),
+        // `xargs cat file` still runs `cat file` when stdin is empty.
+        // GNU xargs does that unless `-r` is set. A missing pipe is that EOF.
+        None if stage_command_name(&words[0]) == "xargs" => StdinFor::Ready(Some(String::new())),
         None => StdinFor::Unknown,
     }
 }
 
 fn builtin_reads_stdin(words: &[String]) -> bool {
+    if words.is_empty() {
+        return false;
+    }
+    let name = stage_command_name(&words[0]);
     let args = &words[1..];
-    match command_basename(&words[0]) {
+    match name.as_str() {
         "cat" => {
             cat_operands(args).is_none_or(|ops| ops.is_empty() || ops.iter().any(|op| op == "-"))
         }
         "stdbuf" => stdbuf_command(args).is_some_and(builtin_reads_stdin),
+        "xargs" => true,
         "tee" | "tr" => true,
         "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
         "dd" => dd_query(args).is_none_or(|query| query.is_none()),
@@ -11862,6 +11944,9 @@ mod tests {
             "eval \"$(echo 'git push origin main' | cat | cat)\"",
             "eval \"$(echo 'git push origin main' | stdbuf -o0 cat)\"",
             "eval \"$(printf '%s\\n' 'git push origin main' | stdbuf -oL cat)\"",
+            "eval \"$(echo 'git push origin main' | gstdbuf -o0 cat)\"",
+            "eval \"$(echo 'git push origin main' | timeout 1 cat)\"",
+            "eval \"$(echo 'git push origin main' | gtimeout 1 cat)\"",
             "eval \"$(echo 'rm -rf /tmp/x' | cat)\"",
             "$(echo 'rm -rf /tmp/x' | cat)",
             "printf -v x '%s' 'git push origin main'; eval \"$x\"",
@@ -11963,6 +12048,8 @@ mod tests {
             "eval \"$(echo 'git push origin main' | true)\"",
             "eval \"$(echo 'git push origin main' | echo safe)\"",
             "eval \"$(echo hello | stdbuf -o0 cat)\"",
+            "eval \"$(echo hello | gstdbuf -o0 cat)\"",
+            "eval \"$(echo hello | timeout 1 cat)\"",
             "eval \"$(printf -v x '%s' 'git push origin main')\"",
             "echo \"$(printf -v x '%s' 'git push origin main')\"",
             "printf -v x '%s' 'echo hello'; eval \"$x\"",
@@ -13173,6 +13260,16 @@ mod tests {
             format!("eval \"$(cat -u {push_s})\""),
             format!("eval \"$(stdbuf -o0 cat {push_s})\""),
             format!("eval \"$(stdbuf -oL cat {push_s})\""),
+            format!("eval \"$(gstdbuf -o0 cat {push_s})\""),
+            format!("eval \"$(gcat {push_s})\""),
+            format!("eval \"$(ghead -c 100000 {push_s})\""),
+            format!("eval \"$(gtail -c +1 {push_s})\""),
+            format!("eval \"$(timeout 1 cat {push_s})\""),
+            format!("eval \"$(gtimeout 1 cat {push_s})\""),
+            format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
+            format!("eval \"$(printf '%s\\n' {push_s} | xargs cat)\""),
+            format!("eval \"$(gxargs cat {push_s})\""),
+            format!("eval \"$(xargs cat {push_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {push_s})\""),
             format!("eval \"$(ruby -e 'puts ARGF.read' {push_s})\""),
             format!("eval \"$(tail -c +1 {push_s})\""),
@@ -13391,6 +13488,13 @@ mod tests {
             format!("eval \"$(head -c 100000 {echo_s})\""),
             format!("eval \"$(cat -u {echo_s})\""),
             format!("eval \"$(stdbuf -o0 cat {echo_s})\""),
+            format!("eval \"$(gstdbuf -o0 cat {echo_s})\""),
+            format!("eval \"$(gcat {echo_s})\""),
+            format!("eval \"$(ghead -c 100000 {echo_s})\""),
+            format!("eval \"$(gtail -c +1 {echo_s})\""),
+            format!("eval \"$(timeout 1 cat {echo_s})\""),
+            format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
+            format!("eval \"$(gxargs cat {echo_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
             format!("eval \"$(tail -c 3 {push_s})\""),
             format!("eval \"$(tail -c +5 {push_s})\""),
