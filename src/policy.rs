@@ -422,6 +422,8 @@ fn check_action(
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
 /// body in the same shell. `cat` and `bash -c` do not run that body.
+/// An unquoted heredoc still expands `$(...)` and backticks first, so
+/// `cat <<EOF` with `$(rm)` matches. A quoted delimiter does not.
 /// The here-string word is expanded first, so `cat <<< $(rm)` matches.
 /// Inside double quotes, a backslash immediately before a newline is
 /// removed, so a wrapped `bash -c "git push"` matches `git.push`.
@@ -3463,6 +3465,8 @@ struct PendingHeredoc {
     owner: usize,
     delim: String,
     dash: bool,
+    /// `<<'EOF'`, `<<"EOF"`, and `<<\EOF` do not expand the body.
+    quoted: bool,
 }
 
 fn tokenize_parts(command: &str) -> Vec<ShellPart> {
@@ -3578,11 +3582,12 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     if let Some(body) = read_here_string(&mut chars, &mut substitutions) {
                         stdin_bodies.push(body);
                     }
-                } else if let Some((delim, dash)) = read_heredoc_delim(&mut chars) {
+                } else if let Some((delim, dash, quoted)) = read_heredoc_delim(&mut chars) {
                     heredocs.push(PendingHeredoc {
                         owner: parts.len(),
                         delim,
                         dash,
+                        quoted,
                     });
                 }
             }
@@ -3625,6 +3630,9 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 for item in std::mem::take(&mut heredocs) {
                     let body = read_heredoc_body(&mut chars, &item.delim, item.dash);
                     if let Some(ShellPart::Segment(segment)) = parts.get_mut(item.owner) {
+                        if !item.quoted {
+                            scan_heredoc_expansions(&body, &mut segment.substitutions);
+                        }
                         segment.heredocs.push(body);
                     }
                 }
@@ -4118,7 +4126,7 @@ fn read_here_string<I: Iterator<Item = char>>(
 
 fn read_heredoc_delim<I: Iterator<Item = char>>(
     chars: &mut std::iter::Peekable<I>,
-) -> Option<(String, bool)> {
+) -> Option<(String, bool, bool)> {
     let dash = chars.peek() == Some(&'-');
     if dash {
         chars.next();
@@ -4127,7 +4135,9 @@ fn read_heredoc_delim<I: Iterator<Item = char>>(
         chars.next();
     }
     let mut delim = String::new();
+    let mut quoted = false;
     if matches!(chars.peek(), Some('\'' | '"')) {
+        quoted = true;
         let quote = chars.next().unwrap_or('"');
         for ch in chars.by_ref() {
             if ch == quote {
@@ -4140,14 +4150,65 @@ fn read_heredoc_delim<I: Iterator<Item = char>>(
             if ch.is_whitespace() {
                 break;
             }
-            delim.push(ch);
             chars.next();
+            if ch == '\\' {
+                // A backslash quotes the next character and the whole word.
+                quoted = true;
+                match chars.next() {
+                    Some('\n') | None => {}
+                    Some(next) => delim.push(next),
+                }
+                continue;
+            }
+            delim.push(ch);
         }
     }
     if delim.is_empty() {
         None
     } else {
-        Some((delim, dash))
+        Some((delim, dash, quoted))
+    }
+}
+
+/// An unquoted heredoc expands `$(...)` and backticks before `cat` starts.
+/// A backslash quotes `$`, backtick, `\`, and a newline. `$'...'` is not
+/// ANSI-C quoting in that body, so a backtick there still runs. A quoted
+/// delimiter never reaches this function.
+fn scan_heredoc_expansions(body: &str, substitutions: &mut Vec<String>) {
+    let mut chars = body.chars().peekable();
+    let mut ignored = String::new();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some('\n') => {
+                    chars.next();
+                }
+                Some('$' | '`' | '\\') => {
+                    chars.next();
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if ch == '`' {
+            substitutions.push(read_backtick(&mut chars));
+            continue;
+        }
+        if ch != '$' {
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('"') => {
+                chars.next();
+                read_dollar_double(&mut chars, &mut ignored, substitutions);
+                ignored.clear();
+            }
+            Some('(') => {
+                chars.next();
+                substitutions.push(read_balanced_parens(&mut chars));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -4735,6 +4796,46 @@ mod tests {
             "echo '$(git push origin main)'",
             "cat <<< '$(git push origin main)'",
             "cat <<< '`git push origin main`'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unquoted_heredoc_expands_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let push = [
+            "cat <<EOF\n$(git push origin main)\nEOF",
+            "cat <<EOF\n`git push origin main`\nEOF",
+            "cat <<-EOF\n\t$(git push origin main)\nEOF",
+            "cat <<EOF\n$\"$(git push origin main)\"\nEOF",
+            "cat <<EOF\n\\\\$(git push origin main)\nEOF",
+            "cat <<EOF\n${missing:-$(git push origin main)}\nEOF",
+            "cat <<EOF\n$'`git push origin main`'\nEOF",
+            "cat <<EOF\n$'$(git push origin main)'\nEOF",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("cat <<EOF\n$(rm -rf /tmp/x)\nEOF"))
+                .map(|id| id.0.as_str()),
+            Some("bash.rm")
+        );
+        let neither = [
+            "cat <<'EOF'\n$(git push origin main)\nEOF",
+            "cat <<\"EOF\"\n$(git push origin main)\nEOF",
+            "cat <<\\EOF\n$(git push origin main)\nEOF",
+            "cat <<EOF\n\\$(git push origin main)\nEOF",
+            "cat <<EOF\nrm -rf /tmp/x\nEOF",
         ];
         for command in neither {
             assert!(
