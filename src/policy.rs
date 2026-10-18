@@ -434,6 +434,7 @@ fn check_action(
 /// line. `grep -E` and `egrep` use that same match. `fgrep` is a fixed
 /// string. `grep -G` is the basic match. `grep -P` and `ggrep` use
 /// that same match. `grep -a` and `grep -I` still print a text line.
+/// `grep -e git -e zzzz` prints a line that matches either pattern.
 /// `grep -n`, `grep -H`,
 /// and `grep -o .` do not. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
@@ -456,7 +457,8 @@ fn check_action(
 /// line. `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 /// `perl -pe 'print'` prints it too, unless the script clears `$_`.
 /// `perl -0777 -pe ''` still prints the file. `perl -lpe ''` prints it too.
-/// `perl -w -pe ''` prints it too.
+/// `perl -w -pe ''` prints it too. `perl -X -pe ''` prints it too.
+/// `jq -Rr .` prints each raw line.
 /// `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
@@ -5984,6 +5986,7 @@ fn run_builtin(
         "tail" => tail_run(args, input, depth, substitutions),
         "sed" | "gsed" => sed_run(args, input, depth, substitutions),
         "awk" | "gawk" => awk_run(args, input, depth, substitutions),
+        "jq" => jq_run(args, input, depth, substitutions),
         "cut" => cut_run(args, input, depth, substitutions),
         "sort" => sort_run(args, input, depth, substitutions),
         "uniq" => uniq_run(args, input, depth, substitutions),
@@ -6271,9 +6274,9 @@ fn grep_run(
         Run::Produced { text, ok: true } => text,
         other => return other,
     };
-    let Some(matched) = grep_lines(
+    let Some(matched) = grep_any(
         &text,
-        &query.pattern,
+        &query.patterns,
         query.fixed,
         query.ignore_case,
         query.word,
@@ -6287,7 +6290,7 @@ fn grep_run(
 }
 
 struct GrepQuery {
-    pattern: String,
+    patterns: Vec<String>,
     fixed: bool,
     ignore_case: bool,
     word: bool,
@@ -6303,7 +6306,7 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
     let mut word = false;
     let mut only = false;
     let mut extended = false;
-    let mut pattern = None;
+    let mut patterns = Vec::new();
     while index < args.len() {
         let arg = &args[index];
         if arg == "--" {
@@ -6352,10 +6355,7 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             continue;
         }
         if arg == "-e" {
-            if pattern.is_some() {
-                return None;
-            }
-            pattern = Some(args.get(index + 1)?.clone());
+            patterns.push(args.get(index + 1)?.clone());
             index += 2;
             continue;
         }
@@ -6389,15 +6389,15 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
         }
         break;
     }
-    if pattern.is_none() {
-        pattern = Some(args.get(index)?.clone());
+    if patterns.is_empty() {
+        patterns.push(args.get(index)?.clone());
         index += 1;
     }
     if args.len() - index > 1 {
         return None;
     }
     Some(GrepQuery {
-        pattern: pattern?,
+        patterns,
         fixed,
         ignore_case,
         word,
@@ -6405,6 +6405,31 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
         extended,
         file: args.get(index).cloned(),
     })
+}
+
+fn grep_any(
+    text: &str,
+    patterns: &[String],
+    fixed: bool,
+    ignore_case: bool,
+    word: bool,
+    only: bool,
+    extended: bool,
+) -> Option<String> {
+    if patterns.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        for pattern in patterns {
+            let matched = grep_lines(line, pattern, fixed, ignore_case, word, only, extended)?;
+            out.push_str(&matched);
+        }
+    }
+    Some(out)
 }
 
 fn grep_lines(
@@ -7264,10 +7289,65 @@ fn awk_run(
     }
 }
 
+fn jq_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = jq_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn jq_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut raw_in = false;
+    let mut raw_out = false;
+    let mut program = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-R" || arg == "--raw-input" {
+            raw_in = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-r" || arg == "--raw-output" {
+            raw_out = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-Rr" || arg == "-rR" {
+            raw_in = true;
+            raw_out = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        if program.is_none() {
+            program = Some(args[index].clone());
+        } else {
+            files.push(args[index].clone());
+        }
+        index += 1;
+    }
+    if !raw_in || !raw_out || program.as_deref() != Some(".") || files.len() != 1 {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
 fn awk_query(args: &[String]) -> Option<AwkQuery> {
     let mut index = 0usize;
     if args.first().is_some_and(|arg| arg == "--") {
         index = 1;
+    }
+    if matches!(args.get(index).map(String::as_str), Some("-e" | "--source")) {
+        index += 1;
     }
     let program = args.get(index)?;
     let sel = awk_program(program)?;
@@ -8757,7 +8837,16 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
-        if arg == "-l" || arg == "-w" || arg == "-W" {
+        if arg == "-l" || arg == "-w" || arg == "-W" || arg == "-X" {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-E")
+            && !rest.is_empty()
+            && rest
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '-' | '_' | '.'))
+        {
             index += 1;
             continue;
         }
@@ -9216,6 +9305,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
         "awk" | "gawk" => awk_query(args).is_none_or(|query| query.file.is_none()),
+        "jq" => jq_query(args).is_none_or(|file| file.is_none()),
         "cut" => cut_query(args).is_none_or(|query| query.file.is_none()),
         "sort" => sort_query(args).is_none_or(|query| {
             query.from0.as_deref() == Some("-")
@@ -12987,6 +13077,12 @@ mod tests {
             format!("eval \"$(grep --text git {push_s})\""),
             format!("eval \"$(grep -I git {push_s})\""),
             format!("eval \"$(grep -ai git {push_s})\""),
+            format!("eval \"$(grep -e git -e zzzz {push_s})\""),
+            format!("eval \"$(awk -e '{{print}}' {push_s})\""),
+            format!("eval \"$(perl -X -pe '' {push_s})\""),
+            format!("eval \"$(ruby -EUTF-8 -ne 'print' {push_s})\""),
+            format!("eval \"$(jq -Rr . {push_s})\""),
+            format!("eval \"$(jq -R -r . {push_s})\""),
             format!("eval \"$(grep -P 'push origin' {push_s})\""),
             format!("eval \"$(ggrep git {push_s})\""),
             format!("eval \"$(ggrep -P git {push_s})\""),
@@ -13092,6 +13188,9 @@ mod tests {
             ),
             format!("eval \"$(grep -P zzzz {push_s})\""),
             format!("eval \"$(grep -a zzzz {push_s})\""),
+            format!("eval \"$(grep -e zzzz -e nope {push_s})\""),
+            format!("eval \"$(jq -Rr . {echo_s})\""),
+            format!("eval \"$(jq -R . {push_s})\""),
             format!("eval \"$(grep --text zzzz {push_s})\""),
             format!("eval \"$(perl -w -pe '' {echo_s})\""),
             format!("eval \"$(ruby -W0 -ne 'print' {echo_s})\""),
