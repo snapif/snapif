@@ -420,7 +420,9 @@ fn check_action(
 /// A shell that reads its script from stdin runs a heredoc or a
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
-/// body in the same shell. `cat` and `bash -c` do not. An unquoted
+/// body in the same shell. `cat` and `bash -c` do not. Inside double
+/// quotes, a backslash immediately before a newline is removed, so a
+/// wrapped `bash -c "git push"` matches `git.push`. An unquoted
 /// `#` comment does not run `$(rm)`. `<(rm)` and `>(rm)` do.
 /// A redirect is not a word. `rm>/dev/null`, `>/dev/null rm`, and
 /// `2>/dev/null rm` match. `echo rm>/tmp/x` does not, because `rm` is
@@ -3469,8 +3471,11 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 continue;
             }
             if open == '"' && ch == '\\' {
+                // Bash removes a backslash-newline inside double quotes.
+                // Keeping that newline splits `git push` into two commands.
                 if let Some(next) = chars.next()
                     && next != '\0'
+                    && next != '\n'
                 {
                     token.push(next);
                 }
@@ -4565,6 +4570,23 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    #[test]
+    fn double_quoted_continuation_is_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let wrapped = "bash -c \"git \\\npush origin main\"";
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(wrapped)).map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{wrapped:?}"
+        );
+        let single = "bash -c 'git \\\npush origin main'";
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(single)).map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{single:?}"
+        );
     }
 
     #[test]
