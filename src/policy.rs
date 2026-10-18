@@ -432,13 +432,15 @@ fn check_action(
 /// `grep . path`, and `head -n 1 path` are that text. `grep -h`,
 /// `grep -i`, `grep -w`, and `grep -o '.*'` still print the matching
 /// line. `grep -E` and `egrep` use that same match. `fgrep` is a fixed
-/// string. `grep -G` is the basic match. `grep -n`, `grep -H`,
+/// string. `grep -G` is the basic match. `grep -P` and `ggrep` use
+/// that same match. `grep -n`, `grep -H`,
 /// and `grep -o .` do not. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. `awk 'NR==1 {print}'`
 /// and `awk '{ print }'` print it too. `awk '/git/'` prints a line
-/// that contains `git`. `gawk` is that same `awk`. Without `-n`,
+/// that contains `git`. `gawk` is that same `awk`.
+/// `awk 'gsub(/git/,"git")'` prints that line too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -452,8 +454,10 @@ fn check_action(
 /// line. `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
+/// `sed -n 's/git/git/p'` prints that line too.
 /// `sed -n 1l` and `sed -n '$l'` print that line too. `gsed` is that
 /// same `sed`. A python one-liner that writes `open(sys.argv[1]).read()`,
+/// or prints that read with `end=""`,
 /// a node one-liner that writes `readFileSync`, `ruby -e` that prints
 /// `File.read`, and `php -r` that echoes `file_get_contents` print the file.
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
@@ -5965,7 +5969,9 @@ fn run_builtin(
         "tr" => tr_run(args, input),
         "iconv" => iconv_run(args, input, depth, substitutions),
         "join" => join_run(args, input, depth, substitutions),
-        "grep" | "egrep" | "fgrep" => grep_run(&words[0], args, input, depth, substitutions),
+        "grep" | "egrep" | "fgrep" | "ggrep" => {
+            grep_run(&words[0], args, input, depth, substitutions)
+        }
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
         "sed" | "gsed" => sed_run(args, input, depth, substitutions),
@@ -6326,6 +6332,10 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             continue;
         }
         if arg == "-G" || arg == "--basic-regexp" {
+            index += 1;
+            continue;
+        }
+        if arg == "-P" || arg == "--perl-regexp" {
             index += 1;
             continue;
         }
@@ -6840,6 +6850,13 @@ enum SedPrint {
     Many(Vec<(SedEnd, SedEnd)>),
     /// Quiet `/text/p`. A line is kept when it contains `text`.
     Contains(String),
+    /// `s/from/to/`. Quiet `p` prints a line that changed. Not quiet prints every line.
+    Subst {
+        pattern: String,
+        replacement: String,
+        global: bool,
+        print_all: bool,
+    },
 }
 
 struct SedQuery {
@@ -6936,6 +6953,11 @@ fn sed_script(script: &str, quiet: bool) -> Option<SedPrint> {
         .collect();
     if pieces.is_empty() {
         return None;
+    }
+    if let [piece] = pieces.as_slice()
+        && let Some(kind) = sed_subst(piece, quiet)
+    {
+        return Some(kind);
     }
     if let [piece] = pieces.as_slice()
         && let Some(pattern) = sed_slash(piece)
@@ -7047,7 +7069,79 @@ fn sed_apply(text: &str, kind: SedPrint) -> String {
             }
             out
         }
+        SedPrint::Subst {
+            pattern,
+            replacement,
+            global,
+            print_all,
+        } => sed_subst_apply(text, &pattern, &replacement, global, print_all),
     }
+}
+
+fn sed_subst(piece: &str, quiet: bool) -> Option<SedPrint> {
+    let rest = piece.strip_prefix("s/")?;
+    let (pattern, rest) = rest.split_once('/')?;
+    let (replacement, flags) = rest.split_once('/')?;
+    if pattern.is_empty() || pattern.contains(['\\', '&', '*', '.', '[']) {
+        return None;
+    }
+    if replacement.contains(['\\', '&', '/']) {
+        return None;
+    }
+    let mut print = false;
+    let mut global = false;
+    for ch in flags.chars() {
+        match ch {
+            'p' => print = true,
+            'g' => global = true,
+            _ => return None,
+        }
+    }
+    if quiet && !print {
+        return Some(SedPrint::Empty);
+    }
+    Some(SedPrint::Subst {
+        pattern: pattern.to_string(),
+        replacement: replacement.to_string(),
+        global,
+        print_all: !quiet,
+    })
+}
+
+fn sed_subst_apply(
+    text: &str,
+    pattern: &str,
+    replacement: &str,
+    global: bool,
+    print_all: bool,
+) -> String {
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let body = line.trim_end_matches('\n');
+        let (next, hit) = sed_replace_line(body, pattern, replacement, global);
+        if print_all || hit {
+            out.push_str(&next);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+fn sed_replace_line(line: &str, pattern: &str, replacement: &str, global: bool) -> (String, bool) {
+    let Some(pos) = line.find(pattern) else {
+        return (line.to_string(), false);
+    };
+    if global {
+        return (line.replace(pattern, replacement), true);
+    }
+    let mut out = String::new();
+    out.push_str(&line[..pos]);
+    out.push_str(replacement);
+    out.push_str(&line[pos + pattern.len()..]);
+    (out, true)
 }
 
 fn union_lines(text: &str, spans: &[(SedEnd, SedEnd)]) -> String {
@@ -7270,6 +7364,9 @@ fn awk_atom(piece: &str) -> Option<AwkAtom> {
     if let Some(atom) = awk_slash_atom(body) {
         return Some(atom);
     }
+    if let Some(pat) = awk_gsub_pat(body) {
+        return Some(AwkAtom::Match(pat));
+    }
     if let Some(pat) = awk_index_pat(body) {
         return Some(AwkAtom::Match(pat));
     }
@@ -7291,6 +7388,19 @@ fn awk_slash_atom(body: &str) -> Option<AwkAtom> {
         return Some(AwkAtom::All);
     }
     Some(AwkAtom::Match(AwkPat::Regex(inner.to_string())))
+}
+
+fn awk_gsub_pat(body: &str) -> Option<AwkPat> {
+    let rest = body.strip_prefix("gsub(/")?;
+    let (pattern, rest) = rest.split_once("/,\"")?;
+    let replacement = rest.strip_suffix("\")")?;
+    if pattern.is_empty()
+        || pattern.contains(['/', '\\', '[', '*', '.', '+', '"'])
+        || replacement != pattern
+    {
+        return None;
+    }
+    Some(AwkPat::Literal(pattern.to_string()))
 }
 
 fn awk_index_pat(body: &str) -> Option<AwkPat> {
@@ -8703,6 +8813,7 @@ fn python_reads_argv1(script: &str) -> bool {
         compact.as_str(),
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
+            | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
     )
 }
@@ -8979,7 +9090,9 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
-        "grep" | "egrep" | "fgrep" => grep_query(args).is_none_or(|query| query.file.is_none()),
+        "grep" | "egrep" | "fgrep" | "ggrep" => {
+            grep_query(args).is_none_or(|query| query.file.is_none())
+        }
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
@@ -12530,6 +12643,9 @@ mod tests {
             format!("eval \"$(sed -n l {push_s})\""),
             format!("eval \"$(sed -n '/git/p' {push_s})\""),
             format!("eval \"$(sed -n '/push/p' {push_s})\""),
+            format!("eval \"$(sed -n 's/git/git/p' {push_s})\""),
+            format!("eval \"$(sed -n 's/push/push/p' {push_s})\""),
+            format!("eval \"$(sed 's/zzzz/no/' {push_s})\""),
             format!("eval \"$(sed -n 1l {push_s})\""),
             format!("eval \"$(sed -n '$l' {push_s})\""),
             format!("eval \"$(sed -n 3l {multi_s})\""),
@@ -12537,6 +12653,9 @@ mod tests {
             format!("eval \"$(gsed -n 1l {push_s})\""),
             format!(
                 "eval \"$(python3 -c 'import sys; sys.stdout.write(open(sys.argv[1]).read())' {push_s})\""
+            ),
+            format!(
+                "eval \"$(python3 -c 'import sys; print(open(sys.argv[1]).read(), end=\"\")' {push_s})\""
             ),
             format!(
                 "eval \"$(node -e 'process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
@@ -12698,6 +12817,12 @@ mod tests {
             format!("eval \"$(awk '/git/; /git/' {push_s})\""),
             format!("eval \"$(awk '//' {push_s})\""),
             format!("eval \"$(awk '/git/; NR==2' {multi_s})\""),
+            format!("eval \"$(awk 'gsub(/git/,\"git\")' {push_s})\""),
+            format!("eval \"$(awk 'gsub(/push/,\"push\")' {push_s})\""),
+            format!("eval \"$(grep -P git {push_s})\""),
+            format!("eval \"$(grep -P 'push origin' {push_s})\""),
+            format!("eval \"$(ggrep git {push_s})\""),
+            format!("eval \"$(ggrep -P git {push_s})\""),
             format!("eval \"$(awk 'NR==3{{print}}' {multi_s})\""),
             format!("eval \"$(awk 'NR==2,NR==3' {multi_s})\""),
             format!("eval \"$(sed -n '3p;3p' {multi_s})\""),
@@ -12786,6 +12911,10 @@ mod tests {
             format!("eval \"$(sed -n '2p;2p' {multi_s})\""),
             format!("eval \"$(sed -n 2l {multi_s})\""),
             format!("eval \"$(sed -n '/zzzz/p' {push_s})\""),
+            format!("eval \"$(sed -n 's/zzzz/zzzz/p' {push_s})\""),
+            format!("eval \"$(sed -n 's/git/echo/p' {push_s})\""),
+            format!("eval \"$(awk 'gsub(/zzzz/,\"zzzz\")' {push_s})\""),
+            format!("eval \"$(grep -P zzzz {push_s})\""),
             format!("eval \"$(awk '/zzzz/' {push_s})\""),
             format!("eval \"$(awk 'index($0,\"zzzz\")' {push_s})\""),
             format!("eval \"$(awk '$0 ~ /zzzz/' {push_s})\""),
