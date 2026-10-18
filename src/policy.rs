@@ -434,7 +434,10 @@ fn check_action(
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
-/// every line. `base64 -d` prints the decoded text.
+/// every line. `sort -s` and `sort -z` still print every line. `sort -c`
+/// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
+/// prints the same bytes. `sort --compress-program` runs that program.
+/// `base64 -d` prints the decoded text.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
@@ -728,6 +731,8 @@ fn consider_segment<'a>(
         }
         let scripts = find_exec_commands(&executed.argv);
         scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+        let compress = sort_compress_commands(&executed.argv);
+        scan_isolated(policy, tool_name, &compress, depth, local, git, best);
         let remotes = remote_scripts(&executed.argv);
         scan_isolated(policy, tool_name, &remotes, depth, local, git, best);
         let arms = case_arm_scripts(&executed.argv);
@@ -6840,43 +6845,319 @@ fn cut_query(args: &[String]) -> Option<CutQuery> {
     })
 }
 
+struct SortQuery {
+    files: Vec<String>,
+    from0: Option<String>,
+}
+
 fn sort_run(
     args: &[String],
     input: Option<&str>,
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let Some(file) = sort_query(args) else {
+    // GNU sort execs this program once the input no longer fits in memory.
+    if let Some(program) = sort_compress_program(args) {
+        substitutions.push(program);
+    }
+    let Some(query) = sort_query(args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    let files = if let Some(list) = &query.from0 {
+        match nul_names(list, input, depth, substitutions) {
+            NulNames::Paths(paths) => paths,
+            NulNames::Empty => {
+                return Run::Produced {
+                    text: String::new(),
+                    ok: false,
+                };
+            }
+            NulNames::Unscanned => return Run::Unscanned,
+            NulNames::Unknown => return Run::Unknown,
+        }
+    } else {
+        query.files
+    };
+    if query.from0.is_some() && files.is_empty() {
+        return Run::Produced {
+            text: String::new(),
+            ok: false,
+        };
+    }
+    // A missing path makes GNU sort print nothing, including earlier files.
+    load_pieces(&files, input, depth, substitutions, true).map_or_else(
+        |run| run,
+        |pieces| Run::Produced {
+            text: pieces.text,
+            ok: pieces.ok,
+        },
+    )
 }
 
-fn sort_query(args: &[String]) -> Option<Option<String>> {
+fn sort_query(args: &[String]) -> Option<SortQuery> {
+    let mut index = 0usize;
+    let mut files = Vec::new();
+    let mut from0 = None;
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "--" {
+            index += 1;
+            files.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            files.push(arg);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, inline) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (rest, None),
+            };
+            if matches!(name, "check" | "output" | "help" | "version") {
+                return None;
+            }
+            if name == "files0-from" {
+                let value = match inline {
+                    Some(value) => value,
+                    None => {
+                        index += 1;
+                        args.get(index)?.clone()
+                    }
+                };
+                if value.is_empty() || from0.is_some() {
+                    return None;
+                }
+                from0 = Some(value);
+                index += 1;
+                continue;
+            }
+            if takes_sort_value(name) {
+                let value = match inline {
+                    Some(value) => value,
+                    None => {
+                        index += 1;
+                        args.get(index)?.clone()
+                    }
+                };
+                if value.is_empty() {
+                    return None;
+                }
+                index += 1;
+                continue;
+            }
+            if is_sort_flag(name) {
+                if inline.is_some() {
+                    return None;
+                }
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+        let flags: Vec<char> = arg[1..].chars().collect();
+        let mut cursor = 0usize;
+        while cursor < flags.len() {
+            let ch = flags[cursor];
+            cursor += 1;
+            match ch {
+                'c' | 'C' | 'o' => return None,
+                'b' | 'd' | 'f' | 'g' | 'h' | 'i' | 'M' | 'm' | 'n' | 'r' | 'R' | 's' | 'u'
+                | 'V' | 'z' => {}
+                'k' | 't' | 'S' | 'T' => {
+                    let attached: String = flags[cursor..].iter().collect();
+                    if attached.is_empty() {
+                        index += 1;
+                        args.get(index)?;
+                    }
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+    if from0.is_some() && !files.is_empty() {
+        return None;
+    }
+    Some(SortQuery { files, from0 })
+}
+
+fn takes_sort_value(name: &str) -> bool {
+    matches!(
+        name,
+        "key"
+            | "field-separator"
+            | "buffer-size"
+            | "temporary-directory"
+            | "parallel"
+            | "batch-size"
+            | "random-source"
+            | "compress-program"
+            | "sort"
+    )
+}
+
+fn is_sort_flag(name: &str) -> bool {
+    matches!(
+        name,
+        "stable"
+            | "unique"
+            | "reverse"
+            | "zero-terminated"
+            | "numeric-sort"
+            | "dictionary-order"
+            | "ignore-case"
+            | "ignore-leading-blanks"
+            | "ignore-nonprinting"
+            | "month-sort"
+            | "human-numeric-sort"
+            | "version-sort"
+            | "general-numeric-sort"
+            | "merge"
+            | "random-sort"
+            | "debug"
+    )
+}
+
+/// Program GNU sort executes to compress a temporary file.
+fn sort_compress_program(args: &[String]) -> Option<String> {
     let mut index = 0usize;
     while index < args.len() {
         let arg = &args[index];
         if arg == "--" {
-            index += 1;
             break;
         }
-        if let Some(flags) = arg.strip_prefix('-')
-            && !flags.is_empty()
-            && !flags.starts_with('-')
-            && flags.chars().all(|ch| matches!(ch, 'r' | 'u'))
-        {
-            index += 1;
+        if let Some(program) = arg.strip_prefix("--compress-program=") {
+            if program.is_empty() {
+                return None;
+            }
+            return Some(program.to_string());
+        }
+        if arg == "--compress-program" {
+            return args
+                .get(index + 1)
+                .cloned()
+                .filter(|program| !program.is_empty());
+        }
+        index += 1;
+    }
+    None
+}
+
+fn sort_compress_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("sort") && !base.eq_ignore_ascii_case("gsort") {
+        return Vec::new();
+    }
+    sort_compress_program(&argv[1..]).into_iter().collect()
+}
+
+enum NulNames {
+    Paths(Vec<String>),
+    Empty,
+    Unscanned,
+    Unknown,
+}
+
+fn nul_names(
+    list: &str,
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> NulNames {
+    let text = if list == "-" {
+        match input {
+            Some(text) => text.to_string(),
+            None => return NulNames::Unknown,
+        }
+    } else {
+        match load_text_operand(list, depth, substitutions) {
+            Loaded::Text(text) => text,
+            Loaded::Missing | Loaded::Dir | Loaded::Null => return NulNames::Empty,
+            Loaded::Unscanned => return NulNames::Unscanned,
+            Loaded::Fifo | Loaded::Hang | Loaded::Unknown => return NulNames::Unknown,
+        }
+    };
+    let paths = text
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect();
+    NulNames::Paths(paths)
+}
+
+struct LoadedPieces {
+    text: String,
+    ok: bool,
+}
+
+/// `drop_all_if_missing` matches GNU sort: one unreadable path prints nothing.
+/// Tac still prints the files it could read.
+fn load_pieces(
+    files: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+    drop_all_if_missing: bool,
+) -> Result<LoadedPieces, Run> {
+    if files.is_empty() {
+        return match source_text(None, input, depth, substitutions) {
+            Run::Produced { text, ok } => Ok(LoadedPieces { text, ok }),
+            other => Err(other),
+        };
+    }
+    let mut parts = Vec::new();
+    let mut missing = false;
+    for file in files {
+        if file == "-" {
+            let Some(text) = input else {
+                return Err(Run::Unknown);
+            };
+            parts.push(text.to_string());
             continue;
         }
-        if arg.starts_with('-') {
-            return None;
+        match load_text_operand(file, depth, substitutions) {
+            Loaded::Text(text) => parts.push(text),
+            Loaded::Unscanned => return Err(Run::Unscanned),
+            Loaded::Missing | Loaded::Dir => {
+                if drop_all_if_missing {
+                    return Ok(LoadedPieces {
+                        text: String::new(),
+                        ok: false,
+                    });
+                }
+                missing = true;
+            }
+            Loaded::Null => {}
+            Loaded::Fifo | Loaded::Hang | Loaded::Unknown => return Err(Run::Unknown),
         }
-        break;
     }
-    if args.len() - index > 1 {
-        return None;
-    }
-    Some(args.get(index).cloned())
+    Ok(LoadedPieces {
+        text: parts.concat(),
+        ok: !missing,
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UniqMode {
+    Each,
+    Once,
+    Dups,
+    EveryDup,
+    /// `--group` keeps every line.
+    Group,
+}
+
+struct UniqQuery {
+    mode: UniqMode,
+    fold: bool,
+    zero: bool,
+    file: Option<String>,
 }
 
 fn uniq_run(
@@ -6885,10 +7166,202 @@ fn uniq_run(
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let Some(file) = one_file_query(args) else {
+    let Some(query) = uniq_query(args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { text, ok } => Run::Produced {
+            text: uniq_lines(&text, query.mode, query.fold, query.zero),
+            ok,
+        },
+        other => other,
+    }
+}
+
+fn uniq_query(args: &[String]) -> Option<UniqQuery> {
+    let mut index = 0usize;
+    let mut mode = None;
+    let mut fold = false;
+    let mut zero = false;
+    let mut positional = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "--" {
+            index += 1;
+            positional.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            positional.push(arg);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, inline) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (rest, None),
+            };
+            match name {
+                "count" | "help" | "version" => return None,
+                "repeated" => set_uniq_mode(&mut mode, UniqMode::Dups)?,
+                "all-repeated" => {
+                    if let Some(value) = inline
+                        && !matches!(value, "none" | "prepend" | "separate")
+                    {
+                        return None;
+                    }
+                    set_uniq_mode(&mut mode, UniqMode::EveryDup)?;
+                }
+                "unique" => set_uniq_mode(&mut mode, UniqMode::Once)?,
+                "group" => {
+                    if let Some(value) = inline
+                        && !matches!(value, "separate" | "prepend" | "append" | "both")
+                    {
+                        return None;
+                    }
+                    set_uniq_mode(&mut mode, UniqMode::Group)?;
+                }
+                "ignore-case" => {
+                    if inline.is_some() {
+                        return None;
+                    }
+                    fold = true;
+                }
+                "zero-terminated" => {
+                    if inline.is_some() {
+                        return None;
+                    }
+                    zero = true;
+                }
+                "skip-fields" | "skip-chars" | "check-chars" => {
+                    let value = match inline {
+                        Some(value) => value.to_string(),
+                        None => {
+                            index += 1;
+                            args.get(index)?.clone()
+                        }
+                    };
+                    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+            index += 1;
+            continue;
+        }
+        let flags: Vec<char> = arg[1..].chars().collect();
+        let mut cursor = 0usize;
+        while cursor < flags.len() {
+            let ch = flags[cursor];
+            cursor += 1;
+            match ch {
+                'c' => return None,
+                'd' => set_uniq_mode(&mut mode, UniqMode::Dups)?,
+                'D' => set_uniq_mode(&mut mode, UniqMode::EveryDup)?,
+                'u' => set_uniq_mode(&mut mode, UniqMode::Once)?,
+                'i' => fold = true,
+                'z' => zero = true,
+                'f' | 's' | 'w' => {
+                    let attached: String = flags[cursor..].iter().collect();
+                    let value = if attached.is_empty() {
+                        index += 1;
+                        args.get(index)?.clone()
+                    } else {
+                        attached
+                    };
+                    if value.is_empty() || !value.chars().all(|ch| ch.is_ascii_digit()) {
+                        return None;
+                    }
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+    // A second operand is an output file. Stdout stays empty.
+    if positional.len() > 1 {
+        return None;
+    }
+    Some(UniqQuery {
+        mode: mode.unwrap_or(UniqMode::Each),
+        fold,
+        zero,
+        file: positional.first().cloned(),
+    })
+}
+
+fn set_uniq_mode(mode: &mut Option<UniqMode>, next: UniqMode) -> Option<()> {
+    if mode.is_some() {
+        return None;
+    }
+    *mode = Some(next);
+    Some(())
+}
+
+fn uniq_lines(text: &str, mode: UniqMode, fold: bool, zero: bool) -> String {
+    if mode == UniqMode::Group {
+        return text.to_string();
+    }
+    let sep = if zero { "\0" } else { "\n" };
+    let ended = text.ends_with(sep);
+    let mut lines: Vec<&str> = text.split(sep).collect();
+    if ended && lines.last() == Some(&"") {
+        lines.pop();
+    }
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut kept = Vec::new();
+    let mut index = 0usize;
+    while index < lines.len() {
+        let mut next = index + 1;
+        while next < lines.len() && line_eq(lines[index], lines[next], fold) {
+            next += 1;
+        }
+        let count = next - index;
+        let copies = match mode {
+            UniqMode::Each => 1,
+            UniqMode::Once => usize::from(count == 1),
+            UniqMode::Dups => usize::from(count > 1),
+            UniqMode::EveryDup => {
+                if count > 1 {
+                    count
+                } else {
+                    0
+                }
+            }
+            UniqMode::Group => 0,
+        };
+        for _ in 0..copies {
+            kept.push(lines[index]);
+        }
+        index = next;
+    }
+    if kept.is_empty() {
+        return String::new();
+    }
+    let mut joined = kept.join(sep);
+    if ended {
+        joined.push_str(sep);
+    }
+    joined
+}
+
+fn line_eq(left: &str, right: &str, fold: bool) -> bool {
+    if fold {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+struct TacQuery {
+    files: Vec<String>,
+    before: bool,
+    regex: bool,
+    separator: Option<String>,
 }
 
 fn tac_run(
@@ -6897,25 +7370,173 @@ fn tac_run(
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let Some(file) = one_file_query(args) else {
+    let Some(query) = tac_query(args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    let sep = query.separator.unwrap_or_else(|| "\n".to_string());
+    if sep.is_empty() {
+        return Run::Unknown;
+    }
+    if query.regex && sep_is_regex(&sep) {
+        return Run::Unknown;
+    }
+    let loaded = match load_pieces(&query.files, input, depth, substitutions, false) {
+        Ok(pieces) => pieces,
+        Err(run) => return run,
+    };
+    Run::Produced {
+        text: tac_text(&loaded.text, &sep, query.before),
+        ok: loaded.ok,
+    }
 }
 
-/// No flags. One file, or stdin.
-fn one_file_query(args: &[String]) -> Option<Option<String>> {
+fn tac_query(args: &[String]) -> Option<TacQuery> {
     let mut index = 0usize;
-    if args.first().is_some_and(|arg| arg == "--") {
-        index = 1;
+    let mut files = Vec::new();
+    let mut before = false;
+    let mut regex = false;
+    let mut separator = None;
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "--" {
+            index += 1;
+            files.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            files.push(arg);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, inline) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (rest, None),
+            };
+            match name {
+                "before" => {
+                    if inline.is_some() {
+                        return None;
+                    }
+                    before = true;
+                }
+                "regex" => {
+                    if inline.is_some() {
+                        return None;
+                    }
+                    regex = true;
+                }
+                "separator" => {
+                    let value = match inline {
+                        Some(value) => value,
+                        None => {
+                            index += 1;
+                            args.get(index)?.clone()
+                        }
+                    };
+                    if separator.is_some() {
+                        return None;
+                    }
+                    separator = Some(value);
+                }
+                "help" | "version" => return None,
+                _ => return None,
+            }
+            index += 1;
+            continue;
+        }
+        let flags: Vec<char> = arg[1..].chars().collect();
+        let mut cursor = 0usize;
+        while cursor < flags.len() {
+            let ch = flags[cursor];
+            cursor += 1;
+            match ch {
+                'b' => before = true,
+                'r' => regex = true,
+                's' => {
+                    let attached: String = flags[cursor..].iter().collect();
+                    let value = if attached.is_empty() {
+                        index += 1;
+                        args.get(index)?.clone()
+                    } else {
+                        attached
+                    };
+                    if separator.is_some() {
+                        return None;
+                    }
+                    separator = Some(value);
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        index += 1;
     }
-    if index < args.len() && args[index].starts_with('-') {
-        return None;
+    Some(TacQuery {
+        files,
+        before,
+        regex,
+        separator,
+    })
+}
+
+fn sep_is_regex(sep: &str) -> bool {
+    sep.chars().any(|ch| {
+        matches!(
+            ch,
+            '.' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '\\' | '^' | '$'
+        )
+    })
+}
+
+/// GNU tac keeps the separator on the record, then reverses the records.
+fn tac_text(text: &str, sep: &str, before: bool) -> String {
+    if text.is_empty() || sep.is_empty() {
+        return String::new();
     }
-    if args.len() - index > 1 {
-        return None;
+    if !before {
+        let mut records = Vec::new();
+        let mut rest = text;
+        loop {
+            if let Some(pos) = rest.find(sep) {
+                let end = pos + sep.len();
+                records.push(rest[..end].to_string());
+                rest = &rest[end..];
+                if rest.is_empty() {
+                    break;
+                }
+            } else {
+                records.push(rest.to_string());
+                break;
+            }
+        }
+        records.reverse();
+        return records.concat();
     }
-    Some(args.get(index).cloned())
+    let mut records = Vec::new();
+    let mut rest = text;
+    loop {
+        if let Some(pos) = rest.find(sep) {
+            let end = pos + sep.len();
+            records.push((true, rest[..pos].to_string()));
+            rest = &rest[end..];
+            if rest.is_empty() {
+                break;
+            }
+        } else {
+            records.push((false, rest.to_string()));
+            break;
+        }
+    }
+    records.reverse();
+    let mut out = String::new();
+    for (has_sep, content) in records {
+        if has_sep {
+            out.push_str(sep);
+        }
+        out.push_str(&content);
+    }
+    out
 }
 
 struct Base64Query {
@@ -7094,9 +7715,15 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "sed" => sed_query(args).is_none_or(|query| query.file.is_none()),
         "awk" => awk_query(args).is_none_or(|query| query.file.is_none()),
         "cut" => cut_query(args).is_none_or(|query| query.file.is_none()),
-        "sort" => sort_query(args).is_none_or(|query| query.is_none()),
-        "uniq" => one_file_query(args).is_none_or(|query| query.is_none()),
-        "tac" => one_file_query(args).is_none_or(|query| query.is_none()),
+        "sort" => sort_query(args).is_none_or(|query| {
+            query.from0.as_deref() == Some("-")
+                || (query.from0.is_none()
+                    && (query.files.is_empty() || query.files.iter().any(|file| file == "-")))
+        }),
+        "uniq" => uniq_query(args).is_none_or(|query| query.file.is_none()),
+        "tac" => tac_query(args).is_none_or(|query| {
+            query.files.is_empty() || query.files.iter().any(|file| file == "-")
+        }),
         "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
         _ => false,
     }
@@ -7584,6 +8211,22 @@ fn skip_backtick(chars: &[char], start: usize) -> Option<usize> {
     take_backtick_chars(chars, start).map(|(_, next)| next)
 }
 
+/// Body of `$'...'`. `index` starts after the opening quote.
+fn take_ansi_c_slice(chars: &[char], index: &mut usize) -> Option<String> {
+    let rest = chars.get(*index..)?;
+    let total = rest.len();
+    let mut out = String::new();
+    let mut iter = rest.iter().copied().peekable();
+    read_ansi_c(&mut iter, &mut out);
+    let unread = iter.count();
+    let consumed = total - unread;
+    if consumed == 0 || chars.get(*index + consumed - 1) != Some(&'\'') {
+        return None;
+    }
+    *index += consumed;
+    Some(out)
+}
+
 fn parse_fields(
     command: &str,
     depth: u32,
@@ -7669,6 +8312,13 @@ fn read_word_fields(
                     &nested_printed(&body, depth + 1, substitutions, unscanned)?,
                 );
                 saw = true;
+            }
+            // `$'\\n'` is one quoted argument. A bare `$` still stops the parse.
+            '$' if chars.get(*index + 1) == Some(&'\'') => {
+                *index += 2;
+                push_field(&mut fields, &take_ansi_c_slice(chars, index)?);
+                saw = true;
+                quoted_word = true;
             }
             '`' => {
                 let (body, next) = take_backtick_chars(chars, *index)?;
@@ -9476,6 +10126,9 @@ mod tests {
             "read x < <(echo 'git push origin main'); eval \"$x\"",
             "eval \"$(printf '%s' 'Z2l0IHB1c2ggb3JpZ2luIG1haW4K' | base64 -d)\"",
             "eval \"$(printf '%s' 'Z2l0IHB1c2ggb3JpZ2luIG1haW4K' | base64 --decode)\"",
+            "eval \"$(printf '%s\\n' 'git push origin main' | sort -s)\"",
+            "eval \"$(printf '%s\\n' 'git push origin main' | uniq -u)\"",
+            "eval \"$(printf '%s\\n' 'git push origin main' | tac -b)\"",
         ];
         for command in push {
             let want = if command.contains("rm -rf") {
@@ -9769,6 +10422,11 @@ mod tests {
             ". /dev/stdin <<'EOF'\nrm -rf /tmp/x\nEOF",
             "echo ok# $(rm -rf /tmp/x)",
             "echo \"# $(rm -rf /tmp/x)\"",
+            "sort --compress-program=rm /tmp/snapif-sort-in",
+            "sort -S 1k --compress-program=rm /tmp/snapif-sort-in",
+            "sort --compress-program rm /tmp/snapif-sort-in",
+            "gsort --compress-program=rm /tmp/snapif-sort-in",
+            "eval \"$(sort --compress-program=rm /tmp/snapif-sort-in)\"",
         ];
         for command in rm {
             assert_eq!(
@@ -9808,6 +10466,8 @@ mod tests {
             "$(f() { rm -rf /tmp/x; }); f",
             "bash <<'EOF'\nf() { rm -rf /tmp/x; }\nEOF\nf",
             "find . -exec echo -delete \\;",
+            "sort --compress-program=true /tmp/snapif-sort-in",
+            "sort -S 1k /tmp/snapif-sort-in",
             "f() { rm -rf /tmp/x; }; find . -exec f \\;",
             "cat <<< 'rm -rf /tmp/x'",
             "bash -c 'echo ok' <<< 'rm -rf /tmp/x'",
@@ -10527,6 +11187,8 @@ mod tests {
         std::fs::write(&multi, "alpha\nbeta\ngit push origin main\n").expect("multi script");
         let coded = dir.join(format!("snapif-c30-b64-{pid}.txt"));
         std::fs::write(&coded, "Z2l0IHB1c2ggb3JpZ2luIG1haW4K\n").expect("b64");
+        let dup = dir.join(format!("snapif-c30-dup-{pid}.txt"));
+        std::fs::write(&dup, "git push origin main\ngit push origin main\n").expect("dup");
         let mut big_body = b"git push origin main\n".to_vec();
         big_body.resize(super::SCRIPT_FILE_CAP as usize + 1, b' ');
         std::fs::write(&big, &big_body).expect("big script");
@@ -10535,7 +11197,13 @@ mod tests {
         let assign_s = plain_script_path(&assign);
         let multi_s = plain_script_path(&multi);
         let coded_s = plain_script_path(&coded);
+        let dup_s = plain_script_path(&dup);
         let big_s = plain_script_path(&big);
+        let names = dir.join(format!("snapif-c30-names-{pid}.txt"));
+        let mut names_body = push_s.as_bytes().to_vec();
+        names_body.push(0);
+        std::fs::write(&names, names_body).expect("names");
+        let names_s = plain_script_path(&names);
         let missing = dir.join(format!("snapif-c29-missing-{pid}.sh"));
         let missing2 = dir.join(format!("snapif-c29-missing2-{pid}.sh"));
         let _ = std::fs::remove_file(&missing);
@@ -10585,8 +11253,28 @@ mod tests {
             format!("eval \"$(sort {push_s})\""),
             format!("eval \"$(sort -u {push_s})\""),
             format!("eval \"$(sort -r {push_s})\""),
+            format!("eval \"$(sort -n {push_s})\""),
+            format!("eval \"$(sort -s {push_s})\""),
+            format!("eval \"$(sort -z {push_s})\""),
+            format!("eval \"$(sort --stable {push_s})\""),
+            format!("eval \"$(sort -k1 {push_s})\""),
+            format!("eval \"$(sort -S 1M {push_s})\""),
+            format!("eval \"$(sort --parallel=1 {push_s})\""),
+            format!("eval \"$(sort {echo_s} {push_s})\""),
+            format!("eval \"$(sort --files0-from={names_s})\""),
             format!("eval \"$(uniq {push_s})\""),
+            format!("eval \"$(uniq -u {push_s})\""),
+            format!("eval \"$(uniq -i {push_s})\""),
+            format!("eval \"$(uniq -z {push_s})\""),
+            format!("eval \"$(uniq -d {dup_s})\""),
+            format!("eval \"$(uniq -D {dup_s})\""),
             format!("eval \"$(tac {push_s})\""),
+            format!("eval \"$(tac -b {push_s})\""),
+            format!("eval \"$(tac -r {push_s})\""),
+            format!("eval \"$(tac -s $'\\n' {multi_s})\""),
+            format!("eval \"$(tac -s Z {push_s})\""),
+            format!("eval \"$(tac {missing_s} {push_s})\""),
+            format!("eval \"$(tac {echo_s} {push_s})\""),
             format!("eval \"$(sort {multi_s})\""),
             format!("eval \"$(base64 -d {coded_s})\""),
             format!("eval \"$(base64 --decode {coded_s})\""),
@@ -10704,6 +11392,17 @@ mod tests {
             format!("eval \"$(rev {push_s})\""),
             format!("eval \"$(nl {push_s})\""),
             format!("eval \"$(base64 {coded_s})\""),
+            format!("eval \"$(sort -c {push_s})\""),
+            format!("eval \"$(sort -C {push_s})\""),
+            format!("eval \"$(sort --check {push_s})\""),
+            format!("eval \"$(sort -o {echo_s} {push_s})\""),
+            format!("eval \"$(sort {missing_s} {push_s})\""),
+            format!("eval \"$(sort {push_s} {missing_s})\""),
+            format!("eval \"$(uniq -c {push_s})\""),
+            format!("eval \"$(uniq -u {dup_s})\""),
+            format!("eval \"$(uniq -d {push_s})\""),
+            format!("eval \"$(uniq {push_s} {echo_s})\""),
+            format!("eval \"$(tac -s ' ' {push_s})\""),
             format!("mapfile -t x < {multi_s}; eval \"${{x[0]}}\""),
             format!("mapfile -O 2 -t x < {push_s}; eval \"${{x[0]}}\""),
             format!("mapfile -O 2 -t x < {multi_s}; eval \"${{x[2]}}\""),
