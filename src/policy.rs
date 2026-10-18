@@ -451,6 +451,7 @@ fn check_action(
 /// `cat -s` still print it. `tee` copies its input. `tr` and
 /// `iconv -f utf-8 -t utf-8` print that text. `join` of a file with
 /// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
+/// line. `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 /// line. `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
@@ -8694,9 +8695,11 @@ fn line_print_run(
 }
 
 /// `perl -pe ''` and `ruby -pe ''` print each line unchanged.
+/// `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
     let mut index = 0usize;
     let mut print_lines = false;
+    let mut loop_lines = false;
     let mut script = None;
     let mut files = Vec::new();
     while index < args.len() {
@@ -8708,6 +8711,21 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
         }
         if arg == "-p" {
             print_lines = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-n" {
+            loop_lines = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-ne" || arg == "-en" {
+            loop_lines = true;
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
             index += 1;
             continue;
         }
@@ -8746,6 +8764,7 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
     }
     match script {
         Some(text) if text.trim().is_empty() && print_lines => Some(files.first().cloned()),
+        Some(text) if loop_lines && line_prints_current(&text) => Some(files.first().cloned()),
         Some(text)
             if command_basename(name) == "ruby" && ruby_reads_argv0(&text) && files.len() == 1 =>
         {
@@ -8753,6 +8772,14 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
         }
         _ => None,
     }
+}
+
+fn line_prints_current(script: &str) -> bool {
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    matches!(
+        compact.as_str(),
+        "print" | "print;" | "print$_" | "print$_;"
+    )
 }
 
 fn ruby_reads_argv0(script: &str) -> bool {
@@ -12635,6 +12662,11 @@ mod tests {
             format!("eval \"$(join {push_s} {push_s})\""),
             format!("eval \"$(perl -pe '' {push_s})\""),
             format!("eval \"$(ruby -pe '' {push_s})\""),
+            format!("eval \"$(perl -ne 'print' {push_s})\""),
+            format!("eval \"$(perl -ne 'print;' {push_s})\""),
+            format!("eval \"$(perl -ne 'print $_' {push_s})\""),
+            format!("eval \"$(ruby -ne 'print' {push_s})\""),
+            format!("eval \"$(ruby -ne 'print $_' {push_s})\""),
             format!(
                 "eval \"$(python3 -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())' {push_s})\""
             ),
@@ -12921,6 +12953,8 @@ mod tests {
             format!("eval \"$(awk '/no.such/' {push_s})\""),
             format!("eval \"$(awk '/zzzz/; NR==2' {multi_s})\""),
             format!("eval \"$(perl -ne '' {push_s})\""),
+            format!("eval \"$(ruby -ne '' {push_s})\""),
+            format!("eval \"$(perl -ne 'print if 0' {push_s})\""),
             format!("eval \"$(perl -e 'print File.read(ARGV[0])' {push_s})\""),
             format!("eval \"$(base32 {b32_s})\""),
             format!("eval \"$(cut -d ' ' -f 2 {push_s})\""),
