@@ -355,6 +355,8 @@ fn check_action(
 /// Exact action id wins. Otherwise the first simple command whose `tool`
 /// matches `tool_name` and whose non-empty `prefixes` match. An empty
 /// prefix list does not match, so that row cannot replace `default_action`.
+/// Past eight nested shells the remainder is not read. A non-blank remainder
+/// matches `shell.deep` when that row exists, so it does not use `default_action`.
 ///
 /// `rm` matches `rm`, `/bin/rm`, `RM`, `sudo rm`, `sudo -nu root rm`,
 /// `FOO=1 rm`, `FOO+=1 rm`, `env rm`, `cd x && rm`, `bash -c 'rm ...'`, and
@@ -476,7 +478,11 @@ fn matched_in<'a>(
     git: &GitBindings,
 ) -> Option<&'a ActionId> {
     if depth > MAX_SHELL_DEPTH {
-        return None;
+        // The rest is not scanned. Missing it would score default_action, which can auto.
+        if command.trim().is_empty() {
+            return None;
+        }
+        return policy.actions.keys().find(|id| id.0 == "shell.deep");
     }
     let mut best = None;
     for part in tokenize_parts(command) {
@@ -4077,6 +4083,14 @@ mod tests {
     use super::{Policy, effective_gates, matched_action};
     use crate::ids::ActionId;
 
+    fn nested_bash(inner: &str, layers: u32) -> String {
+        let mut command = inner.to_string();
+        for _ in 0..layers {
+            command = format!("bash -c '{}'", command.replace('\'', "'\\''"));
+        }
+        command
+    }
+
     #[test]
     fn raw_toml_is_unchecked_until_finish() {
         let raw = include_str!("../policies/tool-gate.toml");
@@ -4138,6 +4152,62 @@ mod tests {
                 .as_str(),
             "git.push"
         );
+    }
+
+    #[test]
+    fn nine_nested_shells_do_not_fall_through_to_the_default_row() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let eight = nested_bash("rm -rf /tmp/x", 8);
+        let nine = nested_bash("rm -rf /tmp/x", 9);
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&eight)).map(|id| id.0.as_str()),
+            Some("bash.rm")
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&nine)).map(|id| id.0.as_str()),
+            Some("shell.deep")
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&nested_bash("git push origin", 8)))
+                .map(|id| id.0.as_str()),
+            Some("git.push")
+        );
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&nested_bash("git push origin", 9)))
+                .map(|id| id.0.as_str()),
+            Some("shell.deep")
+        );
+        let blank = nested_bash("   ", 9);
+        assert!(matched_action(&policy, "Bash", Some(&blank)).is_none());
+        assert!(matched_action(&policy, "Bash", Some("ls")).is_none());
+
+        let bare = Policy::from_toml_str(
+            r#"
+            schema_version = 1
+            fail = "closed"
+            [choice]
+            escalate_below = 0.8
+            review_below = 1.0
+            [default_action]
+            auto = 0.8
+            review = 0.8
+            when_unsure = "review_guess"
+            class = "read"
+            [actions."bash.rm"]
+            tool = "Bash"
+            prefixes = ["rm "]
+            auto = 0.99
+            review = 0.90
+            when_unsure = "escalate"
+            class = "exec"
+            "#,
+        )
+        .expect("policy without shell.deep");
+        assert_eq!(
+            matched_action(&bare, "Bash", Some(&eight)).map(|id| id.0.as_str()),
+            Some("bash.rm")
+        );
+        assert!(matched_action(&bare, "Bash", Some(&nine)).is_none());
     }
 
     #[test]
