@@ -438,6 +438,8 @@ fn check_action(
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
 /// prints the same bytes. `sort --compress-program` runs that program.
 /// `base64 -d` prints the decoded text.
+/// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
+/// `strings` print that line too.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
@@ -5950,6 +5952,9 @@ fn run_builtin(
         "uniq" => uniq_run(args, input, depth, substitutions),
         "tac" => tac_run(args, input, depth, substitutions),
         "base64" => base64_run(args, input, depth, substitutions),
+        "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
+            identity_run(&words[0], args, input, depth, substitutions)
+        }
         _ => Run::Unknown,
     }
 }
@@ -7539,6 +7544,97 @@ fn tac_text(text: &str, sep: &str, before: bool) -> String {
     out
 }
 
+fn identity_run(
+    command: &str,
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = identity_query(command, args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+/// Printers whose output still contains the file text.
+fn identity_query(command: &str, args: &[String]) -> Option<Option<String>> {
+    let name = command_basename(command);
+    let mut index = 0usize;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "--" {
+            index += 1;
+            files.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            files.push(arg);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (long, inline) = match rest.split_once('=') {
+                Some((long, value)) => (long, Some(value)),
+                None => (rest, None),
+            };
+            let takes = long_identity_value(name, long)?;
+            if takes {
+                match inline {
+                    Some(value) if !value.is_empty() => {}
+                    Some(_) => return None,
+                    None => {
+                        index += 1;
+                        args.get(index)?;
+                    }
+                }
+            } else if inline.is_some() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        let flags: Vec<char> = arg[1..].chars().collect();
+        let mut cursor = 0usize;
+        while cursor < flags.len() {
+            let ch = flags[cursor];
+            cursor += 1;
+            if short_identity_value(name, ch)? {
+                let attached: String = flags[cursor..].iter().collect();
+                if attached.is_empty() {
+                    index += 1;
+                    args.get(index)?;
+                }
+                break;
+            }
+        }
+        index += 1;
+    }
+    if files.len() > 1 {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
+fn short_identity_value(name: &str, flag: char) -> Option<bool> {
+    Some(match (name, flag) {
+        ("paste", 's') | ("unexpand", 'a') | ("fold", 's') | ("column", 't') | ("pr", 't') => false,
+        ("expand", 't') | ("fold", 'w') | ("fmt", 'w') | ("strings", 'n') => true,
+        _ => return None,
+    })
+}
+
+fn long_identity_value(name: &str, flag: &str) -> Option<bool> {
+    Some(match (name, flag) {
+        ("paste", "serial") | ("unexpand", "all") | ("fold", "spaces") | ("column", "table") => {
+            false
+        }
+        ("expand", "tabs") | ("fold", "width") | ("fmt", "width") | ("strings", "bytes") => true,
+        _ => return None,
+    })
+}
+
 struct Base64Query {
     file: Option<String>,
 }
@@ -7725,6 +7821,9 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             query.files.is_empty() || query.files.iter().any(|file| file == "-")
         }),
         "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
+        "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
+            identity_query(&words[0], args).is_none_or(|query| query.is_none())
+        }
         _ => false,
     }
 }
@@ -10129,6 +10228,8 @@ mod tests {
             "eval \"$(printf '%s\\n' 'git push origin main' | sort -s)\"",
             "eval \"$(printf '%s\\n' 'git push origin main' | uniq -u)\"",
             "eval \"$(printf '%s\\n' 'git push origin main' | tac -b)\"",
+            "eval \"$(printf '%s\\n' 'git push origin main' | paste)\"",
+            "eval \"$(printf '%s\\n' 'git push origin main' | expand)\"",
         ];
         for command in push {
             let want = if command.contains("rm -rf") {
@@ -11279,6 +11380,23 @@ mod tests {
             format!("eval \"$(base64 -d {coded_s})\""),
             format!("eval \"$(base64 --decode {coded_s})\""),
             format!("eval \"$(base64 -d -i {coded_s})\""),
+            format!("eval \"$(paste {push_s})\""),
+            format!("eval \"$(paste -s {push_s})\""),
+            format!("eval \"$(expand {push_s})\""),
+            format!("eval \"$(expand -t 8 {push_s})\""),
+            format!("eval \"$(unexpand {push_s})\""),
+            format!("eval \"$(unexpand -a {push_s})\""),
+            format!("eval \"$(column {push_s})\""),
+            format!("eval \"$(column -t {push_s})\""),
+            format!("eval \"$(fold {push_s})\""),
+            format!("eval \"$(fold -w 80 {push_s})\""),
+            format!("eval \"$(fold -s {push_s})\""),
+            format!("eval \"$(fmt {push_s})\""),
+            format!("eval \"$(fmt -w 80 {push_s})\""),
+            format!("eval \"$(pr {push_s})\""),
+            format!("eval \"$(pr -t {push_s})\""),
+            format!("eval \"$(strings {push_s})\""),
+            format!("eval \"$(strings -n 1 {push_s})\""),
             format!("eval \"$(tail {push_s})\""),
             format!("eval \"$(tail -n1 {push_s})\""),
             format!("eval \"$(tail -1 {push_s})\""),
@@ -11403,6 +11521,8 @@ mod tests {
             format!("eval \"$(uniq -d {push_s})\""),
             format!("eval \"$(uniq {push_s} {echo_s})\""),
             format!("eval \"$(tac -s ' ' {push_s})\""),
+            format!("eval \"$(od -An -c {push_s})\""),
+            format!("eval \"$(xxd {push_s})\""),
             format!("mapfile -t x < {multi_s}; eval \"${{x[0]}}\""),
             format!("mapfile -O 2 -t x < {push_s}; eval \"${{x[0]}}\""),
             format!("mapfile -O 2 -t x < {multi_s}; eval \"${{x[2]}}\""),
