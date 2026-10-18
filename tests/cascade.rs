@@ -279,6 +279,77 @@ fn second_hop_error_keeps_the_first_answers() {
     assert_eq!(evaluated.wire.usage.input_tokens, 1);
 }
 
+fn gate_tag(cascade: Cascaded<Script, Script>) -> Verdict {
+    let client = Client::new(cascade).policy(Policy::shipped("tool-gate").expect("policy"));
+    pollster::block_on(client.gate(GateRequest {
+        action_id: ActionId::new("tag"),
+        prepared: PreparedCall {
+            name: "tag".into(),
+            args: serde_json::json!({}),
+        },
+        state: State {
+            trusted: serde_json::json!({}),
+            untrusted: serde_json::json!(null),
+        },
+        extra_questions: vec![],
+    }))
+    .expect("gate")
+}
+
+fn shipped_rule() -> CascadeRule {
+    let mut rule = CascadeRule::new(0.8);
+    rule.first_timeout = Duration::from_secs(2);
+    rule
+}
+
+#[test]
+fn forced_battery_fallback_error_does_not_auto() {
+    let pair = pair(
+        battery_rows(0.95),
+        None,
+        vec![],
+        Some(BackendError::Timeout),
+        shipped_rule(),
+    );
+    let verdict = gate_tag(pair.cascade);
+    match verdict {
+        Verdict::Auto(hint) => panic!("auto {hint:?}"),
+        Verdict::Review(hint) | Verdict::Escalate(hint) => {
+            assert!(
+                hint.reasons.iter().any(|reason| {
+                    matches!(reason, UnsureReason::Backend { cause } if cause.contains("timeout"))
+                }),
+                "{:?}",
+                hint.reasons
+            );
+        }
+    }
+}
+
+#[test]
+fn forced_battery_fallback_omission_does_not_auto() {
+    let mut fallback = battery_rows(0.99);
+    fallback.retain(|(id, _)| id != "harm_class");
+    let pair = pair(battery_rows(0.95), None, fallback, None, shipped_rule());
+    let verdict = gate_tag(pair.cascade);
+    match verdict {
+        Verdict::Auto(hint) => panic!("auto {hint:?}"),
+        Verdict::Review(hint) | Verdict::Escalate(hint) => {
+            assert!(
+                hint.reasons.iter().any(|reason| {
+                    matches!(
+                        reason,
+                        UnsureReason::Backend { cause }
+                            if cause.contains("omitted a required answer")
+                    )
+                }),
+                "{:?}",
+                hint.reasons
+            );
+        }
+    }
+}
+
 #[test]
 fn battery_id_is_retried_even_when_pseudo_confidence_is_high() {
     let mut rule = rule_empty();

@@ -117,11 +117,40 @@ impl<A: Backend, B: Backend> Backend for Cascaded<A, B> {
             .questions
             .retain(|id, _| retry.iter().any(|retry_id| retry_id == id));
         let fallback = match self.fallback.evaluate(subset, deadline).await {
-            Ok(fallback) => fallback,
-            Err(_) => return Ok(mark_first(first)),
+            Ok(fallback) => {
+                // always_fallback ids are not the first hop's to keep.
+                if forced_gap(&retry, &self.rule, &fallback.wire.answers) {
+                    return Err(BackendError::Transport(
+                        "cascade fallback omitted a required answer".to_string(),
+                    ));
+                }
+                fallback
+            }
+            Err(err) => {
+                if forced_in_retry(&retry, &self.rule) {
+                    return Err(err);
+                }
+                return Ok(mark_first(first));
+            }
         };
         Ok(merge(first, fallback, &retry))
     }
+}
+
+fn forced_in_retry(retry: &[String], rule: &CascadeRule) -> bool {
+    retry
+        .iter()
+        .any(|id| rule.always_fallback.iter().any(|forced| forced.0 == *id))
+}
+
+fn forced_gap(
+    retry: &[String],
+    rule: &CascadeRule,
+    answers: &IndexMap<String, WireAnswer>,
+) -> bool {
+    retry.iter().any(|id| {
+        rule.always_fallback.iter().any(|forced| forced.0 == *id) && !answers.contains_key(id)
+    })
 }
 
 fn keep_id(id: &str, wire: &WireResponse, rule: &CascadeRule) -> bool {
