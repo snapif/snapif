@@ -405,7 +405,18 @@ fn check_action(
 /// neither command is set. `export NAME=value` lasts for a later command
 /// in the same shell, including `builtin export`. A function named
 /// `export` runs instead of that builtin. `export -n` drops the name.
-/// A pipeline does not publish it. A bare assignment does not.
+/// A pipeline does not publish it. A bare assignment does not
+/// reach a later `git` either. It does reach `eval` in this shell, so
+/// `x='git push'; eval "$x"` matches `git.push`. `eval '$x'`,
+/// `eval ${x}`, `eval "$x extra"`, `x+=`, `declare`, and `typeset` do
+/// too. So do `{ x=...; }`, `then`, `!`, keyword `time`, and `do`.
+/// `local` and `declare` with no value hide the global name inside the
+/// function. `local` reaches `eval` in that function only.
+/// `declare -x NAME` exports the current value, including inside a
+/// function until it returns. A prefix assignment does not persist.
+/// `x=... eval '$x'` still runs, because that `$x` expands inside eval.
+/// `x=... eval "$x"` does not. A pipeline, `(x=...)`, and a background
+/// command do not reach a later eval.
 /// `status` does not run these,
 /// and a later argument named `credential` is not that subcommand.
 /// `timeout 1 rm` and `xargs rm` match.
@@ -469,6 +480,7 @@ pub fn matched_action<'a>(
     let command = command.unwrap_or("").trim_start();
     let mut functions = Functions::new();
     let mut env = Vec::new();
+    let mut scope = ShellScope::default();
     matched_in(
         policy,
         tool_name,
@@ -476,6 +488,7 @@ pub fn matched_action<'a>(
         0,
         &mut functions,
         &mut env,
+        &mut scope,
         &GitBindings::default(),
     )
 }
@@ -484,6 +497,7 @@ const MAX_SHELL_DEPTH: u32 = 8;
 
 type Functions = std::collections::HashMap<String, String>;
 
+#[allow(clippy::too_many_arguments)]
 fn matched_in<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -491,6 +505,7 @@ fn matched_in<'a>(
     depth: u32,
     functions: &mut Functions,
     env: &mut Vec<(String, String)>,
+    scope: &mut ShellScope,
     git: &GitBindings,
 ) -> Option<&'a ActionId> {
     if depth > MAX_SHELL_DEPTH {
@@ -510,12 +525,21 @@ fn matched_in<'a>(
                 let subshell = segment.tokens.first().is_some_and(|token| token == "(");
                 if segment.isolated || subshell {
                     let mut copy = env.clone();
+                    let mut scoped = scope.clone();
                     consider_segment(
-                        policy, tool_name, &segment, depth, functions, &mut copy, git, &mut best,
+                        policy,
+                        tool_name,
+                        &segment,
+                        depth,
+                        functions,
+                        &mut copy,
+                        &mut scoped,
+                        git,
+                        &mut best,
                     );
                 } else {
                     consider_segment(
-                        policy, tool_name, &segment, depth, functions, env, git, &mut best,
+                        policy, tool_name, &segment, depth, functions, env, scope, git, &mut best,
                     );
                 }
             }
@@ -534,16 +558,38 @@ fn consider_segment<'a>(
     depth: u32,
     functions: &mut Functions,
     exported: &mut Vec<(String, String)>,
+    scope: &mut ShellScope,
     git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(executed) = executed_argv(&segment.tokens, exported) else {
+    // Expansions in the value run before the name is set.
+    // `{`, `!`, and keyword `time` always run. `then` and `do` run only
+    // on some paths.
+    if let Some((assigned, conditional)) = assignment_suffix(&segment.tokens) {
         scan_subshells(
             policy,
             tool_name,
             &segment.substitutions,
             depth,
             functions,
+            scope,
+            exported,
+            git,
+            best,
+        );
+        for token in assigned {
+            scope.assign_token(token, conditional);
+        }
+        return;
+    }
+    let Some(executed) = executed_argv(&segment.tokens, &segment.in_eval, exported) else {
+        scan_subshells(
+            policy,
+            tool_name,
+            &segment.substitutions,
+            depth,
+            functions,
+            scope,
             exported,
             git,
             best,
@@ -568,16 +614,18 @@ fn consider_segment<'a>(
             &segment.substitutions,
             depth,
             functions,
+            scope,
             exported,
             git,
             best,
         );
-        apply_exports(exported, &executed.argv, local);
+        apply_exports(exported, scope, &executed.argv, local);
         return;
     }
     let run_detached =
         |script: &str, functions: &mut Functions, best: &mut Option<&'a ActionId>| {
             let mut child_env = local.clone();
+            let mut child_scope = ShellScope::default();
             prefer(
                 policy,
                 best,
@@ -588,28 +636,10 @@ fn consider_segment<'a>(
                     depth + 1,
                     functions,
                     &mut child_env,
+                    &mut child_scope,
                     git,
                 ),
             );
-        };
-    let mut run_here =
-        |script: &str, functions: &mut Functions, best: &mut Option<&'a ActionId>| {
-            let before = local.clone();
-            let mut child_env = local.clone();
-            prefer(
-                policy,
-                best,
-                matched_in(
-                    policy,
-                    tool_name,
-                    script,
-                    depth + 1,
-                    functions,
-                    &mut child_env,
-                    git,
-                ),
-            );
-            publish_env_changes(exported, &before, &child_env);
         };
     if let Some(script) = &executed.split_script {
         let mut child = Functions::new();
@@ -637,8 +667,14 @@ fn consider_segment<'a>(
             let mut child = Functions::new();
             run_detached(&script, &mut child, best);
         }
-    } else if let Some(script) = eval_script(&executed.argv) {
-        run_here(&script, functions, best);
+    } else if let Some(scripts) =
+        eval_script(&executed.argv, &executed.in_eval, scope, exported, local)
+    {
+        for script in &scripts {
+            score_here(
+                policy, tool_name, script, depth, functions, local, exported, scope, git, best,
+            );
+        }
     } else if !executed.exec_wrapper
         && !executed.bypass_function
         && let Some(body) = executed
@@ -646,7 +682,13 @@ fn consider_segment<'a>(
             .first()
             .and_then(|name| functions.get(name).cloned())
     {
-        run_here(&body, functions, best);
+        // `local` and `declare` inside the function end when it returns.
+        // A bare assignment still changes this shell.
+        scope.locals.push(Vec::new());
+        score_here(
+            policy, tool_name, &body, depth, functions, local, exported, scope, git, best,
+        );
+        scope.pop_frame(exported);
     } else {
         if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
             prefer(policy, best, Some(id));
@@ -671,6 +713,7 @@ fn consider_segment<'a>(
         for body in &found.shells {
             let mut child = Functions::new();
             let mut child_env = local.clone();
+            let mut child_scope = ShellScope::default();
             prefer(
                 policy,
                 best,
@@ -681,6 +724,7 @@ fn consider_segment<'a>(
                     depth + 1,
                     &mut child,
                     &mut child_env,
+                    &mut child_scope,
                     &found.bindings,
                 ),
             );
@@ -699,7 +743,9 @@ fn consider_segment<'a>(
     }
     if sourced_stdin(&executed.argv) {
         for body in &segment.heredocs {
-            run_here(body, functions, best);
+            score_here(
+                policy, tool_name, body, depth, functions, local, exported, scope, git, best,
+            );
         }
     }
     scan_subshells(
@@ -708,10 +754,13 @@ fn consider_segment<'a>(
         &segment.substitutions,
         depth,
         functions,
+        scope,
         exported,
         git,
         best,
     );
+    // The words are expanded before `declare` stores them.
+    scope.bind_declaration(&executed.argv, exported);
 }
 
 fn is_export(argv: &[String]) -> bool {
@@ -724,6 +773,7 @@ fn is_export(argv: &[String]) -> bool {
 /// A prefix assignment does not.
 fn apply_exports(
     exported: &mut Vec<(String, String)>,
+    scope: &mut ShellScope,
     argv: &[String],
     local: &[(String, String)],
 ) {
@@ -749,12 +799,23 @@ fn apply_exports(
             continue;
         }
         if apply_assignment(exported, token) {
+            if let Some(name) = assignment_name(token)
+                && let Some(value) = last_assignment(exported, name)
+            {
+                scope.set_visible(name, value);
+            }
             continue;
         }
-        if env_name(token)
-            && let Some(value) = last_assignment(local, token)
-        {
-            set_env(exported, token, value);
+        let copied = if env_name(token) {
+            last_assignment(local, token)
+                .map(str::to_string)
+                .or_else(|| scope.lookup(token).map(str::to_string))
+        } else {
+            None
+        };
+        if let Some(value) = copied {
+            set_env(exported, token, &value);
+            scope.set_visible(token, &value);
         }
     }
 }
@@ -769,6 +830,250 @@ fn export_drop_flag(token: &str) -> Option<bool> {
     Some(letters.contains('n'))
 }
 
+/// Names assigned in this shell. A child process does not see `global`
+/// unless `export` copied the name. `locals` is one frame per function
+/// call. `eval` reads the frames and then `global`. `alts` are the other
+/// values a `then` or `do` assignment might still hold. `saved_exports`
+/// puts back a function-local `declare -x` when the function returns.
+#[derive(Clone, Default)]
+struct ShellScope {
+    global: Vec<(String, String)>,
+    locals: Vec<Vec<(String, String)>>,
+    alts: Vec<ShellAlt>,
+    saved_exports: Vec<SavedExport>,
+}
+
+#[derive(Clone)]
+struct ShellAlt {
+    /// `0` is global. A function frame is `index + 1`.
+    depth: usize,
+    name: String,
+    value: String,
+}
+
+#[derive(Clone)]
+struct SavedExport {
+    depth: usize,
+    name: String,
+    previous: Option<String>,
+}
+
+impl ShellScope {
+    fn lookup(&self, name: &str) -> Option<&str> {
+        for frame in self.locals.iter().rev() {
+            if let Some(value) = last_assignment(frame, name) {
+                return Some(value);
+            }
+        }
+        last_assignment(&self.global, name)
+    }
+
+    fn value<'a>(&'a self, name: &str, exported: &'a [(String, String)]) -> Option<&'a str> {
+        self.lookup(name)
+            .or_else(|| last_assignment(exported, name))
+    }
+
+    fn local_frame(&self, name: &str) -> Option<usize> {
+        self.locals
+            .iter()
+            .rposition(|frame| frame.iter().any(|(key, _)| key == name))
+    }
+
+    fn assign_token(&mut self, token: &str, conditional: bool) -> bool {
+        let Some(name) = assignment_name(token) else {
+            return false;
+        };
+        let index = self.local_frame(name);
+        let applied = if let Some(index) = index {
+            apply_assignment(&mut self.locals[index], token)
+        } else {
+            apply_assignment(&mut self.global, token)
+        };
+        if !applied {
+            return false;
+        }
+        let depth = self.local_frame(name).map(|index| index + 1).unwrap_or(0);
+        if conditional {
+            if let Some(value) = self.lookup(name) {
+                self.alts.push(ShellAlt {
+                    depth,
+                    name: name.to_string(),
+                    value: value.to_string(),
+                });
+            }
+        } else {
+            self.alts
+                .retain(|alt| alt.name != name || alt.depth != depth);
+        }
+        true
+    }
+
+    /// Other values of `name` that `eval` should score. A local frame
+    /// hides a global alternative. An inner function hides an outer one.
+    fn alt_values(&self, name: &str) -> Vec<String> {
+        self.alts
+            .iter()
+            .filter(|alt| alt.name == name && self.alt_visible(alt))
+            .map(|alt| alt.value.clone())
+            .collect()
+    }
+
+    fn alt_visible(&self, alt: &ShellAlt) -> bool {
+        if alt.depth == 0 {
+            return self.local_frame(&alt.name).is_none();
+        }
+        if alt.depth > self.locals.len() {
+            return false;
+        }
+        !self.locals[alt.depth..]
+            .iter()
+            .any(|frame| frame.iter().any(|(key, _)| key == &alt.name))
+    }
+
+    fn pop_frame(&mut self, exported: &mut Vec<(String, String)>) {
+        let dropped = self.locals.len();
+        self.locals.pop();
+        let restores: Vec<(String, Option<String>)> = self
+            .saved_exports
+            .iter()
+            .rev()
+            .filter(|save| save.depth == dropped)
+            .map(|save| (save.name.clone(), save.previous.clone()))
+            .collect();
+        for (name, previous) in restores {
+            match previous {
+                Some(value) => set_env(exported, &name, &value),
+                None => unset_env(exported, &name),
+            }
+        }
+        self.saved_exports.retain(|save| save.depth != dropped);
+        let depth_now = self.locals.len();
+        self.alts.retain(|alt| alt.depth <= depth_now);
+    }
+
+    fn set_visible(&mut self, name: &str, value: &str) {
+        let index = self.local_frame(name);
+        if let Some(index) = index {
+            set_env(&mut self.locals[index], name, value);
+        } else {
+            set_env(&mut self.global, name, value);
+        }
+    }
+
+    /// `declare` and `typeset` set a shell variable. Inside a function
+    /// they stay in that function unless `-g` is set. `local` does
+    /// nothing at the top level. `-x` exports the current value. Inside
+    /// a function that export lasts until the function returns.
+    fn bind_declaration(&mut self, argv: &[String], exported: &mut Vec<(String, String)>) {
+        let Some(first) = argv.first() else {
+            return;
+        };
+        let base = command_basename(first);
+        let declare_like =
+            base.eq_ignore_ascii_case("declare") || base.eq_ignore_ascii_case("typeset");
+        let local = base.eq_ignore_ascii_case("local");
+        if !declare_like && !local {
+            return;
+        }
+        if local && self.locals.is_empty() {
+            return;
+        }
+        let mut to_global = declare_like && self.locals.is_empty();
+        let mut also_export = false;
+        let mut options = true;
+        for token in argv.iter().skip(1) {
+            if options {
+                if token == "--" {
+                    options = false;
+                    continue;
+                }
+                if let Some(flags) = declaration_flags(token) {
+                    if flags.contains('g') {
+                        to_global = true;
+                    }
+                    if flags.contains('x') {
+                        also_export = true;
+                    }
+                    continue;
+                }
+            }
+            if let Some(name) = assignment_name(token) {
+                if self.assign_decl(token, to_global) && also_export {
+                    self.export_here(name, to_global, exported);
+                }
+                continue;
+            }
+            if env_name(token) {
+                self.remember_name(token, to_global);
+                if also_export {
+                    self.export_here(token, to_global, exported);
+                }
+            }
+        }
+    }
+
+    /// `local x` with no value hides the outer name. It does not clear a
+    /// value this frame already has.
+    fn remember_name(&mut self, name: &str, to_global: bool) {
+        if to_global || self.locals.is_empty() {
+            if self.local_frame(name).is_none() && last_assignment(&self.global, name).is_none() {
+                self.global.push((name.to_string(), String::new()));
+            }
+            return;
+        }
+        if let Some(frame) = self.locals.last_mut()
+            && !frame.iter().any(|(key, _)| key == name)
+        {
+            frame.push((name.to_string(), String::new()));
+        }
+    }
+
+    /// `declare -x NAME` exports the current shell value. Inside a
+    /// function that export ends when the function returns.
+    fn export_here(&mut self, name: &str, to_global: bool, exported: &mut Vec<(String, String)>) {
+        let Some(value) = self.lookup(name).map(str::to_string) else {
+            return;
+        };
+        if !to_global && !self.locals.is_empty() {
+            let depth = self.locals.len();
+            if !self
+                .saved_exports
+                .iter()
+                .any(|item| item.depth == depth && item.name == name)
+            {
+                let previous = last_assignment(exported, name).map(str::to_string);
+                self.saved_exports.push(SavedExport {
+                    depth,
+                    name: name.to_string(),
+                    previous,
+                });
+            }
+        }
+        set_env(exported, name, &value);
+    }
+
+    fn assign_decl(&mut self, token: &str, to_global: bool) -> bool {
+        if assignment_name(token).is_none() {
+            return false;
+        }
+        if to_global || self.locals.is_empty() {
+            apply_assignment(&mut self.global, token)
+        } else if let Some(frame) = self.locals.last_mut() {
+            apply_assignment(frame, token)
+        } else {
+            false
+        }
+    }
+}
+
+fn declaration_flags(token: &str) -> Option<&str> {
+    let flags = token.strip_prefix('-')?;
+    if flags.is_empty() || !flags.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(flags)
+}
+
 fn publish_env_changes(
     parent: &mut Vec<(String, String)>,
     before: &[(String, String)],
@@ -779,6 +1084,40 @@ fn publish_env_changes(
             set_env(parent, key, value);
         }
     }
+}
+
+/// Score `script` in this shell. Assignments it makes stay here.
+/// `exported` only gains names the script exports.
+#[allow(clippy::too_many_arguments)]
+fn score_here<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    script: &str,
+    depth: u32,
+    functions: &mut Functions,
+    local: &[(String, String)],
+    exported: &mut Vec<(String, String)>,
+    scope: &mut ShellScope,
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let before = local.to_vec();
+    let mut child_env = local.to_vec();
+    prefer(
+        policy,
+        best,
+        matched_in(
+            policy,
+            tool_name,
+            script,
+            depth + 1,
+            functions,
+            &mut child_env,
+            scope,
+            git,
+        ),
+    );
+    publish_env_changes(exported, &before, &child_env);
 }
 
 /// A new process. It does not see shell functions from this string.
@@ -794,6 +1133,7 @@ fn scan_isolated<'a>(
     for script in scripts {
         let mut child = Functions::new();
         let mut child_env = env.to_vec();
+        let mut child_scope = ShellScope::default();
         prefer(
             policy,
             best,
@@ -804,6 +1144,7 @@ fn scan_isolated<'a>(
                 depth + 1,
                 &mut child,
                 &mut child_env,
+                &mut child_scope,
                 git,
             ),
         );
@@ -819,12 +1160,14 @@ fn scan_subshells<'a>(
     scripts: &[String],
     depth: u32,
     functions: &Functions,
+    scope: &ShellScope,
     env: &[(String, String)],
     git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
     for script in scripts {
         let mut child = functions.clone();
+        let mut child_scope = scope.clone();
         let mut child_env = env.to_vec();
         prefer(
             policy,
@@ -836,6 +1179,7 @@ fn scan_subshells<'a>(
                 depth + 1,
                 &mut child,
                 &mut child_env,
+                &mut child_scope,
                 git,
             ),
         );
@@ -1566,6 +1910,9 @@ fn argv_matches(argv: &[String], prefix: &[String]) -> bool {
 
 struct ExecutedArgv {
     argv: Vec<String>,
+    /// Parallel to `argv`. True when that word was entirely single quotes
+    /// or `$'...'`, so `eval` expands it after a prefix assignment.
+    in_eval: Vec<bool>,
     split_script: Option<String>,
     env: Vec<(String, String)>,
     exec_wrapper: bool,
@@ -1577,7 +1924,11 @@ struct ExecutedArgv {
     blocks_shell_builtin: bool,
 }
 
-fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<ExecutedArgv> {
+fn executed_argv(
+    tokens: &[String],
+    flags: &[bool],
+    inherited: &[(String, String)],
+) -> Option<ExecutedArgv> {
     let mut index = 0;
     let mut split_script = None;
     let mut env = inherited.to_vec();
@@ -1628,6 +1979,7 @@ fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<Ex
         let Some((next, script)) = skip_wrapper_flags(base, tokens, index, &mut env) else {
             return split_script.map(|script| ExecutedArgv {
                 argv: Vec::new(),
+                in_eval: Vec::new(),
                 split_script: Some(script),
                 env,
                 exec_wrapper,
@@ -1654,8 +2006,13 @@ fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<Ex
         }
         index = next;
     }
+    let argv = tokens[index..].to_vec();
+    let in_eval = (0..argv.len())
+        .map(|offset| flags.get(index + offset).copied().unwrap_or(false))
+        .collect();
     Some(ExecutedArgv {
-        argv: tokens[index..].to_vec(),
+        argv,
+        in_eval,
         split_script,
         env,
         exec_wrapper,
@@ -1930,19 +2287,195 @@ fn option_takes_value(flag: &str) -> bool {
     )
 }
 
-fn eval_script(tokens: &[String]) -> Option<String> {
+const EVAL_VARIANT_CAP: usize = 8;
+
+fn eval_script(
+    tokens: &[String],
+    in_eval: &[bool],
+    scope: &ShellScope,
+    exported: &[(String, String)],
+    command_env: &[(String, String)],
+) -> Option<Vec<String>> {
     let base = command_basename(tokens.first()?);
     if !base.eq_ignore_ascii_case("eval") {
         return None;
     }
-    let mut rest = &tokens[1..];
-    if rest.first().is_some_and(|token| token == "--") {
-        rest = &rest[1..];
+    let mut start = 1;
+    if tokens.get(start).is_some_and(|token| token == "--") {
+        start += 1;
     }
-    if rest.is_empty() {
+    if start >= tokens.len() {
         return None;
     }
-    Some(rest.join(" "))
+    let mut variants = vec![String::new()];
+    for (offset, token) in tokens[start..].iter().enumerate() {
+        let single = in_eval.get(start + offset).copied().unwrap_or(false);
+        let pieces = expand_eval_word(token, single, scope, exported, command_env);
+        variants = join_eval_words(&variants, &pieces);
+    }
+    Some(variants)
+}
+
+/// `$name` and `${name}` in one `eval` word. One pass: the value is not
+/// scanned for another `$name`. `$(...)` stays a command substitution.
+/// A single-quoted word sees a prefix assignment. A double-quoted word
+/// was expanded before that prefix, so the prefix is ignored.
+fn expand_eval_word(
+    token: &str,
+    in_eval: bool,
+    scope: &ShellScope,
+    exported: &[(String, String)],
+    command_env: &[(String, String)],
+) -> Vec<String> {
+    let mut pieces: Vec<Vec<String>> = Vec::new();
+    let mut literal = String::new();
+    let mut rest = token;
+    while let Some(dollar) = rest.find('$') {
+        literal.push_str(&rest[..dollar]);
+        rest = &rest[dollar + 1..];
+        if rest.starts_with('(') {
+            literal.push('$');
+            continue;
+        }
+        if let Some(name) = braced_parameter(rest) {
+            push_eval_literal(&mut literal, &mut pieces);
+            let original = format!("${{{name}}}");
+            pieces.push(parameter_text(
+                name,
+                &original,
+                in_eval,
+                scope,
+                exported,
+                command_env,
+            ));
+            rest = &rest[name.len() + 2..];
+            continue;
+        }
+        if let Some(name) = bare_parameter(rest) {
+            push_eval_literal(&mut literal, &mut pieces);
+            let original = format!("${name}");
+            pieces.push(parameter_text(
+                name,
+                &original,
+                in_eval,
+                scope,
+                exported,
+                command_env,
+            ));
+            rest = &rest[name.len()..];
+            continue;
+        }
+        literal.push('$');
+    }
+    literal.push_str(rest);
+    push_eval_literal(&mut literal, &mut pieces);
+    if pieces.is_empty() {
+        return vec![String::new()];
+    }
+    let mut acc = vec![String::new()];
+    for piece in &pieces {
+        acc = concat_eval_pieces(&acc, piece);
+    }
+    acc
+}
+
+fn push_eval_literal(literal: &mut String, pieces: &mut Vec<Vec<String>>) {
+    if !literal.is_empty() {
+        pieces.push(vec![std::mem::take(literal)]);
+    }
+}
+
+fn parameter_text(
+    name: &str,
+    original: &str,
+    in_eval: bool,
+    scope: &ShellScope,
+    exported: &[(String, String)],
+    command_env: &[(String, String)],
+) -> Vec<String> {
+    if in_eval {
+        let prefixed = last_assignment(command_env, name);
+        let inherited = last_assignment(exported, name);
+        // A single-quoted `$x` expands inside eval, after the prefix.
+        // That value is definite, so the other branches are not scored.
+        if let Some(value) = prefixed
+            && prefixed != inherited
+        {
+            return vec![value.to_string()];
+        }
+    }
+    let mut values = Vec::new();
+    if let Some(value) = scope.value(name, exported) {
+        values.push(value.to_string());
+    }
+    // `then` and `else` can each hold a value. `"$x"` and `'$x'` both
+    // read that name. A double-quoted word still ignores a prefix.
+    for alt in scope.alt_values(name) {
+        if values.iter().all(|seen| seen != &alt) {
+            values.push(alt);
+        }
+    }
+    if values.is_empty() {
+        vec![original.to_string()]
+    } else {
+        values
+    }
+}
+
+fn join_eval_words(prefixes: &[String], words: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        for word in words {
+            if out.len() == EVAL_VARIANT_CAP {
+                return out;
+            }
+            if prefix.is_empty() {
+                out.push(word.clone());
+            } else {
+                out.push(format!("{prefix} {word}"));
+            }
+        }
+    }
+    out
+}
+
+fn concat_eval_pieces(prefixes: &[String], parts: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for prefix in prefixes {
+        for part in parts {
+            if out.len() == EVAL_VARIANT_CAP {
+                return out;
+            }
+            let mut next = String::with_capacity(prefix.len() + part.len());
+            next.push_str(prefix);
+            next.push_str(part);
+            out.push(next);
+        }
+    }
+    out
+}
+
+fn braced_parameter(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix('{')?;
+    let end = inner.find('}')?;
+    let name = &inner[..end];
+    env_name(name).then_some(name)
+}
+
+fn bare_parameter(text: &str) -> Option<&str> {
+    let mut len = 0;
+    for ch in text.chars() {
+        let ok = if len == 0 {
+            ch.is_ascii_alphabetic() || ch == '_'
+        } else {
+            ch.is_ascii_alphanumeric() || ch == '_'
+        };
+        if !ok {
+            break;
+        }
+        len += ch.len_utf8();
+    }
+    if len == 0 { None } else { Some(&text[..len]) }
 }
 
 fn is_shell_name(name: &str) -> bool {
@@ -3039,7 +3572,7 @@ fn quote_shell_word(word: &str) -> String {
 fn command_argv(command: &str) -> Vec<String> {
     for part in tokenize_parts(command) {
         if let ShellPart::Segment(segment) = part
-            && let Some(executed) = executed_argv(&segment.tokens, &[])
+            && let Some(executed) = executed_argv(&segment.tokens, &segment.in_eval, &[])
         {
             return executed.argv;
         }
@@ -3146,6 +3679,40 @@ fn apply_assignment(env: &mut Vec<(String, String)>, token: &str) -> bool {
 
 fn apply_assignment_token(token: &str) -> bool {
     plain_assignment(token).is_some() || append_assignment(token).is_some() || is_assignment(token)
+}
+
+fn is_assignment_statement(tokens: &[String]) -> bool {
+    !tokens.is_empty() && tokens.iter().all(|token| apply_assignment_token(token))
+}
+
+/// `{`, `!`, and keyword `time` run the assignment. `then`, `else`,
+/// `elif`, and `do` run only on some paths, so both values stay visible
+/// to `eval`.
+fn is_assignment_leader(token: &str) -> bool {
+    matches!(token, "{" | "then" | "else" | "elif" | "do" | "!" | "time")
+}
+
+fn assignment_suffix(tokens: &[String]) -> Option<(&[String], bool)> {
+    let mut index = 0;
+    let mut conditional = false;
+    while tokens
+        .get(index)
+        .is_some_and(|token| is_assignment_leader(token))
+    {
+        if matches!(tokens[index].as_str(), "then" | "else" | "elif" | "do") {
+            conditional = true;
+        }
+        index += 1;
+    }
+    let rest = &tokens[index..];
+    is_assignment_statement(rest).then_some((rest, conditional))
+}
+
+fn assignment_name(token: &str) -> Option<&str> {
+    if let Some((name, _)) = plain_assignment(token) {
+        return Some(name);
+    }
+    append_assignment(token).map(|(name, _)| name)
 }
 
 fn wrapper_sets_env(wrapper: &str) -> bool {
@@ -3451,6 +4018,9 @@ fn read_dollar_double<I>(
 
 struct ShellSegment {
     tokens: Vec<String>,
+    /// Parallel to `tokens`. True when every character of that word came
+    /// from single quotes or `$'...'`.
+    in_eval: Vec<bool>,
     heredocs: Vec<String>,
     substitutions: Vec<String>,
     /// A pipeline stage or a background command. Its assignments do not
@@ -3479,6 +4049,8 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
     let mut chars = command.chars().peekable();
     let mut quote = None;
     let mut quoted = false;
+    let mut word_single: Option<bool> = None;
+    let mut in_eval_words: Vec<bool> = Vec::new();
     let mut heredocs: Vec<PendingHeredoc> = Vec::new();
     let mut substitutions = Vec::new();
     let mut stdin_bodies = Vec::new();
@@ -3526,8 +4098,10 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 chars.next();
                 quoted = true;
                 if next == '\'' {
+                    note_eval_quote(&mut word_single, true);
                     read_ansi_c(&mut chars, &mut token);
                 } else {
+                    note_eval_quote(&mut word_single, false);
                     read_dollar_double(&mut chars, &mut token, &mut substitutions);
                 }
                 continue;
@@ -3540,6 +4114,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
         }
         match ch {
             '\'' | '"' => {
+                note_eval_quote(&mut word_single, ch == '\'');
                 quote = Some(ch);
                 quoted = true;
             }
@@ -3548,29 +4123,40 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     && next != '\n'
                     && next != '\0'
                 {
+                    note_eval_quote(&mut word_single, false);
                     token.push(next);
                 }
             }
             '`' => substitutions.push(read_backtick(&mut chars)),
             '(' | ')' => {
-                push_token(&mut token, &mut current, &mut quoted);
+                push_token(
+                    &mut token,
+                    &mut current,
+                    &mut quoted,
+                    &mut word_single,
+                    &mut in_eval_words,
+                );
                 current.push(ch.to_string());
+                in_eval_words.push(false);
             }
             '{' if token.is_empty() && brace_is_its_own_word(chars.peek().copied()) => {
                 if let Some(name) = function_header(&current) {
                     if !substitutions.is_empty() {
                         parts.push(ShellPart::Segment(ShellSegment {
                             tokens: Vec::new(),
+                            in_eval: Vec::new(),
                             heredocs: Vec::new(),
                             substitutions: std::mem::take(&mut substitutions),
                             isolated: false,
                         }));
                     }
                     current.clear();
+                    in_eval_words.clear();
                     let body = read_brace_body(&mut chars);
                     parts.push(ShellPart::Function { name, body });
                 } else {
                     current.push("{".to_string());
+                    in_eval_words.push(false);
                 }
             }
             '<' | '>' if chars.peek() == Some(&'(') => {
@@ -3579,7 +4165,13 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
             }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
-                push_token(&mut token, &mut current, &mut quoted);
+                push_token(
+                    &mut token,
+                    &mut current,
+                    &mut quoted,
+                    &mut word_single,
+                    &mut in_eval_words,
+                );
                 if chars.peek() == Some(&'<') {
                     chars.next();
                     if let Some(body) = read_here_string(&mut chars, &mut substitutions) {
@@ -3599,7 +4191,13 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 if !quoted && is_fd_word(&token) {
                     token.clear();
                 } else {
-                    push_token(&mut token, &mut current, &mut quoted);
+                    push_token(
+                        &mut token,
+                        &mut current,
+                        &mut quoted,
+                        &mut word_single,
+                        &mut in_eval_words,
+                    );
                 }
                 skip_redirect_word(&mut chars, &mut substitutions);
             }
@@ -3608,12 +4206,30 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 if chars.peek() == Some(&'>') {
                     chars.next();
                 }
-                push_token(&mut token, &mut current, &mut quoted);
+                push_token(
+                    &mut token,
+                    &mut current,
+                    &mut quoted,
+                    &mut word_single,
+                    &mut in_eval_words,
+                );
                 skip_redirect_word(&mut chars, &mut substitutions);
             }
-            ' ' | '\t' | '\r' => push_token(&mut token, &mut current, &mut quoted),
+            ' ' | '\t' | '\r' => push_token(
+                &mut token,
+                &mut current,
+                &mut quoted,
+                &mut word_single,
+                &mut in_eval_words,
+            ),
             '\n' => {
-                push_token(&mut token, &mut current, &mut quoted);
+                push_token(
+                    &mut token,
+                    &mut current,
+                    &mut quoted,
+                    &mut word_single,
+                    &mut in_eval_words,
+                );
                 // A newline after `|` or `|&` is still that pipeline, so
                 // the next command stays isolated. A finished command is not.
                 let continues_pipeline = next_isolated
@@ -3623,6 +4239,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 if !continues_pipeline {
                     push_shell_segment(
                         &mut current,
+                        &mut in_eval_words,
                         &mut substitutions,
                         &mut stdin_bodies,
                         &mut parts,
@@ -3655,9 +4272,16 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 let own_shell = pipe_both || (!doubled && matches!(ch, '&' | '|'));
                 let isolated = next_isolated || own_shell;
                 next_isolated = pipe_both || (!doubled && ch == '|');
-                push_token(&mut token, &mut current, &mut quoted);
+                push_token(
+                    &mut token,
+                    &mut current,
+                    &mut quoted,
+                    &mut word_single,
+                    &mut in_eval_words,
+                );
                 push_shell_segment(
                     &mut current,
+                    &mut in_eval_words,
                     &mut substitutions,
                     &mut stdin_bodies,
                     &mut parts,
@@ -3672,12 +4296,22 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     chars.next();
                 }
             }
-            _ => token.push(ch),
+            _ => {
+                note_eval_quote(&mut word_single, false);
+                token.push(ch);
+            }
         }
     }
-    push_token(&mut token, &mut current, &mut quoted);
+    push_token(
+        &mut token,
+        &mut current,
+        &mut quoted,
+        &mut word_single,
+        &mut in_eval_words,
+    );
     push_shell_segment(
         &mut current,
+        &mut in_eval_words,
         &mut substitutions,
         &mut stdin_bodies,
         &mut parts,
@@ -3869,11 +4503,27 @@ where
     inner
 }
 
-fn push_token(token: &mut String, current: &mut Vec<String>, quoted: &mut bool) {
+fn note_eval_quote(word_single: &mut Option<bool>, single: bool) {
+    *word_single = Some(match *word_single {
+        None => single,
+        Some(true) if single => true,
+        _ => false,
+    });
+}
+
+fn push_token(
+    token: &mut String,
+    current: &mut Vec<String>,
+    quoted: &mut bool,
+    word_single: &mut Option<bool>,
+    in_eval: &mut Vec<bool>,
+) {
     if *quoted || !token.is_empty() {
         current.push(std::mem::take(token));
+        in_eval.push(*word_single == Some(true));
     }
     *quoted = false;
+    *word_single = None;
 }
 
 fn is_fd_word(token: &str) -> bool {
@@ -4306,16 +4956,26 @@ fn read_heredoc_body<I: Iterator<Item = char>>(
 
 fn push_shell_segment(
     current: &mut Vec<String>,
+    in_eval: &mut Vec<bool>,
     substitutions: &mut Vec<String>,
     stdin_bodies: &mut Vec<String>,
     parts: &mut Vec<ShellPart>,
     isolated: bool,
 ) {
     if current.is_empty() && substitutions.is_empty() && stdin_bodies.is_empty() {
+        in_eval.clear();
         return;
     }
+    let tokens = std::mem::take(current);
+    let mut flags = std::mem::take(in_eval);
+    if flags.len() < tokens.len() {
+        flags.resize(tokens.len(), false);
+    } else if flags.len() > tokens.len() {
+        flags.truncate(tokens.len());
+    }
     parts.push(ShellPart::Segment(ShellSegment {
-        tokens: std::mem::take(current),
+        tokens,
+        in_eval: flags,
         heredocs: std::mem::take(stdin_bodies),
         substitutions: std::mem::take(substitutions),
         isolated,
@@ -5020,6 +5680,86 @@ mod tests {
             "echo exec rm",
             "eval echo ok",
             "eval 'echo rm'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn assignment_then_eval_matches_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let push = [
+            "x='git push origin main'; eval \"$x\"",
+            "x='git push origin main'; eval '$x'",
+            "x='git push origin main'; eval $x",
+            "x='git push origin main'; eval \"${x}\"",
+            "x='git push origin main'; eval '${x}'",
+            "x='git push origin main'; eval \"$x extra\"",
+            "export x='git push origin main'; eval \"$x\"",
+            "x='git push origin main'; export x; eval \"$x\"",
+            "x=old; export x='git push origin main'; eval \"$x\"",
+            "x='git push origin main'; command eval \"$x\"",
+            "x='git push origin main'; eval -- \"$x\"",
+            "x='git push origin main' && true; eval \"$x\"",
+            "x='git push'; x+=' origin main'; eval \"$x\"",
+            "y='git push origin main'; eval \"$y\"",
+            "declare x='git push origin main'; eval \"$x\"",
+            "typeset x='git push origin main'; eval \"$x\"",
+            "declare -x x='git push origin main'; eval \"$x\"",
+            "eval \"x='git push origin main'\"; eval \"$x\"",
+            "f() { local x='git push origin main'; eval \"$x\"; }; f",
+            "f() { declare x='git push origin main'; eval \"$x\"; }; f",
+            "bash -c \"x='git push origin main'; eval \\\"$x\\\"\"",
+            "x='rm -rf /tmp/x'; eval \"$x\"",
+            "{ x='git push origin main'; }; eval \"$x\"",
+            "{ x='git push origin main'; eval \"$x\"; }",
+            "if true; then x='git push origin main'; fi; eval \"$x\"",
+            "if true; then x='git push origin main'; eval \"$x\"; fi",
+            "if true; then x='git push origin main'; else x='echo hello'; fi; eval \"$x\"",
+            "if false; then x='echo hello'; else x='git push origin main'; fi; eval \"$x\"",
+            "if false; then true; elif true; then x='git push origin main'; fi; eval \"$x\"",
+            "! x='git push origin main'; eval \"$x\"",
+            "time x='git push origin main'; eval \"$x\"",
+            "for i in 1; do x='git push origin main'; done; eval \"$x\"",
+            "while true; do x='git push origin main'; break; done; eval \"$x\"",
+            "until false; do x='git push origin main'; break; done; eval \"$x\"",
+            "x='git push origin main' eval '$x'",
+            "x='git push origin main' command eval '$x'",
+            "x='git push origin main'; f() { local x; x='echo ok'; }; f; eval \"$x\"",
+        ];
+        for command in push {
+            let want = if command.contains("rm -rf") {
+                "bash.rm"
+            } else {
+                "git.push"
+            };
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some(want),
+                "{command:?}"
+            );
+        }
+        let neither = [
+            "echo 'git push origin main'",
+            "eval 'echo rm'",
+            "x='git push origin main' echo hello",
+            "x='git push origin main' echo hello; eval \"$x\"",
+            "x='git push origin main' | true; eval \"$x\"",
+            "x='echo hello'; eval \"$x\"",
+            "x='git push origin main' eval \"$x\"",
+            "x='git push origin main' eval true; eval \"$x\"",
+            "x='git push origin main'; eval \"echo $x\"",
+            "x='git push origin main' & eval \"$x\"",
+            "(x='git push origin main'); eval \"$x\"",
+            "x='git push origin main'; bash -c 'eval \"$x\"'",
+            "f() { local x='git push origin main'; }; f; eval \"$x\"",
+            "f() { declare x='git push origin main'; }; f; eval \"$x\"",
+            "f() { local x; x='git push origin main'; }; f; eval \"$x\"",
+            "f() { declare x; x='git push origin main'; }; f; eval \"$x\"",
         ];
         for command in neither {
             assert!(
@@ -5839,6 +6579,10 @@ mod tests {
             "GIT_SSH_COMMAND=rm export GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
             "eval 'export GIT_SSH_COMMAND=rm'; git ls-remote ssh://example/no.git",
             "export GIT_SSH_COMMAND=rm && git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x'; declare -x GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
+            "GIT_SSH_COMMAND='rm -rf /tmp/x'; typeset -x GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
+            "f() { declare -x GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git; }; f",
+            "f() { local -x GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git; }; f",
             "export -- GIT_SSH_COMMAND=rm; git ls-remote ssh://example/no.git",
             "export() { rm -rf /tmp/x; }; export",
             "export() { true; }; builtin export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
@@ -5933,6 +6677,8 @@ mod tests {
             "GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote https://example/no.git",
             "nice GIT_SSH_COMMAND='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
             "GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "f() { local -x GIT_SSH_COMMAND='rm -rf /tmp/x'; }; f; git ls-remote ssh://example/no.git",
+            "f() { declare -x GIT_SSH_COMMAND='rm -rf /tmp/x'; }; f; git ls-remote ssh://example/no.git",
             "git -c alias.p='!rm -rf /tmp/x' status P",
             "GIT_SSH='rm -rf /tmp/x' git ls-remote ssh://example/no.git",
             "GIT_SSH_COMMAND=rm GIT_SSH_COMMAND+=.safe git ls-remote ssh://example/no.git",
