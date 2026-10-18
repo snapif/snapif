@@ -450,7 +450,8 @@ fn check_action(
 /// print that file. `gcut -c 1-`, `gdd if=path`, `gtac`, `guniq`,
 /// `gexpand`, `gunexpand`, `gpr -t`, `gtr`, `gtee`, and `gbase64 -d`
 /// print it too. `timeout 1 cat`
-/// and `gxargs cat` print it too. Without `-n`,
+/// and `gxargs cat` print it too. `env cat`, `nice cat`, and `nohup cat`
+/// print the file. `genv`, `gnice`, and `gnohup` do too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -6009,7 +6010,10 @@ fn peel_stage_wrappers(words: &mut Vec<String>) {
             return;
         }
         let name = stage_command_name(&words[0]);
-        if name != "stdbuf" && name != "timeout" {
+        if !matches!(
+            name.as_str(),
+            "stdbuf" | "timeout" | "env" | "nice" | "nohup"
+        ) {
             if name != words[0] {
                 words[0] = name;
             }
@@ -13450,6 +13454,15 @@ mod tests {
             format!("eval \"$(gbase64 -d {coded_s})\""),
             format!("eval \"$(timeout 1 cat {push_s})\""),
             format!("eval \"$(gtimeout 1 cat {push_s})\""),
+            format!("eval \"$(env cat {push_s})\""),
+            format!("eval \"$(env FOO=1 cat {push_s})\""),
+            format!("eval \"$(genv cat {push_s})\""),
+            format!("eval \"$(env gcat {push_s})\""),
+            format!("eval \"$(nice cat {push_s})\""),
+            format!("eval \"$(nice -n 0 cat {push_s})\""),
+            format!("eval \"$(gnice cat {push_s})\""),
+            format!("eval \"$(nohup cat {push_s})\""),
+            format!("eval \"$(gnohup cat {push_s})\""),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
             format!("eval \"$(printf '%s\\n' {push_s} | xargs cat)\""),
             format!("eval \"$(gxargs cat {push_s})\""),
@@ -13700,6 +13713,10 @@ mod tests {
             format!("eval \"$(gfgrep echo {echo_s})\""),
             format!("eval \"$(gegrep zzzz {push_s})\""),
             format!("eval \"$(timeout 1 cat {echo_s})\""),
+            format!("eval \"$(env cat {echo_s})\""),
+            format!("eval \"$(nice cat {echo_s})\""),
+            format!("eval \"$(genv cat {echo_s})\""),
+            format!("eval \"$(nohup cat {echo_s})\""),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
