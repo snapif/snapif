@@ -440,7 +440,8 @@ fn check_action(
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. `awk 'NR==1 {print}'`
 /// and `awk '{ print }'` print it too. `awk '/git/'` prints a line
 /// that contains `git`. `gawk` is that same `awk`.
-/// `awk 'gsub(/git/,"git")'` prints that line too. Without `-n`,
+/// `awk 'gsub(/git/,"git")'` prints that line too. `awk '{printf "%s\n", $0}'`
+/// prints each line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -453,6 +454,7 @@ fn check_action(
 /// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
 /// line. `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 /// `perl -pe 'print'` prints it too, unless the script clears `$_`.
+/// `perl -0777 -pe ''` still prints the file.
 /// `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
@@ -7198,6 +7200,8 @@ enum AwkSel {
     Many(Vec<(usize, usize)>),
     /// Rules that print some lines. A line is kept when any rule prints it.
     Script(Vec<AwkAtom>),
+    /// `{printf "%s", $0}` joins line bodies with no newline between them.
+    Concat,
 }
 
 enum AwkAtom {
@@ -7246,6 +7250,7 @@ fn awk_run(
                     union_lines(text.as_str(), &spans)
                 }
                 AwkSel::Script(atoms) => awk_script(text.as_str(), &atoms),
+                AwkSel::Concat => awk_concat(text.as_str()),
             },
             ok,
         },
@@ -7281,6 +7286,9 @@ fn awk_program(program: &str) -> Option<AwkSel> {
     ) {
         return Some(AwkSel::All);
     }
+    if let Some(sel) = awk_printf(&compact) {
+        return Some(sel);
+    }
     let pieces = split_statements(&compact);
     if pieces.is_empty() {
         return None;
@@ -7293,7 +7301,7 @@ fn awk_program(program: &str) -> Option<AwkSel> {
         match awk_one(piece)? {
             AwkSel::All => return Some(AwkSel::All),
             AwkSel::Range { start, end } => spans.push((start, end)),
-            AwkSel::Many(_) | AwkSel::Script(_) => return None,
+            AwkSel::Many(_) | AwkSel::Script(_) | AwkSel::Concat => return None,
         }
     }
     if let [(start, end)] = spans.as_slice() {
@@ -7344,6 +7352,27 @@ fn awk_compact(program: &str) -> String {
     out
 }
 
+fn awk_printf(compact: &str) -> Option<AwkSel> {
+    match compact {
+        "{printf\"%s\\n\",$0}" | "{printf\"%s\\n\",$0;}" => Some(AwkSel::All),
+        "{printf\"%s\",$0}" | "{printf\"%s\",$0;}" | "{printf$0}" | "{printf$0;}" => {
+            Some(AwkSel::Concat)
+        }
+        _ => None,
+    }
+}
+
+fn awk_concat(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        out.push_str(line.trim_end_matches('\n'));
+    }
+    out
+}
+
 fn awk_script_sel(pieces: &[&str]) -> Option<AwkSel> {
     let mut atoms = Vec::new();
     let mut patterned = false;
@@ -7377,7 +7406,7 @@ fn awk_atom(piece: &str) -> Option<AwkAtom> {
     match awk_one(piece)? {
         AwkSel::All => Some(AwkAtom::All),
         AwkSel::Range { start, end } => Some(AwkAtom::Range { start, end }),
-        AwkSel::Many(_) | AwkSel::Script(_) => None,
+        AwkSel::Many(_) | AwkSel::Script(_) | AwkSel::Concat => None,
     }
 }
 
@@ -8745,6 +8774,10 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
+        if arg.starts_with("-0") && arg.chars().skip(2).all(|ch| matches!(ch, '0'..='7')) {
+            index += 1;
+            continue;
+        }
         if let Some(rest) = arg.strip_prefix("-pe")
             && !rest.is_empty()
         {
@@ -8851,6 +8884,7 @@ fn python_reads_argv1(script: &str) -> bool {
         compact.as_str(),
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
+            | "importsys;print(open(sys.argv[1]).read())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
     )
@@ -8902,6 +8936,7 @@ fn node_reads_argv1(script: &str) -> bool {
         compact.as_str(),
         "process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
+            | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))"
             | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
     )
 }
@@ -8952,6 +8987,7 @@ fn php_reads_argv1(script: &str) -> bool {
         compact.as_str(),
         "echofile_get_contents($argv[1]);"
             | "printfile_get_contents($argv[1]);"
+            | "readfile($argv[1]);"
             | "system(file_get_contents($argv[1]));"
     )
 }
@@ -12685,12 +12721,26 @@ mod tests {
             format!("eval \"$(perl -pe 'print $_' {push_s})\""),
             format!("eval \"$(perl -pe '1' {push_s})\""),
             format!("eval \"$(perl -pe '2' {push_s})\""),
+            format!("eval \"$(perl -0777 -pe '' {push_s})\""),
+            format!("eval \"$(perl -0 -pe '' {push_s})\""),
+            format!("eval \"$(perl -0777 -ne 'print' {push_s})\""),
             format!("eval \"$(ruby -pe 'print' {push_s})\""),
             format!("eval \"$(ruby -e 'puts File.read(ARGV[0])' {push_s})\""),
             format!(
                 "eval \"$(node -e 'console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
             ),
             format!("eval \"$(php -r 'print file_get_contents($argv[1]);' {push_s})\""),
+            format!("eval \"$(php -r 'readfile($argv[1]);' {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; print(open(sys.argv[1]).read())' {push_s})\""
+            ),
+            format!(
+                "eval \"$(node -e 'const fs=require(\"fs\"); process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
+            ),
+            format!("eval \"$(awk '{{printf \"%s\\n\", $0}}' {push_s})\""),
+            format!("eval \"$(awk '{{printf \"%s\\n\", $0}}' {multi_s})\""),
+            format!("eval \"$(awk '{{printf \"%s\", $0}}' {push_s})\""),
+            format!("eval \"$(awk '{{printf $0}}' {push_s})\""),
             format!(
                 "eval \"$(python3 -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())' {push_s})\""
             ),
@@ -12970,6 +13020,15 @@ mod tests {
             format!("eval \"$(sed -n 's/zzzz/zzzz/p' {push_s})\""),
             format!("eval \"$(sed -n 's/git/echo/p' {push_s})\""),
             format!("eval \"$(awk 'gsub(/zzzz/,\"zzzz\")' {push_s})\""),
+            format!("eval \"$(awk '{{printf \"%s\", $0}}' {multi_s})\""),
+            format!("eval \"$(awk '{{printf $0}}' {multi_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; print(open(sys.argv[1]).read())' {echo_s})\""
+            ),
+            format!("eval \"$(php -r 'readfile($argv[1]);' {echo_s})\""),
+            format!(
+                "eval \"$(node -e 'const fs=require(\"fs\"); process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))' {echo_s})\""
+            ),
             format!("eval \"$(grep -P zzzz {push_s})\""),
             format!("eval \"$(awk '/zzzz/' {push_s})\""),
             format!("eval \"$(awk 'index($0,\"zzzz\")' {push_s})\""),
