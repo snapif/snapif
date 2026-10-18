@@ -449,6 +449,9 @@ fn check_action(
 /// same `sed`. A python one-liner that writes `open(sys.argv[1]).read()`,
 /// a node one-liner that writes `readFileSync`, `ruby -e` that prints
 /// `File.read`, and `php -r` that echoes `file_get_contents` print the file.
+/// `os.system(open(sys.argv[1]).read())`, node `execSync` of
+/// `readFileSync`, `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
+/// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
@@ -8124,7 +8127,10 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
 
 fn ruby_reads_argv0(script: &str) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact == "printFile.read(ARGV[0])"
+    matches!(
+        compact.as_str(),
+        "printFile.read(ARGV[0])" | "system(File.read(ARGV[0]))"
+    )
 }
 
 fn python_cat_run(
@@ -8177,6 +8183,7 @@ fn python_reads_argv1(script: &str) -> bool {
         compact.as_str(),
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
+            | "importos,sys;os.system(open(sys.argv[1]).read())"
     )
 }
 
@@ -8222,7 +8229,11 @@ fn node_cat_query(args: &[String]) -> Option<Option<String>> {
 
 fn node_reads_argv1(script: &str) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact == "process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
+    matches!(
+        compact.as_str(),
+        "process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
+            | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
+    )
 }
 
 fn php_cat_run(
@@ -8267,7 +8278,10 @@ fn php_cat_query(args: &[String]) -> Option<Option<String>> {
 
 fn php_reads_argv1(script: &str) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact == "echofile_get_contents($argv[1]);"
+    matches!(
+        compact.as_str(),
+        "echofile_get_contents($argv[1]);" | "system(file_get_contents($argv[1]));"
+    )
 }
 
 fn base64_run(
@@ -12010,6 +12024,14 @@ mod tests {
             ),
             format!("eval \"$(ruby -e 'print File.read(ARGV[0])' {push_s})\""),
             format!("eval \"$(php -r 'echo file_get_contents($argv[1]);' {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import os,sys; os.system(open(sys.argv[1]).read())' {push_s})\""
+            ),
+            format!(
+                "eval \"$(node -e 'require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
+            ),
+            format!("eval \"$(ruby -e 'system(File.read(ARGV[0]))' {push_s})\""),
+            format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
             format!("eval \"$(command cat {push_s})\""),
