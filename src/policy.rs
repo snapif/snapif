@@ -433,7 +433,8 @@ fn check_action(
 /// `grep -i`, `grep -w`, and `grep -o '.*'` still print the matching
 /// line. `grep -E` and `egrep` use that same match. `fgrep` is a fixed
 /// string. `grep -G` is the basic match. `grep -P` and `ggrep` use
-/// that same match. `grep -n`, `grep -H`,
+/// that same match. `grep -a` and `grep -I` still print a text line.
+/// `grep -n`, `grep -H`,
 /// and `grep -o .` do not. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
@@ -455,6 +456,7 @@ fn check_action(
 /// line. `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 /// `perl -pe 'print'` prints it too, unless the script clears `$_`.
 /// `perl -0777 -pe ''` still prints the file. `perl -lpe ''` prints it too.
+/// `perl -w -pe ''` prints it too.
 /// `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
@@ -6345,6 +6347,10 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             index += 1;
             continue;
         }
+        if arg == "-a" || arg == "--text" || arg == "-I" {
+            index += 1;
+            continue;
+        }
         if arg == "-e" {
             if pattern.is_some() {
                 return None;
@@ -6358,7 +6364,7 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             && !rest.is_empty()
             && rest
                 .chars()
-                .all(|ch| matches!(ch, 'E' | 'F' | 'h' | 'i' | 'w' | 'o'))
+                .all(|ch| matches!(ch, 'E' | 'F' | 'a' | 'I' | 'h' | 'i' | 'w' | 'o'))
         {
             if rest.contains('E') {
                 extended = true;
@@ -8751,13 +8757,21 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
-        if arg == "-l" {
+        if arg == "-l" || arg == "-w" || arg == "-W" {
+            index += 1;
+            continue;
+        }
+        if let Some(level) = arg.strip_prefix("-W")
+            && level.chars().all(|ch| ch.is_ascii_digit())
+        {
             index += 1;
             continue;
         }
         if let Some(flags) = arg.strip_prefix('-')
             && flags.len() > 1
-            && flags.chars().all(|ch| matches!(ch, 'l' | 'n' | 'p' | 'e'))
+            && flags
+                .chars()
+                .all(|ch| matches!(ch, 'l' | 'n' | 'p' | 'e' | 'w'))
             && flags.contains('e')
         {
             if flags.contains('p') {
@@ -8888,7 +8902,7 @@ fn python_cat_query(args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
-        if matches!(arg.as_str(), "-u" | "-E" | "-B" | "-s") {
+        if matches!(arg.as_str(), "-u" | "-E" | "-B" | "-s" | "-I") {
             index += 1;
             continue;
         }
@@ -12752,6 +12766,13 @@ mod tests {
             format!("eval \"$(perl -0777 -pe '' {push_s})\""),
             format!("eval \"$(perl -0 -pe '' {push_s})\""),
             format!("eval \"$(perl -lpe '' {push_s})\""),
+            format!("eval \"$(perl -w -pe '' {push_s})\""),
+            format!("eval \"$(perl -wpe '' {push_s})\""),
+            format!("eval \"$(perl -W -pe '' {push_s})\""),
+            format!("eval \"$(ruby -W0 -ne 'print' {push_s})\""),
+            format!(
+                "eval \"$(python3 -I -c 'import sys; print(open(sys.argv[1]).read())' {push_s})\""
+            ),
             format!("eval \"$(perl -l -pe '' {push_s})\""),
             format!("eval \"$(ruby -nle 'print' {push_s})\""),
             format!("eval \"$(perl -0777 -ne 'print' {push_s})\""),
@@ -12962,6 +12983,10 @@ mod tests {
             format!("eval \"$(awk 'gsub(/git/,\"git\")' {push_s})\""),
             format!("eval \"$(awk 'gsub(/push/,\"push\")' {push_s})\""),
             format!("eval \"$(grep -P git {push_s})\""),
+            format!("eval \"$(grep -a git {push_s})\""),
+            format!("eval \"$(grep --text git {push_s})\""),
+            format!("eval \"$(grep -I git {push_s})\""),
+            format!("eval \"$(grep -ai git {push_s})\""),
             format!("eval \"$(grep -P 'push origin' {push_s})\""),
             format!("eval \"$(ggrep git {push_s})\""),
             format!("eval \"$(ggrep -P git {push_s})\""),
@@ -13066,6 +13091,13 @@ mod tests {
                 "eval \"$(node -e 'const fs=require(\"fs\"); process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))' {echo_s})\""
             ),
             format!("eval \"$(grep -P zzzz {push_s})\""),
+            format!("eval \"$(grep -a zzzz {push_s})\""),
+            format!("eval \"$(grep --text zzzz {push_s})\""),
+            format!("eval \"$(perl -w -pe '' {echo_s})\""),
+            format!("eval \"$(ruby -W0 -ne 'print' {echo_s})\""),
+            format!(
+                "eval \"$(python3 -I -c 'import sys; print(open(sys.argv[1]).read())' {echo_s})\""
+            ),
             format!("eval \"$(awk '/zzzz/' {push_s})\""),
             format!("eval \"$(awk 'index($0,\"zzzz\")' {push_s})\""),
             format!("eval \"$(awk '$0 ~ /zzzz/' {push_s})\""),
