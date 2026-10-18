@@ -376,8 +376,9 @@ fn check_action(
 /// `eval echo` do not. `if`, `then`, `else`, `elif`, `do`, `while`,
 /// `until`, `!`, `{`, and `(` are skipped, so `if true; then rm`,
 /// `{ rm; }`, and `(rm)` match. `for`
-/// is not skipped. `$(rm)`, `echo "$(rm)"`, and a backtick `rm` match.
-/// Single quotes do not run `$(rm)`. The stricter row wins across the
+/// is not skipped. `$(rm)`, `echo "$(rm)"`, and a backtick `rm` match,
+/// including inside double quotes and `$"..."`. Single quotes do not
+/// run `$(rm)`. The stricter row wins across the
 /// whole string, so `git push $(rm)` and `git push && rm` match `bash.rm`.
 /// `git push $(echo rm)` stays `git.push`.
 /// `bash -O extglob -c` and `bash +O extglob -c` match.
@@ -420,9 +421,11 @@ fn check_action(
 /// A shell that reads its script from stdin runs a heredoc or a
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
-/// body in the same shell. `cat` and `bash -c` do not. Inside double
-/// quotes, a backslash immediately before a newline is removed, so a
-/// wrapped `bash -c "git push"` matches `git.push`. An unquoted
+/// body in the same shell. `cat` and `bash -c` do not run that body.
+/// The here-string word is expanded first, so `cat <<< $(rm)` matches.
+/// Inside double quotes, a backslash immediately before a newline is
+/// removed, so a wrapped `bash -c "git push"` matches `git.push`.
+/// A backtick inside those quotes runs too. An unquoted
 /// `#` comment does not run `$(rm)`. `<(rm)` and `>(rm)` do.
 /// A redirect is not a word. `rm>/dev/null`, `>/dev/null rm`, and
 /// `2>/dev/null rm` match. `echo rm>/tmp/x` does not, because `rm` is
@@ -3395,8 +3398,12 @@ fn push_ansi_value(token: &mut String, value: u64) -> bool {
 }
 
 /// Bash `$"..."` word. A backslash escapes `$`, backtick, `"`, `\`, and a newline.
-fn read_dollar_double<I>(chars: &mut std::iter::Peekable<I>, token: &mut String)
-where
+/// An unescaped backtick or `$(...)` still runs.
+fn read_dollar_double<I>(
+    chars: &mut std::iter::Peekable<I>,
+    token: &mut String,
+    substitutions: &mut Vec<String>,
+) where
     I: Iterator<Item = char>,
 {
     while let Some(ch) = chars.next() {
@@ -3407,6 +3414,15 @@ where
             return;
         }
         if ch != '\\' {
+            if ch == '`' {
+                substitutions.push(read_backtick(chars));
+                continue;
+            }
+            if ch == '$' && chars.peek() == Some(&'(') {
+                chars.next();
+                substitutions.push(read_balanced_parens(chars));
+                continue;
+            }
             token.push(ch);
             continue;
         }
@@ -3481,7 +3497,13 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 }
                 continue;
             }
-            // `echo "$(rm)"` runs rm. Single quotes never reach this branch.
+            // `echo "$(rm)"` and `echo "`rm`"` run rm. The backslash arm
+            // already kept an escaped backtick literal. Single quotes
+            // never reach this branch.
+            if open == '"' && ch == '`' {
+                substitutions.push(read_backtick(&mut chars));
+                continue;
+            }
             if open == '"' && ch == '$' && chars.peek() == Some(&'(') {
                 chars.next();
                 substitutions.push(read_balanced_parens(&mut chars));
@@ -3499,7 +3521,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 if next == '\'' {
                     read_ansi_c(&mut chars, &mut token);
                 } else {
-                    read_dollar_double(&mut chars, &mut token);
+                    read_dollar_double(&mut chars, &mut token, &mut substitutions);
                 }
                 continue;
             }
@@ -3553,7 +3575,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 push_token(&mut token, &mut current, &mut quoted);
                 if chars.peek() == Some(&'<') {
                     chars.next();
-                    if let Some(body) = read_here_string(&mut chars) {
+                    if let Some(body) = read_here_string(&mut chars, &mut substitutions) {
                         stdin_bodies.push(body);
                     }
                 } else if let Some((delim, dash)) = read_heredoc_delim(&mut chars) {
@@ -3941,8 +3963,62 @@ where
     }
 }
 
+/// Rest of an unquoted here-string word. `$(...)` and backticks run
+/// before the command starts. The character after a backslash stays
+/// literal, so an escaped backtick does not.
+fn read_unquoted_here_body<I>(
+    chars: &mut std::iter::Peekable<I>,
+    substitutions: &mut Vec<String>,
+) -> String
+where
+    I: Iterator<Item = char>,
+{
+    let mut body = String::new();
+    let mut literal_next = false;
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
+            break;
+        }
+        chars.next();
+        if ch == '\0' {
+            literal_next = false;
+            continue;
+        }
+        if literal_next {
+            body.push(ch);
+            literal_next = false;
+            continue;
+        }
+        if ch == '\\' {
+            body.push('\\');
+            literal_next = true;
+            continue;
+        }
+        if ch == '`' {
+            let inner = read_backtick(chars);
+            body.push('`');
+            body.push_str(&inner);
+            body.push('`');
+            substitutions.push(inner);
+            continue;
+        }
+        if ch == '$' && chars.peek() == Some(&'(') {
+            chars.next();
+            let inner = read_balanced_parens(chars);
+            body.push_str("$(");
+            body.push_str(&inner);
+            body.push(')');
+            substitutions.push(inner);
+            continue;
+        }
+        body.push(ch);
+    }
+    body
+}
+
 fn read_here_string<I: Iterator<Item = char>>(
     chars: &mut std::iter::Peekable<I>,
+    substitutions: &mut Vec<String>,
 ) -> Option<String> {
     while matches!(chars.peek(), Some(' ' | '\t')) {
         chars.next();
@@ -3959,30 +4035,31 @@ fn read_here_string<I: Iterator<Item = char>>(
             Some('"') => {
                 chars.next();
                 let mut body = String::new();
-                read_dollar_double(chars, &mut body);
+                read_dollar_double(chars, &mut body, substitutions);
+                return Some(body);
+            }
+            Some('(') => {
+                chars.next();
+                let inner = read_balanced_parens(chars);
+                let mut body = String::from("$(");
+                body.push_str(&inner);
+                body.push(')');
+                substitutions.push(inner);
+                body.push_str(&read_unquoted_here_body(chars, substitutions));
                 return Some(body);
             }
             _ => {
                 let mut body = String::from("$");
-                while let Some(&ch) = chars.peek() {
-                    if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
-                        break;
-                    }
-                    chars.next();
-                    if ch != '\0' {
-                        body.push(ch);
-                    }
-                }
+                body.push_str(&read_unquoted_here_body(chars, substitutions));
                 return Some(body);
             }
         }
     }
-    let quote = chars.peek().copied();
-    if matches!(quote, Some('\'' | '"')) {
-        let quote = chars.next().unwrap_or('"');
+    if chars.peek() == Some(&'\'') {
+        chars.next();
         let mut body = String::new();
         for ch in chars.by_ref() {
-            if ch == quote {
+            if ch == '\'' {
                 break;
             }
             if ch != '\0' {
@@ -3991,16 +4068,51 @@ fn read_here_string<I: Iterator<Item = char>>(
         }
         return Some(body);
     }
-    let mut body = String::new();
-    while let Some(&ch) = chars.peek() {
-        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>') {
-            break;
-        }
+    if chars.peek() == Some(&'"') {
         chars.next();
-        if ch != '\0' {
+        let mut body = String::new();
+        let mut literal_next = false;
+        while let Some(ch) = chars.next() {
+            if ch == '\0' {
+                literal_next = false;
+                continue;
+            }
+            // A backslash does not protect the closing quote in this reader.
+            if ch == '"' {
+                break;
+            }
+            if literal_next {
+                body.push(ch);
+                literal_next = false;
+                continue;
+            }
+            if ch == '\\' {
+                body.push('\\');
+                literal_next = true;
+                continue;
+            }
+            if ch == '`' {
+                let inner = read_backtick(chars);
+                body.push('`');
+                body.push_str(&inner);
+                body.push('`');
+                substitutions.push(inner);
+                continue;
+            }
+            if ch == '$' && chars.peek() == Some(&'(') {
+                chars.next();
+                let inner = read_balanced_parens(chars);
+                body.push_str("$(");
+                body.push_str(&inner);
+                body.push(')');
+                substitutions.push(inner);
+                continue;
+            }
             body.push(ch);
         }
+        return Some(body);
     }
+    let body = read_unquoted_here_body(chars, substitutions);
     if body.is_empty() { None } else { Some(body) }
 }
 
@@ -4587,6 +4699,49 @@ mod tests {
             Some("git.push"),
             "{single:?}"
         );
+    }
+
+    #[test]
+    fn double_quoted_command_substitution_is_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let push = [
+            "echo \"`git push origin main`\"",
+            "echo $\"`git push origin main`\"",
+            "echo \"$(git push origin main)\"",
+            "echo $\"$(git push origin main)\"",
+            "cat <<< \"`git push origin main`\"",
+            "cat <<< \"$(git push origin main)\"",
+            "cat <<< $\"`git push origin main`\"",
+            "cat <<< $\"$(git push origin main)\"",
+            "cat <<< $(git push origin main)",
+            "cat <<< `git push origin main`",
+        ];
+        for command in push {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("echo \"`rm -rf /tmp/x`\""))
+                .map(|id| id.0.as_str()),
+            Some("bash.rm")
+        );
+        let neither = [
+            "echo \"\\`git push origin main\\`\"",
+            "echo $\"\\`git push origin main\\`\"",
+            "echo '`git push origin main`'",
+            "echo '$(git push origin main)'",
+            "cat <<< '$(git push origin main)'",
+            "cat <<< '`git push origin main`'",
+        ];
+        for command in neither {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
     }
 
     #[test]
