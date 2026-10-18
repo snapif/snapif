@@ -425,8 +425,12 @@ fn check_action(
 /// A printer mixed with another command still inserts that text, and
 /// the other command is scored. `echo ... | cat` prints the echo. The
 /// last stage is the stdout, so `echo ... | true` prints nothing.
+/// `echo ... && true` still prints. `false && echo` prints nothing.
+/// `echo ... || true` prints the echo and does not run the right side.
 /// `cat path` and `$(<path)` are a regular file, up to one megabyte.
-/// A missing path is not those bytes. A larger file matches `shell.deep`.
+/// `cat` of several paths keeps each file that exists. `cat < path`,
+/// `grep . path`, and `head -n 1 path` are that text. A missing path
+/// is not those bytes. A larger file matches `shell.deep`.
 /// `printf -v name` stores a value for a later `eval`. Inside a function
 /// that name is global unless it is already local. `read` and `read -r`
 /// do that from one here-string or heredoc. No here-body does not.
@@ -4989,6 +4993,23 @@ enum Printed {
     Unknown,
 }
 
+enum Run {
+    Produced { text: String, ok: bool },
+    Unscanned,
+    Unknown,
+}
+
+enum Join {
+    Semi,
+    And,
+    Or,
+}
+
+struct Piece {
+    command: String,
+    next: Join,
+}
+
 fn printed_output(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Printed {
     if depth > FOLD_DEPTH {
         return Printed::Unknown;
@@ -4996,25 +5017,36 @@ fn printed_output(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Pr
     if let Some(path) = command_subst_file(body) {
         return printed_file(&path);
     }
-    let Some(commands) = split_literal_commands(body) else {
+    let Some(pieces) = split_list(body) else {
         return Printed::Unknown;
     };
     let mut extra = Vec::new();
     let mut out = String::new();
     let mut any_known = false;
-    let mut unscanned = false;
-    for command in commands {
-        match one_command(&command, depth, substitutions, &mut unscanned) {
-            Printed::Text(text) => {
-                any_known = true;
-                out.push_str(&text);
+    // `None` is an unknown exit. `&&` and `||` then still keep a later
+    // printer, because that side runs for one of the two exits.
+    let mut exit_ok: Option<bool> = Some(true);
+    let mut should_run = true;
+    for piece in pieces {
+        if should_run {
+            match run_command(&piece.command, depth, substitutions) {
+                Run::Produced { text, ok } => {
+                    any_known = true;
+                    out.push_str(&text);
+                    exit_ok = Some(ok);
+                }
+                Run::Unscanned => return Printed::Unscanned,
+                Run::Unknown => {
+                    extra.push(piece.command);
+                    exit_ok = None;
+                }
             }
-            Printed::Unscanned => unscanned = true,
-            Printed::Unknown => extra.push(command),
         }
-        if unscanned {
-            return Printed::Unscanned;
-        }
+        should_run = match piece.next {
+            Join::Semi => true,
+            Join::And => exit_ok != Some(false),
+            Join::Or => exit_ok != Some(true),
+        };
     }
     if !any_known {
         return Printed::Unknown;
@@ -5076,32 +5108,31 @@ fn printed_file(path: &str) -> Printed {
     }
 }
 
-fn one_command(
-    command: &str,
-    depth: u32,
-    substitutions: &mut Vec<String>,
-    unscanned: &mut bool,
-) -> Printed {
+fn run_command(command: &str, depth: u32, substitutions: &mut Vec<String>) -> Run {
     let Some(stages) = split_pipeline(command) else {
-        return Printed::Unknown;
+        return Run::Unknown;
     };
     let mut stdout = String::new();
+    let mut ok = true;
     for (index, stage) in stages.iter().enumerate() {
-        let stdin = if index == 0 {
+        let pipe = if index == 0 {
             None
         } else {
             Some(stdout.as_str())
         };
-        match simple_stdout(stage, stdin, depth, substitutions, unscanned) {
-            Printed::Text(text) => stdout = text,
+        match run_stage(stage, pipe, depth, substitutions) {
+            Run::Produced { text, ok: stage_ok } => {
+                stdout = text;
+                ok = stage_ok;
+            }
             other => return other,
         }
     }
-    Printed::Text(stdout)
+    Run::Produced { text: stdout, ok }
 }
 
-/// Stages of one pipeline. `||`, a redirect, or a glob is not a stage
-/// list we can print.
+/// Stages of one pipeline. `||` or a glob is not a stage list we can
+/// print. A redirect stays in its stage.
 fn split_pipeline(command: &str) -> Option<Vec<String>> {
     let chars: Vec<char> = command.chars().collect();
     let mut stages = Vec::new();
@@ -5160,9 +5191,15 @@ fn split_pipeline(command: &str) -> Option<Vec<String>> {
                 word_start = false;
                 index = skip_backtick(&chars, index)?;
             }
-            '&' | '<' | '>' | '(' | ')' | '*' | '?' | '[' | ']' | '{' | '}' | '~' => {
-                return None;
+            '&' if chars.get(index + 1) == Some(&'>') => {
+                word_start = false;
+                index += 1;
             }
+            '<' | '>' => {
+                word_start = false;
+                index += 1;
+            }
+            '&' | '(' | ')' | '*' | '?' | '[' | ']' | '{' | '}' | '~' => return None,
             _ => {
                 word_start = false;
                 index += 1;
@@ -5173,49 +5210,98 @@ fn split_pipeline(command: &str) -> Option<Vec<String>> {
     Some(stages)
 }
 
-fn simple_stdout(
-    stage: &str,
-    stdin: Option<&str>,
-    depth: u32,
-    substitutions: &mut Vec<String>,
-    unscanned: &mut bool,
-) -> Printed {
-    let Some(mut words) = parse_fields(stage, depth, substitutions, unscanned) else {
-        if *unscanned {
-            return Printed::Unscanned;
-        }
-        return Printed::Unknown;
+fn run_stage(stage: &str, pipe: Option<&str>, depth: u32, substitutions: &mut Vec<String>) -> Run {
+    let Some(peeled) = peel_redirects(stage) else {
+        return Run::Unknown;
     };
-    let mut peeled = false;
+    if peeled.blocked {
+        return Run::Unknown;
+    }
+    if peeled.cancelled {
+        return Run::Produced {
+            text: String::new(),
+            ok: false,
+        };
+    }
+    let mut unscanned = false;
+    let Some(mut words) = parse_fields(&peeled.command, depth, substitutions, &mut unscanned)
+    else {
+        if unscanned {
+            return Run::Unscanned;
+        }
+        return Run::Unknown;
+    };
+    let mut saw_prefix = false;
     if let Some(first) = words.first() {
         let base = command_basename(first);
         if base == "command" || base == "builtin" {
-            peeled = true;
+            saw_prefix = true;
             if words.get(1).is_some_and(|word| word.starts_with('-')) {
-                return Printed::Unknown;
+                return Run::Unknown;
             }
             words.remove(0);
         }
     }
     if words.is_empty() {
-        return if peeled {
-            Printed::Unknown
+        return if saw_prefix {
+            Run::Unknown
         } else {
-            Printed::Text(String::new())
+            Run::Produced {
+                text: String::new(),
+                ok: true,
+            }
         };
     }
+    let ready = match stdin_for(&words, peeled.stdin, pipe) {
+        StdinFor::Ready(text) => text,
+        StdinFor::Failed => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        StdinFor::Unscanned => return Run::Unscanned,
+        StdinFor::Unknown => return Run::Unknown,
+    };
+    mask_stdout(run_builtin(&words, ready.as_deref()), peeled.stdout_lost)
+}
+
+fn mask_stdout(run: Run, stdout_lost: bool) -> Run {
+    if !stdout_lost {
+        return run;
+    }
+    match run {
+        Run::Produced { ok, .. } => Run::Produced {
+            text: String::new(),
+            ok,
+        },
+        other => other,
+    }
+}
+
+fn run_builtin(words: &[String], input: Option<&str>) -> Run {
+    let args = &words[1..];
     match command_basename(&words[0]) {
-        "echo" => match echo_output(&words[1..]) {
-            Some(text) => Printed::Text(text),
-            None => Printed::Unknown,
+        "echo" => match echo_output(args) {
+            Some(text) => Run::Produced { text, ok: true },
+            None => Run::Unknown,
         },
-        "printf" => match printf_stdout(&words[1..]) {
-            Some(text) => Printed::Text(text),
-            None => Printed::Unknown,
+        "printf" => match printf_stdout(args) {
+            Some(text) => Run::Produced { text, ok: true },
+            None => Run::Unknown,
         },
-        "true" | "false" | ":" => Printed::Text(String::new()),
-        "cat" => cat_stdout(&words[1..], stdin),
-        _ => Printed::Unknown,
+        "true" | ":" => Run::Produced {
+            text: String::new(),
+            ok: true,
+        },
+        "false" => Run::Produced {
+            text: String::new(),
+            ok: false,
+        },
+        "cat" => cat_run(args, input),
+        "grep" => grep_run(args, input),
+        "head" => head_run(args, input),
+        _ => Run::Unknown,
     }
 }
 
@@ -5234,8 +5320,45 @@ fn printf_stdout(args: &[String]) -> Option<String> {
     printf_literal(&args[index..])
 }
 
-fn cat_stdout(args: &[String], stdin: Option<&str>) -> Printed {
-    let mut operands: Vec<Option<&str>> = Vec::new();
+fn cat_run(args: &[String], input: Option<&str>) -> Run {
+    let Some(operands) = cat_operands(args) else {
+        return Run::Unknown;
+    };
+    if operands.is_empty() {
+        return match input {
+            Some(text) => Run::Produced {
+                text: text.to_string(),
+                ok: true,
+            },
+            None => Run::Unknown,
+        };
+    }
+    let mut out = String::new();
+    let mut failed = false;
+    for operand in operands {
+        if operand == "-" {
+            let Some(text) = input else {
+                return Run::Unknown;
+            };
+            out.push_str(text);
+            continue;
+        }
+        match path_body(&operand) {
+            PathBody::Text(text) => out.push_str(&text),
+            PathBody::Unscanned => return Run::Unscanned,
+            PathBody::Missing | PathBody::Dir => failed = true,
+            PathBody::Fifo | PathBody::Hang => return Run::Unknown,
+            PathBody::Null => {}
+        }
+    }
+    Run::Produced {
+        text: out,
+        ok: !failed,
+    }
+}
+
+fn cat_operands(args: &[String]) -> Option<Vec<String>> {
+    let mut operands = Vec::new();
     let mut options = true;
     for arg in args {
         if options && arg == "--" {
@@ -5243,42 +5366,623 @@ fn cat_stdout(args: &[String], stdin: Option<&str>) -> Printed {
             continue;
         }
         if options && arg.starts_with('-') && arg != "-" {
-            return Printed::Unknown;
+            return None;
         }
-        if arg == "-" {
-            operands.push(None);
-        } else {
-            operands.push(Some(arg.as_str()));
-        }
+        operands.push(arg.clone());
     }
-    if operands.is_empty() {
-        return match stdin {
-            Some(text) => Printed::Text(text.to_string()),
-            None => Printed::Unknown,
-        };
-    }
-    let mut out = String::new();
-    for operand in operands {
-        match operand {
-            None => {
-                let Some(text) = stdin else {
-                    return Printed::Unknown;
-                };
-                out.push_str(text);
-            }
-            Some(path) => match load_script_file(path) {
-                Some(ScriptFile::Text(text)) => out.push_str(&text),
-                Some(ScriptFile::Unscanned) => return Printed::Unscanned,
-                None => return Printed::Unknown,
-            },
-        }
-    }
-    Printed::Text(out)
+    Some(operands)
 }
 
-fn split_literal_commands(body: &str) -> Option<Vec<String>> {
+fn grep_run(args: &[String], input: Option<&str>) -> Run {
+    let Some(query) = grep_query(args) else {
+        return Run::Unknown;
+    };
+    let source = if let Some(path) = query.file {
+        path_body(&path)
+    } else {
+        match input {
+            Some(text) => PathBody::Text(text.to_string()),
+            None => return Run::Unknown,
+        }
+    };
+    let text = match source {
+        PathBody::Text(text) => text,
+        PathBody::Unscanned => return Run::Unscanned,
+        PathBody::Missing | PathBody::Dir => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        PathBody::Null => String::new(),
+        PathBody::Fifo | PathBody::Hang => return Run::Unknown,
+    };
+    let Some(matched) = grep_lines(&text, &query.pattern, query.fixed) else {
+        return Run::Unknown;
+    };
+    let ok = !matched.is_empty();
+    Run::Produced { text: matched, ok }
+}
+
+struct GrepQuery {
+    pattern: String,
+    fixed: bool,
+    file: Option<String>,
+}
+
+fn grep_query(args: &[String]) -> Option<GrepQuery> {
+    let mut index = 0usize;
+    let mut fixed = false;
+    let mut pattern = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-F" {
+            fixed = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-e" {
+            if pattern.is_some() {
+                return None;
+            }
+            pattern = Some(args.get(index + 1)?.clone());
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if pattern.is_none() {
+        pattern = Some(args.get(index)?.clone());
+        index += 1;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    Some(GrepQuery {
+        pattern: pattern?,
+        fixed,
+        file: args.get(index).cloned(),
+    })
+}
+
+fn grep_lines(text: &str, pattern: &str, fixed: bool) -> Option<String> {
+    let dot = !fixed && pattern == ".";
+    let literal = fixed || literal_pattern(pattern);
+    if !dot && !literal {
+        return None;
+    }
+    let mut out = String::new();
+    for line in text.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        let hit = if dot {
+            !body.is_empty()
+        } else {
+            body.contains(pattern)
+        };
+        if hit {
+            out.push_str(body);
+            out.push('\n');
+        }
+    }
+    Some(out)
+}
+
+fn literal_pattern(pattern: &str) -> bool {
+    pattern.chars().all(|ch| {
+        !matches!(
+            ch,
+            '.' | '^' | '$' | '*' | '+' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '|' | '\\'
+        )
+    })
+}
+
+fn head_run(args: &[String], input: Option<&str>) -> Run {
+    let Some(query) = head_query(args) else {
+        return Run::Unknown;
+    };
+    let source = if let Some(path) = query.file {
+        path_body(&path)
+    } else {
+        match input {
+            Some(text) => PathBody::Text(text.to_string()),
+            None => return Run::Unknown,
+        }
+    };
+    match source {
+        PathBody::Text(text) => Run::Produced {
+            text: first_lines(&text, query.lines),
+            ok: true,
+        },
+        PathBody::Unscanned => Run::Unscanned,
+        PathBody::Missing | PathBody::Dir => Run::Produced {
+            text: String::new(),
+            ok: false,
+        },
+        PathBody::Null => Run::Produced {
+            text: String::new(),
+            ok: true,
+        },
+        PathBody::Fifo | PathBody::Hang => Run::Unknown,
+    }
+}
+
+struct HeadQuery {
+    lines: usize,
+    file: Option<String>,
+}
+
+fn head_query(args: &[String]) -> Option<HeadQuery> {
+    let mut index = 0usize;
+    let mut lines = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-n" {
+            lines = Some(line_count(args.get(index + 1)?)?);
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-n")
+            && !rest.is_empty()
+        {
+            lines = Some(line_count(rest)?);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-') {
+            if !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()) {
+                lines = Some(line_count(rest)?);
+                index += 1;
+                continue;
+            }
+            if !rest.is_empty() {
+                return None;
+            }
+        }
+        break;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    Some(HeadQuery {
+        lines: lines.unwrap_or(10),
+        file: args.get(index).cloned(),
+    })
+}
+
+fn line_count(text: &str) -> Option<usize> {
+    if text.is_empty() || !text.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+fn first_lines(text: &str, count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (index, line) in text.split_inclusive('\n').enumerate() {
+        if index >= count {
+            break;
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+enum StdinFor {
+    Ready(Option<String>),
+    Failed,
+    Unscanned,
+    Unknown,
+}
+
+enum InSrc {
+    Text(String),
+    Unscanned,
+    Error,
+    Eof,
+    Hang,
+}
+
+fn stdin_for(words: &[String], redirect: Option<InSrc>, pipe: Option<&str>) -> StdinFor {
+    if !builtin_reads_stdin(words) {
+        return StdinFor::Ready(None);
+    }
+    if let Some(source) = redirect {
+        return match source {
+            InSrc::Text(text) => StdinFor::Ready(Some(text)),
+            InSrc::Unscanned => StdinFor::Unscanned,
+            InSrc::Error => StdinFor::Failed,
+            InSrc::Eof => StdinFor::Ready(Some(String::new())),
+            InSrc::Hang => StdinFor::Unknown,
+        };
+    }
+    match pipe {
+        Some(text) => StdinFor::Ready(Some(text.to_string())),
+        None => StdinFor::Unknown,
+    }
+}
+
+fn builtin_reads_stdin(words: &[String]) -> bool {
+    let args = &words[1..];
+    match command_basename(&words[0]) {
+        "cat" => {
+            cat_operands(args).is_none_or(|ops| ops.is_empty() || ops.iter().any(|op| op == "-"))
+        }
+        "grep" => grep_query(args).is_none_or(|query| query.file.is_none()),
+        "head" => head_query(args).is_none_or(|query| query.file.is_none()),
+        _ => false,
+    }
+}
+
+struct Peeled {
+    command: String,
+    stdin: Option<InSrc>,
+    stdout_lost: bool,
+    cancelled: bool,
+    blocked: bool,
+}
+
+fn peel_redirects(stage: &str) -> Option<Peeled> {
+    let chars: Vec<char> = stage.chars().collect();
+    let mut kept = String::new();
+    let mut index = 0usize;
+    let mut quote: Option<char> = None;
+    let mut word_start = true;
+    let mut fd_digits: Option<String> = Some(String::new());
+    let mut state = RedirState {
+        stdin: None,
+        saw_stdin: false,
+        stdout_lost: false,
+        cancelled: false,
+        blocked: false,
+    };
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(open) = quote {
+            fd_digits = None;
+            if open == '"' && ch == '\\' {
+                kept.push(ch);
+                index += 1;
+                if index < chars.len() {
+                    kept.push(chars[index]);
+                    index += 1;
+                }
+                continue;
+            }
+            kept.push(ch);
+            if ch == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        if ch == '#' && word_start {
+            break;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                word_start = false;
+                fd_digits = None;
+                kept.push(ch);
+                index += 1;
+            }
+            '\\' => {
+                word_start = false;
+                fd_digits = None;
+                kept.push(ch);
+                index += 1;
+                if index < chars.len() {
+                    kept.push(chars[index]);
+                    index += 1;
+                }
+            }
+            ' ' | '\t' | '\n' | '\r' => {
+                word_start = true;
+                fd_digits = Some(String::new());
+                kept.push(ch);
+                index += 1;
+            }
+            '<' | '>' | '&' => {
+                let fd = take_fd(&mut fd_digits, &mut kept)?;
+                apply_redirect(&chars, &mut index, fd, &mut state)?;
+                word_start = true;
+                fd_digits = Some(String::new());
+            }
+            _ => {
+                word_start = false;
+                if let Some(digits) = fd_digits.as_mut() {
+                    if ch.is_ascii_digit() {
+                        digits.push(ch);
+                    } else {
+                        fd_digits = None;
+                    }
+                }
+                kept.push(ch);
+                index += 1;
+            }
+        }
+    }
+    Some(Peeled {
+        command: kept,
+        stdin: state.stdin,
+        stdout_lost: state.stdout_lost,
+        cancelled: state.cancelled,
+        blocked: state.blocked,
+    })
+}
+
+struct RedirState {
+    stdin: Option<InSrc>,
+    saw_stdin: bool,
+    stdout_lost: bool,
+    cancelled: bool,
+    blocked: bool,
+}
+
+fn take_fd(fd_digits: &mut Option<String>, kept: &mut String) -> Option<Option<i32>> {
+    let Some(digits) = fd_digits.as_ref() else {
+        return Some(None);
+    };
+    if digits.is_empty() {
+        return Some(None);
+    }
+    let fd = digits.parse().ok()?;
+    kept.truncate(kept.len().saturating_sub(digits.len()));
+    Some(Some(fd))
+}
+
+fn apply_redirect(
+    chars: &[char],
+    index: &mut usize,
+    fd: Option<i32>,
+    state: &mut RedirState,
+) -> Option<()> {
+    match chars.get(*index)? {
+        '&' => {
+            if chars.get(*index + 1) != Some(&'>') {
+                return None;
+            }
+            *index += 2;
+            if chars.get(*index) == Some(&'>') {
+                *index += 1;
+            }
+            let target = redirect_word(chars, index)?;
+            note_output(&target, true, state);
+            Some(())
+        }
+        '<' => {
+            if matches!(chars.get(*index + 1), Some('<' | '(' | '&' | '>')) {
+                return None;
+            }
+            *index += 1;
+            let target = redirect_word(chars, index)?;
+            if fd.unwrap_or(0) == 0 {
+                if state.saw_stdin {
+                    return None;
+                }
+                state.saw_stdin = true;
+                match classify_input(&target) {
+                    InputClass::Cancel => state.cancelled = true,
+                    InputClass::Block => state.blocked = true,
+                    InputClass::Src(source) => state.stdin = Some(source),
+                }
+            } else {
+                note_read_open(&target, state);
+            }
+            Some(())
+        }
+        '>' => {
+            *index += 1;
+            if chars.get(*index) == Some(&'>') || chars.get(*index) == Some(&'|') {
+                *index += 1;
+                let target = redirect_word(chars, index)?;
+                note_output(&target, fd.unwrap_or(1) == 1, state);
+                return Some(());
+            }
+            if chars.get(*index) == Some(&'&') {
+                *index += 1;
+                let target = redirect_word(chars, index)?;
+                if !target.chars().all(|ch| ch.is_ascii_digit()) {
+                    return None;
+                }
+                let dest: i32 = target.parse().ok()?;
+                if fd.unwrap_or(1) == 1 && dest != 1 {
+                    state.stdout_lost = true;
+                }
+                return Some(());
+            }
+            let target = redirect_word(chars, index)?;
+            note_output(&target, fd.unwrap_or(1) == 1, state);
+            Some(())
+        }
+        _ => None,
+    }
+}
+
+fn redirect_word(chars: &[char], index: &mut usize) -> Option<String> {
+    while matches!(chars.get(*index), Some(' ' | '\t')) {
+        *index += 1;
+    }
+    let start = *index;
+    while *index < chars.len() {
+        let ch = chars[*index];
+        if matches!(
+            ch,
+            ' ' | '\t' | '\n' | '\r' | '|' | '&' | '<' | '>' | ';' | '#'
+        ) {
+            break;
+        }
+        if matches!(
+            ch,
+            '\'' | '"' | '\\' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')'
+        ) {
+            return None;
+        }
+        *index += 1;
+    }
+    if *index == start {
+        return None;
+    }
+    Some(chars[start..*index].iter().collect())
+}
+
+enum InputClass {
+    Cancel,
+    Block,
+    Src(InSrc),
+}
+
+fn classify_input(path: &str) -> InputClass {
+    match path_body(path) {
+        PathBody::Missing => InputClass::Cancel,
+        PathBody::Fifo => InputClass::Block,
+        PathBody::Dir => InputClass::Src(InSrc::Error),
+        PathBody::Text(text) => InputClass::Src(InSrc::Text(text)),
+        PathBody::Unscanned => InputClass::Src(InSrc::Unscanned),
+        PathBody::Null => InputClass::Src(InSrc::Eof),
+        PathBody::Hang => InputClass::Src(InSrc::Hang),
+    }
+}
+
+fn note_output(path: &str, lose_stdout: bool, state: &mut RedirState) {
+    match output_open(path) {
+        OpenCheck::Ok => {
+            if lose_stdout {
+                state.stdout_lost = true;
+            }
+        }
+        OpenCheck::Fail => state.cancelled = true,
+        OpenCheck::Block => state.blocked = true,
+    }
+}
+
+fn note_read_open(path: &str, state: &mut RedirState) {
+    match read_open(path) {
+        OpenCheck::Ok => {}
+        OpenCheck::Fail => state.cancelled = true,
+        OpenCheck::Block => state.blocked = true,
+    }
+}
+
+enum OpenCheck {
+    Ok,
+    Fail,
+    Block,
+}
+
+fn output_open(path: &str) -> OpenCheck {
+    match std::fs::metadata(path) {
+        Ok(meta) if metadata_is_fifo(&meta) => OpenCheck::Block,
+        Ok(meta) if meta.is_dir() => OpenCheck::Fail,
+        Ok(_) => OpenCheck::Ok,
+        Err(_) => {
+            if parent_is_dir(path) {
+                OpenCheck::Ok
+            } else {
+                OpenCheck::Fail
+            }
+        }
+    }
+}
+
+fn read_open(path: &str) -> OpenCheck {
+    match std::fs::metadata(path) {
+        Err(_) => OpenCheck::Fail,
+        Ok(meta) if metadata_is_fifo(&meta) => OpenCheck::Block,
+        Ok(_) => OpenCheck::Ok,
+    }
+}
+
+fn parent_is_dir(path: &str) -> bool {
+    match std::path::Path::new(path).parent() {
+        None => false,
+        Some(parent) if parent.as_os_str().is_empty() => true,
+        Some(parent) => parent.is_dir(),
+    }
+}
+
+enum PathBody {
+    Text(String),
+    Unscanned,
+    Missing,
+    Dir,
+    Fifo,
+    Null,
+    Hang,
+}
+
+fn path_body(path: &str) -> PathBody {
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(_) => return PathBody::Missing,
+    };
+    if meta.is_dir() {
+        return PathBody::Dir;
+    }
+    if metadata_is_fifo(&meta) {
+        return PathBody::Fifo;
+    }
+    if meta.is_file() {
+        return match load_script_file(path) {
+            Some(ScriptFile::Text(text)) => PathBody::Text(text),
+            Some(ScriptFile::Unscanned) => PathBody::Unscanned,
+            None => PathBody::Missing,
+        };
+    }
+    match read_immediate(path) {
+        Immediate::Eof => PathBody::Null,
+        Immediate::Data | Immediate::Block => PathBody::Hang,
+    }
+}
+
+enum Immediate {
+    Eof,
+    Data,
+    Block,
+}
+
+fn read_immediate(path: &str) -> Immediate {
+    let Some(mut file) = open_script_candidate(path) else {
+        return Immediate::Block;
+    };
+    let mut buf = [0u8; 1];
+    match std::io::Read::read(&mut file, &mut buf) {
+        Ok(0) => Immediate::Eof,
+        Ok(_) => Immediate::Data,
+        Err(_) => Immediate::Block,
+    }
+}
+
+fn metadata_is_fifo(meta: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        meta.file_type().is_fifo()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
+fn split_list(body: &str) -> Option<Vec<Piece>> {
     let chars: Vec<char> = body.chars().collect();
-    let mut commands = Vec::new();
+    let mut pieces = Vec::new();
     let mut start = 0usize;
     let mut index = 0usize;
     let mut quote: Option<char> = None;
@@ -5323,18 +6027,36 @@ fn split_literal_commands(body: &str) -> Option<Vec<String>> {
                 }
             }
             ';' | '\n' => {
-                commands.push(chars[start..index].iter().collect());
+                let command = chars[start..index].iter().collect();
+                push_piece(&mut pieces, command, Join::Semi)?;
                 index += 1;
                 start = index;
                 word_start = true;
             }
-            // A single `|` stays inside this command. The pipeline's
-            // stdout is the last stage, not every stage joined.
-            '|' if chars.get(index + 1) != Some(&'|') => {
+            '|' if chars.get(index + 1) == Some(&'|') => {
+                let command = chars[start..index].iter().collect();
+                push_piece(&mut pieces, command, Join::Or)?;
+                index += 2;
+                start = index;
+                word_start = true;
+            }
+            '|' if chars.get(index + 1) == Some(&'&') => return None,
+            '|' => {
                 word_start = true;
                 index += 1;
             }
-            '|' | '&' | '<' | '>' => return None,
+            '&' if chars.get(index + 1) == Some(&'&') => {
+                let command = chars[start..index].iter().collect();
+                push_piece(&mut pieces, command, Join::And)?;
+                index += 2;
+                start = index;
+                word_start = true;
+            }
+            '&' if chars.get(index + 1) == Some(&'>') => {
+                word_start = false;
+                index += 1;
+            }
+            '&' => return None,
             '$' if chars.get(index + 1) == Some(&'(') => {
                 word_start = false;
                 index = skip_command_subst(&chars, index)?;
@@ -5350,8 +6072,21 @@ fn split_literal_commands(body: &str) -> Option<Vec<String>> {
             }
         }
     }
-    commands.push(chars[start..].iter().collect());
-    Some(commands)
+    let command = chars[start..].iter().collect();
+    push_piece(&mut pieces, command, Join::Semi)?;
+    Some(pieces)
+}
+
+fn push_piece(pieces: &mut Vec<Piece>, command: String, next: Join) -> Option<()> {
+    let blank = command.trim_matches([' ', '\t', '\r']).is_empty();
+    let prev_logical = pieces
+        .last()
+        .is_some_and(|piece| matches!(piece.next, Join::And | Join::Or));
+    if blank && (prev_logical || matches!(next, Join::And | Join::Or)) {
+        return None;
+    }
+    pieces.push(Piece { command, next });
+    Some(())
 }
 
 fn skip_command_subst(chars: &[char], start: usize) -> Option<usize> {
@@ -7115,6 +7850,20 @@ mod tests {
             "f() { read x <<< 'git push origin main'; }; f; eval \"$x\"",
             "read x <<EOF\ngit push origin main\nEOF\neval \"$x\"",
             "read x <<'EOF'\ngit push origin main\nEOF\neval \"$x\"",
+            "eval \"$(echo 'git push origin main' && true)\"",
+            "eval \"$(echo 'git push origin main' && git status)\"",
+            "eval \"$(echo 'git push origin main' && false)\"",
+            "eval \"$(echo 'git push origin main' || true)\"",
+            "eval \"$(echo 'git push origin main' || git status)\"",
+            "eval \"$(false || echo 'git push origin main')\"",
+            "eval \"$(git status && echo 'git push origin main')\"",
+            "eval \"$(git status || echo 'git push origin main')\"",
+            "eval \"$(echo 'git push origin main && true')\"",
+            "eval \"$(echo 'git push origin main' | head -n 1)\"",
+            "eval \"$(echo 'git push origin main' | grep .)\"",
+            "eval \"$(echo 'git push origin main' < /dev/null)\"",
+            "eval \"$(echo 'git push origin main' 2>/dev/null)\"",
+            "eval \"$(echo hidden > /dev/null && echo 'git push origin main')\"",
         ];
         for command in push {
             let want = if command.contains("rm -rf") {
@@ -7166,6 +7915,12 @@ mod tests {
             "(read x <<< 'git push origin main'); eval \"$x\"",
             "f() { local x; printf -v x '%s' 'git push origin main'; }; f; eval \"$x\"",
             "f() { local x; read x <<< 'git push origin main'; }; f; eval \"$x\"",
+            "eval \"$(false && echo 'git push origin main')\"",
+            "eval \"$(echo safe || echo 'git push origin main')\"",
+            "eval \"$(echo 'git push origin main' > /dev/null)\"",
+            "eval \"$(echo 'git push origin main' >&2)\"",
+            "eval \"$(echo 'git push origin main'2>/dev/null)\"",
+            "eval \"$(echo 'git push origin main' &&)\"",
         ];
         for command in neither {
             assert!(
@@ -8151,8 +8906,15 @@ mod tests {
         let assign_s = plain_script_path(&assign);
         let big_s = plain_script_path(&big);
         let missing = dir.join(format!("snapif-c29-missing-{pid}.sh"));
+        let missing2 = dir.join(format!("snapif-c29-missing2-{pid}.sh"));
         let _ = std::fs::remove_file(&missing);
+        let _ = std::fs::remove_file(&missing2);
         let missing_s = plain_script_path(&missing);
+        let missing2_s = plain_script_path(&missing2);
+        let sub = dir.join(format!("snapif-c29-dir-{pid}"));
+        let _ = std::fs::remove_dir(&sub);
+        std::fs::create_dir(&sub).expect("dir");
+        let sub_s = plain_script_path(&sub);
 
         let positives = [
             format!("source {push_s}"),
@@ -8171,6 +8933,23 @@ mod tests {
             format!("x=$(<{push_s}); eval \"$x\""),
             format!("eval \"$(<{push_s})\""),
             format!("$(cat {push_s})"),
+            format!("eval \"$(cat {push_s} {missing_s})\""),
+            format!("eval \"$(cat {missing_s} {push_s})\""),
+            format!("eval \"$(cat < {push_s})\""),
+            format!("eval \"$(cat < {push_s} | cat)\""),
+            format!("eval \"$(grep . {push_s})\""),
+            format!("eval \"$(grep . {push_s} | cat)\""),
+            format!("eval \"$(grep git {push_s})\""),
+            format!("eval \"$(grep 'push origin' {push_s})\""),
+            format!("eval \"$(head -n 1 {push_s})\""),
+            format!("eval \"$(head -n1 {push_s})\""),
+            format!("eval \"$(head -1 {push_s})\""),
+            format!("eval \"$(head {push_s})\""),
+            format!("eval \"$(head -n 1 {push_s} | cat)\""),
+            format!("eval \"$(cat {push_s} /dev/null)\""),
+            format!("eval \"$(cat {missing_s} || echo 'git push origin main')\""),
+            format!("eval \"$(cat {push_s} < {sub_s})\""),
+            format!("eval \"$(echo 'git push origin main' < {sub_s})\""),
         ];
         for command in &positives {
             assert_eq!(
@@ -8184,6 +8963,9 @@ mod tests {
             format!("source {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
+            format!("eval \"$(cat {big_s} {push_s})\""),
+            format!("eval \"$(cat {push_s} {big_s})\""),
+            format!("eval \"$(cat < {big_s})\""),
         ] {
             assert_eq!(
                 matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
@@ -8212,6 +8994,14 @@ mod tests {
             format!("eval \"$(cat {push_s} | true)\""),
             "eval \"$(cat /dev/zero)\"".to_string(),
             "x=$(</dev/zero); eval \"$x\"".to_string(),
+            format!("eval \"$(cat < {missing_s})\""),
+            format!("eval \"$(cat {push_s} < {missing_s})\""),
+            format!("eval \"$(grep . {missing_s})\""),
+            format!("eval \"$(head -n 1 {missing_s})\""),
+            format!("eval \"$(cat {push_s} /dev/zero)\""),
+            format!("eval \"$(cat {missing_s} {missing2_s})\""),
+            format!("eval \"$(cat < {sub_s})\""),
+            format!("eval \"$(head -n 0 {push_s})\""),
         ];
         for command in &neithers {
             assert!(
@@ -8240,6 +9030,8 @@ mod tests {
                 format!("source {link_s}"),
                 format!("eval \"$(cat {fifo_s})\""),
                 format!("x=$(<{fifo_s}); eval \"$x\""),
+                format!("eval \"$(cat < {fifo_s})\""),
+                format!("eval \"$(echo 'git push origin main' < {fifo_s})\""),
             ] {
                 assert!(
                     matched_action(&policy, "Bash", Some(&command)).is_none(),
@@ -8252,6 +9044,7 @@ mod tests {
         for path in [&push, &echo, &assign, &big] {
             let _ = std::fs::remove_file(path);
         }
+        let _ = std::fs::remove_dir(&sub);
     }
 
     fn plain_script_path(path: &std::path::Path) -> String {
