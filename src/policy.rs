@@ -454,7 +454,7 @@ fn check_action(
 /// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
 /// line. `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 /// `perl -pe 'print'` prints it too, unless the script clears `$_`.
-/// `perl -0777 -pe ''` still prints the file.
+/// `perl -0777 -pe ''` still prints the file. `perl -lpe ''` prints it too.
 /// `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
@@ -463,7 +463,7 @@ fn check_action(
 /// same `sed`. A python one-liner that writes `open(sys.argv[1]).read()`,
 /// or prints that read with `end=""`,
 /// a node one-liner that writes `readFileSync`, `ruby -e` that prints
-/// `File.read`, `ruby -e` that `puts` that read, and `php -r` that echoes
+/// `File.read`, `IO.read`, `ruby -e` that `puts` that read, and `php -r` that echoes
 /// or prints `file_get_contents` print the file. A node one-liner that
 /// `console.log`s `readFileSync` prints it too.
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
@@ -8751,6 +8751,29 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
+        if arg == "-l" {
+            index += 1;
+            continue;
+        }
+        if let Some(flags) = arg.strip_prefix('-')
+            && flags.len() > 1
+            && flags.chars().all(|ch| matches!(ch, 'l' | 'n' | 'p' | 'e'))
+            && flags.contains('e')
+        {
+            if flags.contains('p') {
+                print_lines = true;
+            }
+            if flags.contains('n') {
+                loop_lines = true;
+            }
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
         if arg == "-ne" || arg == "-en" {
             loop_lines = true;
             index += 1;
@@ -8830,7 +8853,11 @@ fn ruby_reads_argv0(script: &str) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
     matches!(
         compact.as_str(),
-        "printFile.read(ARGV[0])" | "putsFile.read(ARGV[0])" | "system(File.read(ARGV[0]))"
+        "printFile.read(ARGV[0])"
+            | "putsFile.read(ARGV[0])"
+            | "printIO.read(ARGV[0])"
+            | "putsIO.read(ARGV[0])"
+            | "system(File.read(ARGV[0]))"
     )
 }
 
@@ -8885,6 +8912,7 @@ fn python_reads_argv1(script: &str) -> bool {
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
             | "importsys;print(open(sys.argv[1]).read())"
+            | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
     )
@@ -12723,9 +12751,17 @@ mod tests {
             format!("eval \"$(perl -pe '2' {push_s})\""),
             format!("eval \"$(perl -0777 -pe '' {push_s})\""),
             format!("eval \"$(perl -0 -pe '' {push_s})\""),
+            format!("eval \"$(perl -lpe '' {push_s})\""),
+            format!("eval \"$(perl -l -pe '' {push_s})\""),
+            format!("eval \"$(ruby -nle 'print' {push_s})\""),
             format!("eval \"$(perl -0777 -ne 'print' {push_s})\""),
             format!("eval \"$(ruby -pe 'print' {push_s})\""),
             format!("eval \"$(ruby -e 'puts File.read(ARGV[0])' {push_s})\""),
+            format!("eval \"$(ruby -e 'print IO.read(ARGV[0])' {push_s})\""),
+            format!("eval \"$(ruby -e 'puts IO.read(ARGV[0])' {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).read_text())' {push_s})\""
+            ),
             format!(
                 "eval \"$(node -e 'console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
             ),
@@ -13043,6 +13079,12 @@ mod tests {
             format!("eval \"$(perl -p {push_s})\""),
             format!("eval \"$(ruby -p {push_s})\""),
             format!("eval \"$(ruby -e 'puts File.read(ARGV[0])' {echo_s})\""),
+            format!("eval \"$(perl -lpe '' {echo_s})\""),
+            format!("eval \"$(ruby -nle 'print' {echo_s})\""),
+            format!("eval \"$(ruby -e 'puts IO.read(ARGV[0])' {echo_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).read_text())' {echo_s})\""
+            ),
             format!(
                 "eval \"$(node -e 'console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {echo_s})\""
             ),
