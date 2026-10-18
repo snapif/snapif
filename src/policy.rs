@@ -444,7 +444,8 @@ fn check_action(
 /// that contains `git`. `gawk` is that same `awk`.
 /// `awk 'gsub(/git/,"git")'` prints that line too. `awk '{printf "%s\n", $0}'`
 /// prints each line. `awk 'END {print}'` prints the last line. `head -c`
-/// of a short file prints that file. `tail -c +1` prints it too. Without `-n`,
+/// of a short file prints that file. `tail -c +1` prints it too.
+/// `cat -u` still prints the file. `stdbuf -o0 cat` prints it too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -468,7 +469,8 @@ fn check_action(
 /// same `sed`. A python one-liner that writes `open(sys.argv[1]).read()`,
 /// or prints that read with `end=""`,
 /// a node one-liner that writes `readFileSync`, `ruby -e` that prints
-/// `File.read`, `IO.read`, `ruby -e` that `puts` that read, and `php -r` that echoes
+/// `File.read`, `IO.read`, or `ARGF.read`, `ruby -e` that `puts` that read,
+/// and `php -r` that echoes
 /// or prints `file_get_contents` print the file. A node one-liner that
 /// `console.log`s `readFileSync` prints it too.
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
@@ -5976,6 +5978,7 @@ fn run_builtin(
             ok: false,
         },
         "cat" => cat_run(args, input, depth, substitutions),
+        "stdbuf" => stdbuf_run(args, input, depth, substitutions),
         "tee" => tee_run(args, input),
         "tr" => tr_run(args, input),
         "iconv" => iconv_run(args, input, depth, substitutions),
@@ -6063,6 +6066,59 @@ fn cat_run(
     }
 }
 
+fn stdbuf_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(command) = stdbuf_command(args) else {
+        return Run::Unknown;
+    };
+    run_builtin(command, input, depth, substitutions)
+}
+
+fn stdbuf_command(args: &[String]) -> Option<&[String]> {
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(arg, "-i" | "-o" | "-e" | "--input" | "--output" | "--error") {
+            index += 2;
+            if index > args.len() {
+                return None;
+            }
+            continue;
+        }
+        if let Some((name, _)) = arg.split_once('=')
+            && matches!(name, "--input" | "--output" | "--error")
+        {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = ["-i", "-o", "-e"]
+            .iter()
+            .find_map(|prefix| arg.strip_prefix(prefix))
+            && !rest.is_empty()
+            && rest.chars().all(|ch| ch.is_ascii_digit() || ch == 'L')
+        {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if index >= args.len() {
+        return None;
+    }
+    Some(&args[index..])
+}
+
 fn cat_operands(args: &[String]) -> Option<Vec<String>> {
     let mut operands = Vec::new();
     let mut options = true;
@@ -6082,7 +6138,7 @@ fn cat_operands(args: &[String]) -> Option<Vec<String>> {
             // `-n` and `-b` number the line, so it is no longer the command.
             // `-v`, `-e`, `-E`, `-t`, `-T`, `-s`, and `-A` still print it.
             for ch in arg.chars().skip(1) {
-                if !matches!(ch, 'v' | 'e' | 'E' | 't' | 'T' | 's' | 'A') {
+                if !matches!(ch, 'u' | 'v' | 'e' | 'E' | 't' | 'T' | 's' | 'A') {
                     return None;
                 }
             }
@@ -9089,6 +9145,8 @@ fn ruby_reads_argv0(script: &str) -> bool {
         "printFile.read(ARGV[0])"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
+            | "printARGF.read"
+            | "putsARGF.read"
             | "putsIO.read(ARGV[0])"
             | "STDOUT.writeIO.read(ARGV[0])"
             | "IO.copy_stream(ARGV[0],STDOUT)"
@@ -9424,6 +9482,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "cat" => {
             cat_operands(args).is_none_or(|ops| ops.is_empty() || ops.iter().any(|op| op == "-"))
         }
+        "stdbuf" => stdbuf_command(args).is_some_and(builtin_reads_stdin),
         "tee" | "tr" => true,
         "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
         "dd" => dd_query(args).is_none_or(|query| query.is_none()),
@@ -11801,6 +11860,8 @@ mod tests {
             "eval \"$(echo 'git push origin main' | cat)\"",
             "eval \"$(echo -n 'git push origin main' | cat)\"",
             "eval \"$(echo 'git push origin main' | cat | cat)\"",
+            "eval \"$(echo 'git push origin main' | stdbuf -o0 cat)\"",
+            "eval \"$(printf '%s\\n' 'git push origin main' | stdbuf -oL cat)\"",
             "eval \"$(echo 'rm -rf /tmp/x' | cat)\"",
             "$(echo 'rm -rf /tmp/x' | cat)",
             "printf -v x '%s' 'git push origin main'; eval \"$x\"",
@@ -11901,6 +11962,7 @@ mod tests {
             "eval $(printf 'echo a\\ngit push origin main')",
             "eval \"$(echo 'git push origin main' | true)\"",
             "eval \"$(echo 'git push origin main' | echo safe)\"",
+            "eval \"$(echo hello | stdbuf -o0 cat)\"",
             "eval \"$(printf -v x '%s' 'git push origin main')\"",
             "echo \"$(printf -v x '%s' 'git push origin main')\"",
             "printf -v x '%s' 'echo hello'; eval \"$x\"",
@@ -13108,6 +13170,11 @@ mod tests {
             format!("eval \"$(grep --basic-regexp . {push_s})\""),
             format!("eval \"$(head -n 1 {push_s})\""),
             format!("eval \"$(head -c 100000 {push_s})\""),
+            format!("eval \"$(cat -u {push_s})\""),
+            format!("eval \"$(stdbuf -o0 cat {push_s})\""),
+            format!("eval \"$(stdbuf -oL cat {push_s})\""),
+            format!("eval \"$(ruby -e 'print ARGF.read' {push_s})\""),
+            format!("eval \"$(ruby -e 'puts ARGF.read' {push_s})\""),
             format!("eval \"$(tail -c +1 {push_s})\""),
             format!("eval \"$(tail -c 100 {push_s})\""),
             format!("eval \"$(ruby -e 'IO.copy_stream(ARGV[0], STDOUT)' {push_s})\""),
@@ -13322,6 +13389,9 @@ mod tests {
             format!("eval \"$(head -n 0 {push_s})\""),
             format!("eval \"$(head -c 3 {push_s})\""),
             format!("eval \"$(head -c 100000 {echo_s})\""),
+            format!("eval \"$(cat -u {echo_s})\""),
+            format!("eval \"$(stdbuf -o0 cat {echo_s})\""),
+            format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
             format!("eval \"$(tail -c 3 {push_s})\""),
             format!("eval \"$(tail -c +5 {push_s})\""),
             format!("eval \"$(tail -c +1 {echo_s})\""),
