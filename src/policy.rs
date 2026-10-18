@@ -365,7 +365,14 @@ fn check_action(
 /// followed by a null and `dir` stays `rmdir`. `$'rm'` and `$"rm"`
 /// match too, because bash runs those words as `rm`. An ANSI-C null
 /// ends that word (`$'rm\x00dir'` is `rm`). `echo $'rm'` does not match.
-/// `exec rm` and `eval 'rm ...'` match. `exec -a rm echo` and
+/// `exec rm` and `eval 'rm ...'` match. `trap 'rm ...' EXIT` and
+/// `trap rm EXIT` match too, because bash runs that action when the
+/// signal arrives. The builtin is only the word `trap`. `TRAP`,
+/// `/bin/trap`, and `sudo trap` do not run it. Keyword `time trap`
+/// does. `command time trap` does not, because `command` runs the
+/// `time` program. A signal bash rejects (`SIGEXIT`, `64`) does not
+/// match unless another word is a real signal. `trap - EXIT`,
+/// `trap '' EXIT`, `trap EXIT`, and `trap -p` do not. `exec -a rm echo` and
 /// `eval echo` do not. `if`, `then`, `else`, `elif`, `do`, `while`,
 /// `until`, `!`, `{`, and `(` are skipped, so `if true; then rm`,
 /// `{ rm; }`, and `(rm)` match. `for`
@@ -644,6 +651,12 @@ fn consider_segment<'a>(
         scan_isolated(policy, tool_name, &remotes, depth, local, git, best);
         let arms = case_arm_scripts(&executed.argv);
         scan_isolated(policy, tool_name, &arms, depth, local, git, best);
+        let traps = if executed.blocks_shell_builtin {
+            Vec::new()
+        } else {
+            trap_scripts(&executed.argv)
+        };
+        scan_isolated(policy, tool_name, &traps, depth, local, git, best);
         let found = git_alias_scripts(&executed.argv, local, git);
         scan_isolated(policy, tool_name, &found.commands, depth, local, git, best);
         for body in &found.shells {
@@ -1550,6 +1563,9 @@ struct ExecutedArgv {
     /// `command` or `builtin` was peeled, so a shell function of the
     /// same name does not run.
     bypass_function: bool,
+    /// A peeled wrapper execs a file, so `trap` is not the builtin.
+    /// Keyword `time` stays false. `command time` becomes true.
+    blocks_shell_builtin: bool,
 }
 
 fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<ExecutedArgv> {
@@ -1558,6 +1574,8 @@ fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<Ex
     let mut env = inherited.to_vec();
     let mut exec_wrapper = false;
     let mut bypass_function = false;
+    let mut blocks_shell_builtin = false;
+    let mut saw_command_or_builtin = false;
     let mut allow_assign = true;
     while index < tokens.len() {
         if allow_assign
@@ -1579,10 +1597,17 @@ fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<Ex
             index += 1;
             continue;
         }
-        let lowered = command_basename(&tokens[index]).to_ascii_lowercase();
+        let raw = tokens[index].as_str();
+        let lowered = command_basename(raw).to_ascii_lowercase();
         let base = gnu_alias(&lowered);
         if !is_wrapper(base) {
             break;
+        }
+        if !shell_builtin_wrapper(raw, saw_command_or_builtin) {
+            blocks_shell_builtin = true;
+        }
+        if matches!(raw, "command" | "builtin") {
+            saw_command_or_builtin = true;
         }
         index += 1;
         if !runs_in_parent(base) {
@@ -1598,6 +1623,7 @@ fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<Ex
                 env,
                 exec_wrapper,
                 bypass_function,
+                blocks_shell_builtin,
             });
         };
         if next == start {
@@ -1625,7 +1651,15 @@ fn executed_argv(tokens: &[String], inherited: &[(String, String)]) -> Option<Ex
         env,
         exec_wrapper,
         bypass_function,
+        blocks_shell_builtin,
     })
+}
+
+/// `command` and `builtin` run the next builtin in this shell. Keyword
+/// `time` does too, until one of those has forced the next word to be a
+/// program. `command time` is `/usr/bin/time`, which cannot run `trap`.
+fn shell_builtin_wrapper(token: &str, command_or_builtin_seen: bool) -> bool {
+    matches!(token, "command" | "builtin") || (token == "time" && !command_or_builtin_seen)
 }
 
 fn runs_in_parent(wrapper: &str) -> bool {
@@ -2257,6 +2291,97 @@ fn ps_name_takes_value(name: &str, base: &str) -> bool {
         return false;
     }
     !("command".starts_with(&name) || "encodedcommand".starts_with(&name))
+}
+
+/// Bash runs this builtin only for the word `trap`. The action is a
+/// script when at least one later word is a signal it accepts. A bad
+/// word beside a good one still runs. One word is a reset (`trap EXIT`).
+/// `-` and `''` clear or ignore. `-l`, `-p`, and `-P` only print.
+fn trap_scripts(tokens: &[String]) -> Vec<String> {
+    if tokens.first().map(String::as_str) != Some("trap") {
+        return Vec::new();
+    }
+    let mut index = 1;
+    let mut query = false;
+    while index < tokens.len() {
+        let token = tokens[index].as_str();
+        if token == "--" {
+            index += 1;
+            break;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && flags.chars().all(|ch| matches!(ch, 'l' | 'p' | 'P'))
+        {
+            query = true;
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if query || index + 1 >= tokens.len() {
+        return Vec::new();
+    }
+    let action = &tokens[index];
+    if action.is_empty() || action == "-" {
+        return Vec::new();
+    }
+    if !tokens[index + 1..].iter().any(|word| is_trap_spec(word)) {
+        return Vec::new();
+    }
+    vec![action.clone()]
+}
+
+/// `EXIT`, `DEBUG`, `ERR`, and `RETURN` are not `trap -l` names, and a
+/// `SIG` prefix does not make them valid (`SIGEXIT` is rejected).
+fn matches_trap_special(word: &str) -> bool {
+    word.eq_ignore_ascii_case("exit")
+        || word.eq_ignore_ascii_case("debug")
+        || word.eq_ignore_ascii_case("err")
+        || word.eq_ignore_ascii_case("return")
+}
+
+fn sig_suffix(word: &str) -> Option<&str> {
+    let head = word.get(..3)?;
+    if !head.eq_ignore_ascii_case("sig") {
+        return None;
+    }
+    let body = word.get(3..)?;
+    if body.is_empty() { None } else { Some(body) }
+}
+
+/// Names from `trap -l` on bash 5.3, without the `SIG` prefix. `KILL`
+/// and `STOP` still install a handler. `PWR` and `RTMIN` are not in
+/// this list.
+const TRAP_SIGNAL_NAMES: &[&str] = &[
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "EMT", "FPE", "KILL", "BUS", "SEGV", "SYS",
+    "PIPE", "ALRM", "TERM", "URG", "STOP", "TSTP", "CONT", "CHLD", "TTIN", "TTOU", "IO", "XCPU",
+    "XFSZ", "VTALRM", "PROF", "WINCH", "INFO", "USR1", "USR2",
+];
+
+fn is_trap_spec(word: &str) -> bool {
+    if matches_trap_special(word) {
+        return true;
+    }
+    let name = match sig_suffix(word) {
+        Some(body) if !matches_trap_special(body) => body,
+        Some(_) => return false,
+        None => word,
+    };
+    TRAP_SIGNAL_NAMES
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        || is_trap_number(word)
+}
+
+/// `0` through `31`, the numbers this bash accepts. A leading `+` is
+/// still a number (`+15` is `SIGTERM`). `+32` and `64` are not.
+fn is_trap_number(word: &str) -> bool {
+    let digits = word.strip_prefix('+').unwrap_or(word);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    digits.parse::<u32>().is_ok_and(|number| number <= 31)
 }
 
 fn case_arm_scripts(tokens: &[String]) -> Vec<String> {
@@ -5038,6 +5163,86 @@ mod tests {
             .is_none(),
             "bash -c does not read the heredoc"
         );
+    }
+
+    /// Bash runs the trap action when the signal arrives. The builtin is
+    /// the word `trap` only. `trap EXIT` resets that signal, and `-p`
+    /// only prints. A signal this bash rejects does not run the action
+    /// unless another word is a real signal.
+    #[test]
+    fn trap_action_matches_the_command_it_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let matched = [
+            ("trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("trap $'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' EXIT INT", "bash.rm"),
+            ("trap rm EXIT", "bash.rm"),
+            ("trap -- 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' 0", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' 000", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' +15", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' 31", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' exit", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' SIGINT", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' NOTASIGNAL EXIT", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' -rf EXIT", "bash.rm"),
+            ("trap 'rm -rf /tmp/x' EXIT; echo ok", "bash.rm"),
+            ("command trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("command -p trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("builtin trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("FOO=1 trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("time trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("time -p trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("git push origin main; trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
+            ("trap 'git push origin main' EXIT", "git.push"),
+        ];
+        for (command, expected) in matched {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some(expected),
+                "{command:?}"
+            );
+        }
+        let quiet = [
+            "trap 'echo ok' EXIT",
+            "trap - EXIT",
+            "trap -- - EXIT",
+            "trap '' EXIT",
+            "trap EXIT",
+            "trap rm",
+            "trap -p",
+            "trap -p EXIT",
+            "trap -p 'rm -rf /tmp/x' EXIT",
+            "trap -l",
+            "trap -P EXIT",
+            "echo ok",
+            "TRAP 'rm -rf /tmp/x' EXIT",
+            "Trap 'rm -rf /tmp/x' EXIT",
+            "/bin/trap 'rm -rf /tmp/x' EXIT",
+            "./trap 'rm -rf /tmp/x' EXIT",
+            "trap.exe 'rm -rf /tmp/x' EXIT",
+            "sudo trap 'rm -rf /tmp/x' EXIT",
+            "env trap 'rm -rf /tmp/x' EXIT",
+            "nice trap 'rm -rf /tmp/x' EXIT",
+            "timeout 1 trap 'rm -rf /tmp/x' EXIT",
+            "exec trap 'rm -rf /tmp/x' EXIT",
+            "/usr/bin/time trap 'rm -rf /tmp/x' EXIT",
+            "command time trap 'rm -rf /tmp/x' EXIT",
+            "TIME trap 'rm -rf /tmp/x' EXIT",
+            "trap 'rm -rf /tmp/x' SIGEXIT",
+            "trap 'rm -rf /tmp/x' NOTASIGNAL",
+            "trap 'rm -rf /tmp/x' 64",
+            "trap 'rm -rf /tmp/x' 32",
+            "trap 'rm -rf /tmp/x' +32",
+            "trap 'rm -rf /tmp/x' --",
+            "trap 'rm -rf /tmp/x' PWR",
+        ];
+        for command in quiet {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
     }
 
     /// `bash +e -c` and `bash +o errexit -c` still run the script.
