@@ -1020,10 +1020,9 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
     println!("escalate_below {}", gates.escalate_below);
     println!("review {}", gates.review);
     println!("auto {effective_auto}");
+    // No harm class is passed in, so a bump cannot be why auto moved.
     if row.auto != gates.auto {
-        println!(
-            "auto moved from the raw value because a floor raised it or a harm bump cleared it"
-        );
+        println!("auto moved from the raw value because a floor raised it");
     }
     println!("battery {}", policy.battery.0);
     match &policy.shipped_id {

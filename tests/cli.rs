@@ -2040,6 +2040,30 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
 }
 
 #[test]
+fn explain_bash_rm_names_the_floor_that_raised_auto() {
+    let output = bin()
+        .args(["explain", "--action", "bash.rm"])
+        .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_MODEL")
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "raw_auto 0.99"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "auto 1"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "auto moved from the raw value because a floor raised it"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("harm bump"), "{stdout}");
+}
+
+#[test]
 fn log_failure_names_the_path_and_cache_rejects_words() {
     let call = std::env::temp_dir().join(format!("snapif-logfail-{}.json", std::process::id()));
     fs::write(
