@@ -432,7 +432,8 @@ fn check_action(
 /// `grep . path`, and `head -n 1 path` are that text. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
-/// too. `source <(echo 'git push')` and `bash <(echo 'git push')` run
+/// too. `sed -n 3p` and `awk 'NR==3'` print that line. Without `-n`,
+/// `sed 3p` still prints every line. `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
 /// function that name is global unless it is already local. `read` and
@@ -6405,12 +6406,23 @@ fn from_line(text: &str, line: usize) -> String {
     text.split_inclusive('\n').skip(skip).collect()
 }
 
+#[derive(Clone, Copy)]
+enum SedEnd {
+    Line(usize),
+    Last,
+}
+
 enum SedPrint {
     All,
     Empty,
     Double,
     First,
     FirstPlus,
+    /// Quiet `Np`, `N,Mp`, or `$p`. Not quiet still prints every line.
+    Range {
+        start: SedEnd,
+        end: SedEnd,
+    },
 }
 
 struct SedQuery {
@@ -6495,8 +6507,40 @@ fn sed_program(script: &str, quiet: bool) -> Option<SedPrint> {
         ("p", false) => Some(SedPrint::Double),
         ("1p" | "1,1p", true) => Some(SedPrint::First),
         ("1p" | "1,1p", false) => Some(SedPrint::FirstPlus),
-        _ => None,
+        _ => {
+            let (start, end) = sed_address(script)?;
+            if quiet {
+                Some(SedPrint::Range { start, end })
+            } else {
+                // Default sed still prints every line. The address only
+                // adds another copy of the selected lines.
+                Some(SedPrint::All)
+            }
+        }
     }
+}
+
+fn sed_address(script: &str) -> Option<(SedEnd, SedEnd)> {
+    let body = script.strip_suffix('p')?;
+    if body.is_empty() {
+        return None;
+    }
+    if let Some((left, right)) = body.split_once(',') {
+        return Some((sed_end(left)?, sed_end(right)?));
+    }
+    let end = sed_end(body)?;
+    Some((end, end))
+}
+
+fn sed_end(text: &str) -> Option<SedEnd> {
+    if text == "$" {
+        return Some(SedEnd::Last);
+    }
+    let line = line_count(text)?;
+    if line == 0 {
+        return None;
+    }
+    Some(SedEnd::Line(line))
 }
 
 fn sed_apply(text: &str, kind: SedPrint) -> String {
@@ -6523,10 +6567,40 @@ fn sed_apply(text: &str, kind: SedPrint) -> String {
             }
             out
         }
+        SedPrint::Range { start, end } => line_span(text, start, end),
     }
 }
 
+fn line_span(text: &str, start: SedEnd, end: SedEnd) -> String {
+    let lines: Vec<&str> = text
+        .split_inclusive('\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let last = lines.len() - 1;
+    let start = match start {
+        SedEnd::Line(line) => line.saturating_sub(1),
+        SedEnd::Last => last,
+    };
+    let end = match end {
+        SedEnd::Line(line) => line.saturating_sub(1),
+        SedEnd::Last => last,
+    };
+    if start > end || start >= lines.len() {
+        return String::new();
+    }
+    lines[start..=end.min(last)].concat()
+}
+
+enum AwkSel {
+    All,
+    Range { start: usize, end: usize },
+}
+
 struct AwkQuery {
+    sel: AwkSel,
     file: Option<String>,
 }
 
@@ -6539,7 +6613,18 @@ fn awk_run(
     let Some(query) = awk_query(args) else {
         return Run::Unknown;
     };
-    source_text(query.file.as_deref(), input, depth, substitutions)
+    match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { text, ok } => Run::Produced {
+            text: match query.sel {
+                AwkSel::All => text,
+                AwkSel::Range { start, end } => {
+                    line_span(text.as_str(), SedEnd::Line(start), SedEnd::Line(end))
+                }
+            },
+            ok,
+        },
+        other => other,
+    }
 }
 
 fn awk_query(args: &[String]) -> Option<AwkQuery> {
@@ -6548,12 +6633,7 @@ fn awk_query(args: &[String]) -> Option<AwkQuery> {
         index = 1;
     }
     let program = args.get(index)?;
-    if !matches!(
-        program.as_str(),
-        "{print}" | "1" | "{print $0}" | "{print $0;}"
-    ) {
-        return None;
-    }
+    let sel = awk_program(program)?;
     index += 1;
     if index < args.len() && args[index..].iter().any(|arg| arg.starts_with('-')) {
         return None;
@@ -6562,7 +6642,35 @@ fn awk_query(args: &[String]) -> Option<AwkQuery> {
         return None;
     }
     Some(AwkQuery {
+        sel,
         file: args.get(index).cloned(),
+    })
+}
+
+fn awk_program(program: &str) -> Option<AwkSel> {
+    if matches!(program, "{print}" | "1" | "{print $0}" | "{print $0;}") {
+        return Some(AwkSel::All);
+    }
+    let rest = program.strip_prefix("NR==")?;
+    if let Some((left, right)) = rest.split_once(",NR==") {
+        let start = line_count(left)?;
+        let end = line_count(right)?;
+        if start == 0 || end == 0 {
+            return None;
+        }
+        return Some(AwkSel::Range { start, end });
+    }
+    let body = rest
+        .strip_suffix("{print;}")
+        .or_else(|| rest.strip_suffix("{print}"))
+        .unwrap_or(rest);
+    let line = line_count(body)?;
+    if line == 0 {
+        return None;
+    }
+    Some(AwkSel::Range {
+        start: line,
+        end: line,
     })
 }
 
@@ -10172,6 +10280,13 @@ mod tests {
             format!("eval \"$(cut -c1- {push_s})\""),
             format!("eval \"$(tail -n 1 {multi_s})\""),
             format!("eval \"$(sed 1p {multi_s})\""),
+            format!("eval \"$(sed -n 3p {multi_s})\""),
+            format!("eval \"$(sed -n 2,3p {multi_s})\""),
+            format!("eval \"$(sed -n 3,3p {multi_s})\""),
+            format!("eval \"$(sed -n '$p' {multi_s})\""),
+            format!("eval \"$(awk 'NR==3' {multi_s})\""),
+            format!("eval \"$(awk 'NR==3{{print}}' {multi_s})\""),
+            format!("eval \"$(awk 'NR==2,NR==3' {multi_s})\""),
             format!("read x < {push_s}; eval \"$x\""),
             format!("read -r x < {push_s}; eval \"$x\""),
             format!("read < {push_s}; eval \"$REPLY\""),
@@ -10241,6 +10356,8 @@ mod tests {
             format!("eval \"$(cat < {sub_s})\""),
             format!("eval \"$(head -n 0 {push_s})\""),
             format!("eval \"$(sed -n 1p {multi_s})\""),
+            format!("eval \"$(sed -n 2p {multi_s})\""),
+            format!("eval \"$(awk 'NR==2' {multi_s})\""),
             format!("eval \"$(sed -n '' {push_s})\""),
             format!("eval \"$(cut -c 1-5 {push_s})\""),
             format!("eval \"$(cut -c1-5 {push_s})\""),
