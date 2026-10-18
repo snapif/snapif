@@ -431,9 +431,13 @@ fn check_action(
 /// `cat` of several paths keeps each file that exists. `cat < path`,
 /// `grep . path`, and `head -n 1 path` are that text. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
-/// `printf -v name` stores a value for a later `eval`. Inside a function
-/// that name is global unless it is already local. `read` and `read -r`
-/// do that from one here-string or heredoc. No here-body does not.
+/// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
+/// too. `source <(echo 'git push')` and `bash <(echo 'git push')` run
+/// the printed text. `mapfile` and `read < path` set a value for a later
+/// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
+/// function that name is global unless it is already local. `read` and
+/// `read -r` do that from one here-string, heredoc, or `< path`. No
+/// input does not.
 /// `status` does not run these,
 /// and a later argument named `credential` is not that subcommand.
 /// `timeout 1 rm` and `xargs rm` match.
@@ -801,10 +805,40 @@ fn consider_segment<'a>(
     );
     // The words are expanded before `declare` stores them.
     scope.bind_declaration(&executed.argv, exported);
-    // A function named `printf` or `read` runs instead of the builtin.
+    // A function named `printf`, `read`, or `mapfile` runs instead.
     if !call_runs_function(&executed, functions) {
         scope.bind_printf_v(&executed.argv);
-        scope.bind_read(&executed.argv, &segment.heredocs);
+        let input = SegmentInput {
+            heredocs: &segment.heredocs,
+            file: segment.stdin_file.as_deref(),
+            proc_body: segment.stdin_proc.as_deref(),
+            heredoc: segment.read_heredoc,
+        };
+        if scope.bind_read(&executed.argv, &input, depth) {
+            prefer(policy, best, unscanned_action(policy));
+        }
+        let bound = scope.bind_mapfile(&executed.argv, &input, depth);
+        if bound.unscanned {
+            prefer(policy, best, unscanned_action(policy));
+        }
+        if let Some(callback) = bound.callback {
+            score_here(
+                policy, tool_name, &callback, depth, functions, local, exported, scope, git, best,
+            );
+        }
+        score_proc_input(
+            policy,
+            tool_name,
+            &executed.argv,
+            &segment.proc_inputs,
+            depth,
+            functions,
+            local,
+            exported,
+            scope,
+            git,
+            best,
+        );
     }
 }
 
@@ -891,12 +925,23 @@ fn export_drop_flag(token: &str) -> Option<bool> {
 /// call. `eval` reads the frames and then `global`. `alts` are the other
 /// values a `then` or `do` assignment might still hold. `saved_exports`
 /// puts back a function-local `declare -x` when the function returns.
+/// `arrays` are `mapfile` and `readarray`. A scalar assignment drops the
+/// array at that depth.
 #[derive(Clone, Default)]
 struct ShellScope {
     global: Vec<(String, String)>,
     locals: Vec<Vec<(String, String)>>,
     alts: Vec<ShellAlt>,
     saved_exports: Vec<SavedExport>,
+    arrays: Vec<ShellArray>,
+}
+
+#[derive(Clone)]
+struct ShellArray {
+    /// `0` is global. A function frame is `index + 1`.
+    depth: usize,
+    name: String,
+    values: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -949,6 +994,7 @@ impl ShellScope {
             return false;
         }
         let depth = self.local_frame(name).map(|index| index + 1).unwrap_or(0);
+        self.drop_array(name, depth);
         if conditional {
             if let Some(value) = self.lookup(name) {
                 self.alts.push(ShellAlt {
@@ -1005,15 +1051,69 @@ impl ShellScope {
         self.saved_exports.retain(|save| save.depth != dropped);
         let depth_now = self.locals.len();
         self.alts.retain(|alt| alt.depth <= depth_now);
+        self.arrays.retain(|array| array.depth <= depth_now);
     }
 
     fn set_visible(&mut self, name: &str, value: &str) {
         let index = self.local_frame(name);
+        let depth = index.map(|slot| slot + 1).unwrap_or(0);
+        self.drop_array(name, depth);
         if let Some(index) = index {
             set_env(&mut self.locals[index], name, value);
         } else {
             set_env(&mut self.global, name, value);
         }
+    }
+
+    fn drop_array(&mut self, name: &str, depth: usize) {
+        self.arrays
+            .retain(|array| array.name != name || array.depth != depth);
+    }
+
+    fn drop_scalar(&mut self, name: &str, depth: usize) {
+        if depth == 0 {
+            self.global.retain(|(key, _)| key != name);
+            return;
+        }
+        if let Some(frame) = self.locals.get_mut(depth - 1) {
+            frame.retain(|(key, _)| key != name);
+        }
+    }
+
+    /// `mapfile` with no `local` is global, including inside a function.
+    /// A name that is already local stays in that frame.
+    fn set_array(&mut self, name: &str, values: Vec<String>) {
+        let depth = self.local_frame(name).map(|index| index + 1).unwrap_or(0);
+        self.drop_array(name, depth);
+        self.drop_scalar(name, depth);
+        self.arrays.push(ShellArray {
+            depth,
+            name: name.to_string(),
+            values,
+        });
+    }
+
+    /// The array at the depth that hides outer frames. A scalar at that
+    /// depth hides an outer array, so this returns nothing.
+    fn visible_array(&self, name: &str) -> Option<&[String]> {
+        for (index, frame) in self.locals.iter().enumerate().rev() {
+            let depth = index + 1;
+            let array = self
+                .arrays
+                .iter()
+                .find(|item| item.depth == depth && item.name == name);
+            if array.is_some() || last_assignment(frame, name).is_some() {
+                return array.map(|item| item.values.as_slice());
+            }
+        }
+        let array = self
+            .arrays
+            .iter()
+            .find(|item| item.depth == 0 && item.name == name);
+        if array.is_some() || last_assignment(&self.global, name).is_some() {
+            return array.map(|item| item.values.as_slice());
+        }
+        None
     }
 
     /// `declare` and `typeset` set a shell variable. Inside a function
@@ -1112,17 +1212,18 @@ impl ShellScope {
         self.set_visible(name, &text);
     }
 
-    /// `read` and `read -r` assign from one here-string or heredoc.
-    /// The first line only. Other flags do not assign. No here-body
-    /// does not invent stdin. One name drops leading and trailing
-    /// space, tab, and newline. Later names split on those characters.
-    /// Internal spaces stay.
-    fn bind_read(&mut self, argv: &[String], heredocs: &[String]) {
+    /// `read` and `read -r` assign from one here-string, heredoc, or
+    /// `< path`. The first line only. Other flags do not assign. No
+    /// input does not invent stdin. No name stores `REPLY`. One name
+    /// drops leading and trailing space, tab, and newline. Later names
+    /// split on those characters. Internal spaces stay. Returns whether
+    /// the file is past one megabyte.
+    fn bind_read(&mut self, argv: &[String], input: &SegmentInput<'_>, depth: u32) -> bool {
         let Some(first) = argv.first() else {
-            return;
+            return false;
         };
         if command_basename(first) != "read" {
-            return;
+            return false;
         }
         let mut index = 1usize;
         let mut options = true;
@@ -1137,28 +1238,80 @@ impl ShellScope {
                 }
                 if let Some(flags) = token.strip_prefix('-') {
                     if flags.is_empty() || !flags.chars().all(|ch| ch == 'r') {
-                        return;
+                        return false;
                     }
                     index += 1;
                     continue;
                 }
             }
             if !env_name(token) {
-                return;
+                return false;
             }
             names.push(token.clone());
             index += 1;
         }
         if names.is_empty() {
-            return;
+            names.push("REPLY".to_string());
         }
-        let Some(body) = heredocs.last() else {
-            return;
+        let body = match command_text(input, depth) {
+            CmdText::Text(body) => body,
+            CmdText::Unscanned => return true,
+            CmdText::Absent => return false,
         };
         let line = body.split('\n').next().unwrap_or("");
         let fields = read_ifs_fields(line, names.len());
         for (name, value) in names.iter().zip(fields.iter()) {
             self.set_visible(name, value);
+        }
+        false
+    }
+
+    /// `mapfile` and `readarray` fill an array from the same input as
+    /// `read`. No name stores `MAPFILE`. `-n 0` copies every record.
+    /// The callback runs when enough records were read.
+    fn bind_mapfile(
+        &mut self,
+        argv: &[String],
+        input: &SegmentInput<'_>,
+        depth: u32,
+    ) -> MapfileBound {
+        let Some(opts) = mapfile_opts(argv) else {
+            return MapfileBound::default();
+        };
+        let text = match command_text(input, depth) {
+            CmdText::Absent => return MapfileBound::default(),
+            CmdText::Unscanned => {
+                return MapfileBound {
+                    unscanned: true,
+                    callback: opts.callback,
+                };
+            }
+            CmdText::Text(text) => text,
+        };
+        let raw = mapfile_records(&text, opts.delim, opts.strip);
+        let lines_read = match opts.limit {
+            Some(limit) => raw.len().min(opts.skip.saturating_add(limit)),
+            None => raw.len(),
+        };
+        let callback = opts.callback.filter(|_| lines_read >= opts.quantum);
+        if opts.origin > MAPFILE_ORIGIN_CAP {
+            return MapfileBound {
+                unscanned: true,
+                callback,
+            };
+        }
+        let kept = raw.into_iter().skip(opts.skip);
+        let kept: Vec<String> = match opts.limit {
+            Some(limit) => kept.take(limit).collect(),
+            None => kept.collect(),
+        };
+        let mut values = Vec::with_capacity(opts.origin.saturating_add(kept.len()));
+        values.resize(opts.origin, String::new());
+        values.extend(kept);
+        self.set_array(&opts.name, values);
+        MapfileBound {
+            unscanned: false,
+            callback,
         }
     }
 
@@ -1203,17 +1356,239 @@ impl ShellScope {
     }
 
     fn assign_decl(&mut self, token: &str, to_global: bool) -> bool {
-        if assignment_name(token).is_none() {
+        let Some(name) = assignment_name(token) else {
             return false;
-        }
-        if to_global || self.locals.is_empty() {
+        };
+        let depth = if to_global || self.locals.is_empty() {
+            0
+        } else {
+            self.locals.len()
+        };
+        let applied = if depth == 0 {
             apply_assignment(&mut self.global, token)
         } else if let Some(frame) = self.locals.last_mut() {
             apply_assignment(frame, token)
         } else {
             false
+        };
+        if applied {
+            self.drop_array(name, depth);
         }
+        applied
     }
+}
+
+/// `read` / `mapfile` input that won on this command. A later redirect
+/// replaces an earlier one. `heredoc` is set only when a here-string or
+/// heredoc is the one `read` uses.
+struct SegmentInput<'a> {
+    heredocs: &'a [String],
+    file: Option<&'a str>,
+    proc_body: Option<&'a str>,
+    heredoc: bool,
+}
+
+enum CmdText {
+    Text(String),
+    Unscanned,
+    Absent,
+}
+
+fn command_text(input: &SegmentInput<'_>, depth: u32) -> CmdText {
+    if let Some(body) = input.proc_body {
+        return match fold_print(body, depth + 1, &mut Vec::new()) {
+            Printed::Text(text) => CmdText::Text(text),
+            Printed::Unscanned => CmdText::Unscanned,
+            Printed::Unknown => CmdText::Absent,
+        };
+    }
+    if let Some(path) = input.file {
+        return match load_script_file(path) {
+            Some(ScriptFile::Text(text)) => CmdText::Text(text),
+            Some(ScriptFile::Unscanned) => CmdText::Unscanned,
+            None => CmdText::Absent,
+        };
+    }
+    if input.heredoc
+        && let Some(body) = input.heredocs.last()
+    {
+        return CmdText::Text(body.clone());
+    }
+    CmdText::Absent
+}
+
+/// Past this many empty slots, `mapfile -O` matches `shell.deep`
+/// instead of allocating the index.
+const MAPFILE_ORIGIN_CAP: usize = 100_000;
+
+#[derive(Default)]
+struct MapfileBound {
+    unscanned: bool,
+    callback: Option<String>,
+}
+
+struct MapfileOpts {
+    name: String,
+    strip: bool,
+    /// `None` copies every record. `-n 0` is unlimited.
+    limit: Option<usize>,
+    skip: usize,
+    origin: usize,
+    delim: char,
+    callback: Option<String>,
+    /// Bash runs the callback after this many records. The default is
+    /// 5000. Zero is rejected by bash.
+    quantum: usize,
+}
+
+fn mapfile_opts(argv: &[String]) -> Option<MapfileOpts> {
+    let base = command_basename(argv.first()?);
+    if base != "mapfile" && base != "readarray" {
+        return None;
+    }
+    let mut opts = MapfileOpts {
+        name: String::new(),
+        strip: false,
+        limit: None,
+        skip: 0,
+        origin: 0,
+        delim: '\n',
+        callback: None,
+        quantum: 5000,
+    };
+    let mut options = true;
+    let mut saw_name = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if options && token == "--" {
+            options = false;
+            index += 1;
+            continue;
+        }
+        if options && token.starts_with('-') {
+            if !take_mapfile_flag(argv, &mut index, &mut opts) {
+                return None;
+            }
+            continue;
+        }
+        if saw_name || !env_name(token) {
+            return None;
+        }
+        opts.name = token.clone();
+        saw_name = true;
+        index += 1;
+    }
+    if opts.name.is_empty() {
+        opts.name = "MAPFILE".to_string();
+    }
+    Some(opts)
+}
+
+fn take_mapfile_flag(argv: &[String], index: &mut usize, opts: &mut MapfileOpts) -> bool {
+    let arg = &argv[*index];
+    if arg == "-t" {
+        opts.strip = true;
+        *index += 1;
+        return true;
+    }
+    if let Some(count) = attached_count(argv, index, "-n") {
+        opts.limit = (count > 0).then_some(count);
+        return true;
+    }
+    if let Some(count) = attached_count(argv, index, "-s") {
+        opts.skip = count;
+        return true;
+    }
+    if let Some(count) = attached_count(argv, index, "-O") {
+        opts.origin = count;
+        return true;
+    }
+    if let Some(count) = attached_count(argv, index, "-c") {
+        if count == 0 {
+            return false;
+        }
+        opts.quantum = count;
+        return true;
+    }
+    if arg == "-d" {
+        let Some(raw) = argv.get(*index + 1) else {
+            return false;
+        };
+        opts.delim = raw.chars().next().unwrap_or('\0');
+        *index += 2;
+        return true;
+    }
+    if let Some(rest) = arg.strip_prefix("-d")
+        && !rest.is_empty()
+    {
+        opts.delim = rest.chars().next().unwrap_or('\0');
+        *index += 1;
+        return true;
+    }
+    if arg == "-u" {
+        if argv.get(*index + 1).is_some_and(|text| text == "0") {
+            *index += 2;
+            return true;
+        }
+        return false;
+    }
+    if arg == "-u0" {
+        *index += 1;
+        return true;
+    }
+    if arg == "-C" {
+        let Some(callback) = argv.get(*index + 1) else {
+            return false;
+        };
+        opts.callback = Some(callback.clone());
+        *index += 2;
+        return true;
+    }
+    if let Some(rest) = arg.strip_prefix("-C")
+        && !rest.is_empty()
+    {
+        opts.callback = Some(rest.to_string());
+        *index += 1;
+        return true;
+    }
+    false
+}
+
+/// `-n 4` or `-n4`. `None` when `flag` is not this word.
+fn attached_count(argv: &[String], index: &mut usize, flag: &str) -> Option<usize> {
+    let arg = argv.get(*index)?;
+    if arg == flag {
+        let count = line_count(argv.get(*index + 1)?)?;
+        *index += 2;
+        return Some(count);
+    }
+    let rest = arg.strip_prefix(flag)?;
+    if rest.is_empty() {
+        return None;
+    }
+    let count = line_count(rest)?;
+    *index += 1;
+    Some(count)
+}
+
+fn mapfile_records(text: &str, delim: char, strip: bool) -> Vec<String> {
+    let mut records = Vec::new();
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == delim {
+            if !strip {
+                current.push(ch);
+            }
+            records.push(std::mem::take(&mut current));
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        records.push(current);
+    }
+    records
 }
 
 fn declaration_flags(token: &str) -> Option<&str> {
@@ -1365,6 +1740,66 @@ fn score_sourced_file<'a>(
             );
         }
         ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
+    }
+}
+
+/// `source <(script)` runs in this shell. `bash <(script)` runs in a new
+/// process. The first process substitution is the script. `bash -c`,
+/// `bash -s`, and a real path do not read it.
+#[allow(clippy::too_many_arguments)]
+fn score_proc_input<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    proc_inputs: &[String],
+    depth: u32,
+    functions: &mut Functions,
+    local: &[(String, String)],
+    exported: &mut Vec<(String, String)>,
+    scope: &mut ShellScope,
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(body) = proc_inputs.first() else {
+        return;
+    };
+    let Some(first) = argv.first() else {
+        return;
+    };
+    let base = command_basename(first);
+    let source = base == "source" || base == ".";
+    if source {
+        if source_operand(argv).is_some() || sourced_stdin(argv) {
+            return;
+        }
+    } else if !is_shell_name(base)
+        || shell_script(argv).is_some()
+        || shell_file_operand(argv).is_some()
+        || shell_flag_has(argv, 'c')
+        || shell_flag_has(argv, 's')
+    {
+        return;
+    }
+    match printed_output(body, depth + 1, &mut Vec::new()) {
+        Printed::Text(text) => {
+            if source {
+                score_here(
+                    policy, tool_name, &text, depth, functions, local, exported, scope, git, best,
+                );
+            } else {
+                scan_isolated(
+                    policy,
+                    tool_name,
+                    std::slice::from_ref(&text),
+                    depth,
+                    local,
+                    git,
+                    best,
+                );
+            }
+        }
+        Printed::Unscanned => prefer(policy, best, unscanned_action(policy)),
+        Printed::Unknown => {}
     }
 }
 
@@ -2558,25 +2993,25 @@ fn expand_eval_word(
             literal.push('$');
             continue;
         }
-        if let Some(name) = braced_parameter(rest) {
+        if let Some((spec, span)) = braced_parameter(rest) {
             push_eval_literal(&mut literal, &mut pieces);
-            let original = format!("${{{name}}}");
+            let original = format!("${{{}}}", &rest[1..span - 1]);
             pieces.push(parameter_text(
-                name,
+                spec,
                 &original,
                 in_eval,
                 scope,
                 exported,
                 command_env,
             ));
-            rest = &rest[name.len() + 2..];
+            rest = &rest[span..];
             continue;
         }
         if let Some(name) = bare_parameter(rest) {
             push_eval_literal(&mut literal, &mut pieces);
             let original = format!("${name}");
             pieces.push(parameter_text(
-                name,
+                ParamRef::Name(name),
                 &original,
                 in_eval,
                 scope,
@@ -2607,13 +3042,14 @@ fn push_eval_literal(literal: &mut String, pieces: &mut Vec<Vec<String>>) {
 }
 
 fn parameter_text(
-    name: &str,
+    spec: ParamRef<'_>,
     original: &str,
     in_eval: bool,
     scope: &ShellScope,
     exported: &[(String, String)],
     command_env: &[(String, String)],
 ) -> Vec<String> {
+    let name = spec.name();
     if in_eval {
         let prefixed = last_assignment(command_env, name);
         let inherited = last_assignment(exported, name);
@@ -2622,8 +3058,11 @@ fn parameter_text(
         if let Some(value) = prefixed
             && prefixed != inherited
         {
-            return vec![value.to_string()];
+            return vec![scalar_param(spec, value)];
         }
+    }
+    if let Some(values) = scope.visible_array(name) {
+        return vec![array_param(spec, values)];
     }
     let mut values = Vec::new();
     if let Some(value) = scope.value(name, exported) {
@@ -2638,8 +3077,33 @@ fn parameter_text(
     }
     if values.is_empty() {
         vec![original.to_string()]
+    } else if matches!(spec, ParamRef::Index(_, index) if index > 0) {
+        vec![String::new()]
     } else {
         values
+    }
+}
+
+/// `$name` on a scalar is that text. `${name[0]}` is too. A later index
+/// is empty. `${name[@]}` is the text.
+fn scalar_param(spec: ParamRef<'_>, value: &str) -> String {
+    match spec {
+        ParamRef::Index(_, index) if index > 0 => String::new(),
+        ParamRef::Name(_) | ParamRef::Index(_, _) | ParamRef::All(_) => value.to_string(),
+    }
+}
+
+fn array_param(spec: ParamRef<'_>, values: &[String]) -> String {
+    match spec {
+        ParamRef::Name(_) | ParamRef::Index(_, 0) => values.first().cloned().unwrap_or_default(),
+        ParamRef::Index(_, index) => values.get(index).cloned().unwrap_or_default(),
+        ParamRef::All(_) => {
+            if values.len() == 1 {
+                values[0].clone()
+            } else {
+                values.join(" ")
+            }
+        }
     }
 }
 
@@ -2676,11 +3140,48 @@ fn concat_eval_pieces(prefixes: &[String], parts: &[String]) -> Vec<String> {
     out
 }
 
-fn braced_parameter(text: &str) -> Option<&str> {
+#[derive(Clone, Copy)]
+enum ParamRef<'a> {
+    Name(&'a str),
+    Index(&'a str, usize),
+    All(&'a str),
+}
+
+impl<'a> ParamRef<'a> {
+    fn name(self) -> &'a str {
+        match self {
+            ParamRef::Name(name) | ParamRef::Index(name, _) | ParamRef::All(name) => name,
+        }
+    }
+}
+
+/// `${name}`, `${name[N]}`, `${name[@]}`, and `${name[*]}`. The span
+/// includes both braces. `text` starts at `{`.
+fn braced_parameter(text: &str) -> Option<(ParamRef<'_>, usize)> {
     let inner = text.strip_prefix('{')?;
     let end = inner.find('}')?;
-    let name = &inner[..end];
-    env_name(name).then_some(name)
+    let body = &inner[..end];
+    let spec = param_ref(body)?;
+    Some((spec, end + 2))
+}
+
+fn param_ref(body: &str) -> Option<ParamRef<'_>> {
+    if let Some(name) = body
+        .strip_suffix("[@]")
+        .or_else(|| body.strip_suffix("[*]"))
+    {
+        return env_name(name).then_some(ParamRef::All(name));
+    }
+    if let Some(open) = body.find('[') {
+        let name = &body[..open];
+        let index = body[open + 1..].strip_suffix(']')?;
+        if !env_name(name) || index.is_empty() || !index.chars().all(|ch| ch.is_ascii_digit()) {
+            return None;
+        }
+        let index = index.parse().ok()?;
+        return Some(ParamRef::Index(name, index));
+    }
+    env_name(body).then_some(ParamRef::Name(body))
 }
 
 fn bare_parameter(text: &str) -> Option<&str> {
@@ -2702,6 +3203,38 @@ fn bare_parameter(text: &str) -> Option<&str> {
 fn is_shell_name(name: &str) -> bool {
     const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "fish"];
     SHELLS.iter().any(|shell| name.eq_ignore_ascii_case(shell))
+}
+
+fn shell_flag_has(argv: &[String], flag: char) -> bool {
+    let Some(first) = argv.first() else {
+        return false;
+    };
+    if !is_shell_name(command_basename(first)) {
+        return false;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            return false;
+        }
+        if shell_opt_takes_value(token) {
+            index += 2;
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+        {
+            if flags.contains(flag) {
+                return true;
+            }
+            index += 1;
+            continue;
+        }
+        return false;
+    }
+    false
 }
 
 fn is_stdin_script(token: &str) -> bool {
@@ -4453,6 +4986,37 @@ struct ShellSegment {
     /// A pipeline stage or a background command. Its assignments do not
     /// come back to the parent shell.
     isolated: bool,
+    /// Bodies of `<(...)` words, in order. `>(...)` is not a script.
+    proc_inputs: Vec<String>,
+    /// A literal `< path` that is the stdin `read` and `mapfile` use.
+    stdin_file: Option<String>,
+    /// `read x < <(echo ...)` reads that command's printed text.
+    stdin_proc: Option<String>,
+    /// A here-string or heredoc is the stdin those builtins use.
+    read_heredoc: bool,
+}
+
+#[derive(Default)]
+struct PendingSegment {
+    proc_inputs: Vec<String>,
+    stdin_file: Option<String>,
+    stdin_proc: Option<String>,
+    read_heredoc: bool,
+}
+
+impl PendingSegment {
+    fn is_empty(&self) -> bool {
+        self.proc_inputs.is_empty()
+            && self.stdin_file.is_none()
+            && self.stdin_proc.is_none()
+            && !self.read_heredoc
+    }
+
+    fn clear_stdin(&mut self) {
+        self.stdin_file = None;
+        self.stdin_proc = None;
+        self.read_heredoc = false;
+    }
 }
 
 enum ShellPart {
@@ -4481,6 +5045,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
     let mut heredocs: Vec<PendingHeredoc> = Vec::new();
     let mut substitutions = Vec::new();
     let mut stdin_bodies = Vec::new();
+    let mut pending = PendingSegment::default();
     let mut next_isolated = false;
     while let Some(ch) = chars.next() {
         // Bash deletes NUL, including inside quotes (`echo 'a\0b'` prints ab).
@@ -4588,13 +5153,17 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
             }
             '{' if token.is_empty() && brace_is_its_own_word(chars.peek().copied()) => {
                 if let Some(name) = function_header(&current) {
-                    if !substitutions.is_empty() {
+                    if !substitutions.is_empty() || !pending.is_empty() {
                         parts.push(ShellPart::Segment(ShellSegment {
                             tokens: Vec::new(),
                             in_eval: Vec::new(),
                             heredocs: Vec::new(),
                             substitutions: std::mem::take(&mut substitutions),
                             isolated: false,
+                            proc_inputs: std::mem::take(&mut pending.proc_inputs),
+                            stdin_file: pending.stdin_file.take(),
+                            stdin_proc: pending.stdin_proc.take(),
+                            read_heredoc: std::mem::take(&mut pending.read_heredoc),
                         }));
                     }
                     current.clear();
@@ -4607,8 +5176,13 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 }
             }
             '<' | '>' if chars.peek() == Some(&'(') => {
+                let input = ch == '<';
                 chars.next();
-                substitutions.push(read_balanced_parens(&mut chars));
+                let body = read_balanced_parens(&mut chars);
+                substitutions.push(body.clone());
+                if input {
+                    pending.proc_inputs.push(body);
+                }
             }
             '<' if chars.peek() == Some(&'<') => {
                 chars.next();
@@ -4619,24 +5193,33 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     &mut word_single,
                     &mut in_eval_words,
                 );
+                pending.clear_stdin();
+                pending.read_heredoc = true;
                 if chars.peek() == Some(&'<') {
                     chars.next();
                     if let Some(body) = read_here_string(&mut chars, &mut substitutions) {
                         stdin_bodies.push(body);
                     }
-                } else if let Some((delim, dash, quoted)) = read_heredoc_delim(&mut chars) {
+                } else if let Some((delim, dash, quoted_delim)) = read_heredoc_delim(&mut chars) {
                     heredocs.push(PendingHeredoc {
                         owner: parts.len(),
                         delim,
                         dash,
-                        quoted,
+                        quoted: quoted_delim,
                     });
                 }
             }
             '<' | '>' => {
+                let second = chars.peek().copied();
+                let compound = matches!(
+                    (ch, second),
+                    ('>', Some('>' | '&' | '|')) | ('<', Some('>' | '&'))
+                );
                 consume_redirect_tail(&mut chars, ch);
-                if !quoted && is_fd_word(&token) {
+                let fd = if !quoted && is_fd_word(&token) {
+                    let parsed = token.parse::<i32>().ok();
                     token.clear();
+                    parsed
                 } else {
                     push_token(
                         &mut token,
@@ -4645,8 +5228,29 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                         &mut word_single,
                         &mut in_eval_words,
                     );
+                    None
+                };
+                let fd = fd.unwrap_or(if ch == '<' { 0 } else { 1 });
+                if ch == '<' && fd == 0 {
+                    if compound {
+                        skip_redirect_word(&mut chars, &mut substitutions);
+                        pending.clear_stdin();
+                    } else {
+                        match take_stdin_target(&mut chars, &mut substitutions) {
+                            StdinTarget::Path(path) => {
+                                pending.clear_stdin();
+                                pending.stdin_file = Some(path);
+                            }
+                            StdinTarget::Proc(body) => {
+                                pending.clear_stdin();
+                                pending.stdin_proc = Some(body);
+                            }
+                            StdinTarget::Opaque => pending.clear_stdin(),
+                        }
+                    }
+                } else {
+                    skip_redirect_word(&mut chars, &mut substitutions);
                 }
-                skip_redirect_word(&mut chars, &mut substitutions);
             }
             '&' if chars.peek() == Some(&'>') => {
                 chars.next();
@@ -4682,7 +5286,8 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 let continues_pipeline = next_isolated
                     && current.is_empty()
                     && substitutions.is_empty()
-                    && stdin_bodies.is_empty();
+                    && stdin_bodies.is_empty()
+                    && pending.is_empty();
                 if !continues_pipeline {
                     push_shell_segment(
                         &mut current,
@@ -4691,6 +5296,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                         &mut stdin_bodies,
                         &mut parts,
                         next_isolated,
+                        &mut pending,
                     );
                     next_isolated = false;
                 }
@@ -4733,6 +5339,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     &mut stdin_bodies,
                     &mut parts,
                     isolated,
+                    &mut pending,
                 );
             }
             '#' if token.is_empty() => {
@@ -4763,6 +5370,7 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
         &mut stdin_bodies,
         &mut parts,
         next_isolated,
+        &mut pending,
     );
     parts
 }
@@ -5011,6 +5619,22 @@ struct Piece {
 }
 
 fn printed_output(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Printed {
+    match fold_print(body, depth, substitutions) {
+        Printed::Text(text) => Printed::Text(strip_trailing_newlines(text)),
+        other => other,
+    }
+}
+
+fn strip_trailing_newlines(mut text: String) -> String {
+    while text.ends_with('\n') {
+        text.pop();
+    }
+    text
+}
+
+/// Printed bytes, including trailing newlines. Command substitution uses
+/// [`printed_output`], which strips those newlines.
+fn fold_print(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Printed {
     if depth > FOLD_DEPTH {
         return Printed::Unknown;
     }
@@ -5050,9 +5674,6 @@ fn printed_output(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Pr
     }
     if !any_known {
         return Printed::Unknown;
-    }
-    while out.ends_with('\n') {
-        out.pop();
     }
     substitutions.extend(extra);
     Printed::Text(out)
@@ -5195,6 +5816,10 @@ fn split_pipeline(command: &str) -> Option<Vec<String>> {
                 word_start = false;
                 index += 1;
             }
+            '<' | '>' if chars.get(index + 1) == Some(&'(') => {
+                word_start = false;
+                index = take_proc_subst(&chars, index)?.1;
+            }
             '<' | '>' => {
                 word_start = false;
                 index += 1;
@@ -5263,7 +5888,10 @@ fn run_stage(stage: &str, pipe: Option<&str>, depth: u32, substitutions: &mut Ve
         StdinFor::Unscanned => return Run::Unscanned,
         StdinFor::Unknown => return Run::Unknown,
     };
-    mask_stdout(run_builtin(&words, ready.as_deref()), peeled.stdout_lost)
+    mask_stdout(
+        run_builtin(&words, ready.as_deref(), depth, substitutions),
+        peeled.stdout_lost,
+    )
 }
 
 fn mask_stdout(run: Run, stdout_lost: bool) -> Run {
@@ -5279,7 +5907,12 @@ fn mask_stdout(run: Run, stdout_lost: bool) -> Run {
     }
 }
 
-fn run_builtin(words: &[String], input: Option<&str>) -> Run {
+fn run_builtin(
+    words: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
     let args = &words[1..];
     match command_basename(&words[0]) {
         "echo" => match echo_output(args) {
@@ -5298,9 +5931,13 @@ fn run_builtin(words: &[String], input: Option<&str>) -> Run {
             text: String::new(),
             ok: false,
         },
-        "cat" => cat_run(args, input),
-        "grep" => grep_run(args, input),
-        "head" => head_run(args, input),
+        "cat" => cat_run(args, input, depth, substitutions),
+        "grep" => grep_run(args, input, depth, substitutions),
+        "head" => head_run(args, input, depth, substitutions),
+        "tail" => tail_run(args, input, depth, substitutions),
+        "sed" => sed_run(args, input, depth, substitutions),
+        "awk" => awk_run(args, input, depth, substitutions),
+        "cut" => cut_run(args, input, depth, substitutions),
         _ => Run::Unknown,
     }
 }
@@ -5320,7 +5957,12 @@ fn printf_stdout(args: &[String]) -> Option<String> {
     printf_literal(&args[index..])
 }
 
-fn cat_run(args: &[String], input: Option<&str>) -> Run {
+fn cat_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
     let Some(operands) = cat_operands(args) else {
         return Run::Unknown;
     };
@@ -5343,12 +5985,12 @@ fn cat_run(args: &[String], input: Option<&str>) -> Run {
             out.push_str(text);
             continue;
         }
-        match path_body(&operand) {
-            PathBody::Text(text) => out.push_str(&text),
-            PathBody::Unscanned => return Run::Unscanned,
-            PathBody::Missing | PathBody::Dir => failed = true,
-            PathBody::Fifo | PathBody::Hang => return Run::Unknown,
-            PathBody::Null => {}
+        match load_text_operand(&operand, depth, substitutions) {
+            Loaded::Text(text) => out.push_str(&text),
+            Loaded::Unscanned => return Run::Unscanned,
+            Loaded::Missing | Loaded::Dir => failed = true,
+            Loaded::Fifo | Loaded::Hang | Loaded::Unknown => return Run::Unknown,
+            Loaded::Null => {}
         }
     }
     Run::Produced {
@@ -5373,29 +6015,24 @@ fn cat_operands(args: &[String]) -> Option<Vec<String>> {
     Some(operands)
 }
 
-fn grep_run(args: &[String], input: Option<&str>) -> Run {
+fn grep_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
     let Some(query) = grep_query(args) else {
         return Run::Unknown;
     };
-    let source = if let Some(path) = query.file {
-        path_body(&path)
-    } else {
-        match input {
-            Some(text) => PathBody::Text(text.to_string()),
-            None => return Run::Unknown,
-        }
-    };
-    let text = match source {
-        PathBody::Text(text) => text,
-        PathBody::Unscanned => return Run::Unscanned,
-        PathBody::Missing | PathBody::Dir => {
+    let text = match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
             return Run::Produced {
                 text: String::new(),
                 ok: false,
             };
         }
-        PathBody::Null => String::new(),
-        PathBody::Fifo | PathBody::Hang => return Run::Unknown,
+        Run::Produced { text, ok: true } => text,
+        other => return other,
     };
     let Some(matched) = grep_lines(&text, &query.pattern, query.fixed) else {
         return Run::Unknown;
@@ -5483,33 +6120,21 @@ fn literal_pattern(pattern: &str) -> bool {
     })
 }
 
-fn head_run(args: &[String], input: Option<&str>) -> Run {
+fn head_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
     let Some(query) = head_query(args) else {
         return Run::Unknown;
     };
-    let source = if let Some(path) = query.file {
-        path_body(&path)
-    } else {
-        match input {
-            Some(text) => PathBody::Text(text.to_string()),
-            None => return Run::Unknown,
-        }
-    };
-    match source {
-        PathBody::Text(text) => Run::Produced {
+    match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { text, ok } => Run::Produced {
             text: first_lines(&text, query.lines),
-            ok: true,
+            ok,
         },
-        PathBody::Unscanned => Run::Unscanned,
-        PathBody::Missing | PathBody::Dir => Run::Produced {
-            text: String::new(),
-            ok: false,
-        },
-        PathBody::Null => Run::Produced {
-            text: String::new(),
-            ok: true,
-        },
-        PathBody::Fifo | PathBody::Hang => Run::Unknown,
+        other => other,
     }
 }
 
@@ -5581,6 +6206,422 @@ fn first_lines(text: &str, count: usize) -> String {
     out
 }
 
+enum Loaded {
+    Text(String),
+    Unscanned,
+    Missing,
+    Dir,
+    Fifo,
+    Null,
+    Hang,
+    Unknown,
+}
+
+/// `<(body)` is the printed text of `body`. `>(body)` is not a file.
+/// Anything else is a path.
+fn load_text_operand(operand: &str, depth: u32, substitutions: &mut Vec<String>) -> Loaded {
+    if let Some((body, input)) = proc_word(operand) {
+        if !input {
+            return Loaded::Unknown;
+        }
+        return match fold_print(body, depth + 1, substitutions) {
+            Printed::Text(text) => Loaded::Text(text),
+            Printed::Unscanned => Loaded::Unscanned,
+            Printed::Unknown => Loaded::Unknown,
+        };
+    }
+    match path_body(operand) {
+        PathBody::Text(text) => Loaded::Text(text),
+        PathBody::Unscanned => Loaded::Unscanned,
+        PathBody::Missing => Loaded::Missing,
+        PathBody::Dir => Loaded::Dir,
+        PathBody::Fifo => Loaded::Fifo,
+        PathBody::Null => Loaded::Null,
+        PathBody::Hang => Loaded::Hang,
+    }
+}
+
+fn proc_word(operand: &str) -> Option<(&str, bool)> {
+    let (input, rest) = if let Some(rest) = operand.strip_prefix("<(") {
+        (true, rest)
+    } else if let Some(rest) = operand.strip_prefix(">(") {
+        (false, rest)
+    } else {
+        return None;
+    };
+    let body = rest.strip_suffix(')')?;
+    Some((body, input))
+}
+
+fn source_text(
+    file: Option<&str>,
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let loaded = if let Some(path) = file {
+        load_text_operand(path, depth, substitutions)
+    } else if let Some(text) = input {
+        Loaded::Text(text.to_string())
+    } else {
+        return Run::Unknown;
+    };
+    match loaded {
+        Loaded::Text(text) => Run::Produced { text, ok: true },
+        Loaded::Unscanned => Run::Unscanned,
+        Loaded::Missing | Loaded::Dir => Run::Produced {
+            text: String::new(),
+            ok: false,
+        },
+        Loaded::Null => Run::Produced {
+            text: String::new(),
+            ok: true,
+        },
+        Loaded::Fifo | Loaded::Hang | Loaded::Unknown => Run::Unknown,
+    }
+}
+
+enum TailMode {
+    Last(usize),
+    From(usize),
+    /// `tail +N file` prints the whole file. GNU and BSD disagree on the
+    /// start line, and both still emit every later line.
+    Whole,
+}
+
+struct TailQuery {
+    mode: TailMode,
+    file: Option<String>,
+}
+
+fn tail_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = tail_query(args) else {
+        return Run::Unknown;
+    };
+    match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { text, ok } => Run::Produced {
+            text: tail_lines(&text, &query.mode),
+            ok,
+        },
+        other => other,
+    }
+}
+
+fn tail_query(args: &[String]) -> Option<TailQuery> {
+    let mut index = 0usize;
+    let mut mode = None;
+    let mut legacy = false;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-n" {
+            mode = Some(tail_count(args.get(index + 1)?)?);
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-n")
+            && !rest.is_empty()
+        {
+            mode = Some(tail_count(rest)?);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-') {
+            if !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit()) {
+                mode = Some(TailMode::Last(line_count(rest)?));
+                index += 1;
+                continue;
+            }
+            if !rest.is_empty() {
+                return None;
+            }
+        }
+        if let Some(rest) = arg.strip_prefix('+')
+            && !rest.is_empty()
+            && rest.chars().all(|ch| ch.is_ascii_digit())
+        {
+            legacy = true;
+            mode = Some(TailMode::Whole);
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    let file = args.get(index).cloned();
+    if legacy && file.is_none() {
+        return None;
+    }
+    Some(TailQuery {
+        mode: mode.unwrap_or(TailMode::Last(10)),
+        file,
+    })
+}
+
+fn tail_count(text: &str) -> Option<TailMode> {
+    if let Some(rest) = text.strip_prefix('+') {
+        let count = line_count(rest)?;
+        let from = if count == 0 { 1 } else { count };
+        return Some(TailMode::From(from));
+    }
+    if let Some(rest) = text.strip_prefix('-') {
+        return Some(TailMode::Last(line_count(rest)?));
+    }
+    Some(TailMode::Last(line_count(text)?))
+}
+
+fn tail_lines(text: &str, mode: &TailMode) -> String {
+    match mode {
+        TailMode::Whole => text.to_string(),
+        TailMode::Last(count) => last_lines(text, *count),
+        TailMode::From(line) => from_line(text, *line),
+    }
+}
+
+fn last_lines(text: &str, count: usize) -> String {
+    if count == 0 || text.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let start = lines.len().saturating_sub(count);
+    lines[start..].concat()
+}
+
+fn from_line(text: &str, line: usize) -> String {
+    if line <= 1 {
+        return text.to_string();
+    }
+    let skip = line - 1;
+    text.split_inclusive('\n').skip(skip).collect()
+}
+
+enum SedPrint {
+    All,
+    Empty,
+    Double,
+    First,
+    FirstPlus,
+}
+
+struct SedQuery {
+    kind: SedPrint,
+    file: Option<String>,
+}
+
+fn sed_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = sed_query(args) else {
+        return Run::Unknown;
+    };
+    match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { text, ok } => Run::Produced {
+            text: sed_apply(&text, query.kind),
+            ok,
+        },
+        other => other,
+    }
+}
+
+fn sed_query(args: &[String]) -> Option<SedQuery> {
+    let mut index = 0usize;
+    let mut quiet = false;
+    let mut script = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-n" {
+            quiet = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-e" {
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index + 1)?.clone());
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-e")
+            && !rest.is_empty()
+        {
+            if script.is_some() {
+                return None;
+            }
+            script = Some(rest.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if script.is_none() {
+        script = Some(args.get(index)?.clone());
+        index += 1;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    Some(SedQuery {
+        kind: sed_program(script.as_deref()?, quiet)?,
+        file: args.get(index).cloned(),
+    })
+}
+
+fn sed_program(script: &str, quiet: bool) -> Option<SedPrint> {
+    match (script, quiet) {
+        ("", true) => Some(SedPrint::Empty),
+        ("", false) => Some(SedPrint::All),
+        ("p", true) => Some(SedPrint::All),
+        ("p", false) => Some(SedPrint::Double),
+        ("1p" | "1,1p", true) => Some(SedPrint::First),
+        ("1p" | "1,1p", false) => Some(SedPrint::FirstPlus),
+        _ => None,
+    }
+}
+
+fn sed_apply(text: &str, kind: SedPrint) -> String {
+    match kind {
+        SedPrint::Empty => String::new(),
+        SedPrint::All => text.to_string(),
+        SedPrint::First => first_lines(text, 1),
+        SedPrint::FirstPlus => {
+            let mut out = first_lines(text, 1);
+            out.push_str(text);
+            out
+        }
+        SedPrint::Double => {
+            let mut out = String::new();
+            for line in text.split_inclusive('\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                let body = line.trim_end_matches('\n');
+                out.push_str(body);
+                out.push('\n');
+                out.push_str(body);
+                out.push('\n');
+            }
+            out
+        }
+    }
+}
+
+struct AwkQuery {
+    file: Option<String>,
+}
+
+fn awk_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = awk_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(query.file.as_deref(), input, depth, substitutions)
+}
+
+fn awk_query(args: &[String]) -> Option<AwkQuery> {
+    let mut index = 0usize;
+    if args.first().is_some_and(|arg| arg == "--") {
+        index = 1;
+    }
+    let program = args.get(index)?;
+    if !matches!(
+        program.as_str(),
+        "{print}" | "1" | "{print $0}" | "{print $0;}"
+    ) {
+        return None;
+    }
+    index += 1;
+    if index < args.len() && args[index..].iter().any(|arg| arg.starts_with('-')) {
+        return None;
+    }
+    if args.len() - index > 1 {
+        return None;
+    }
+    Some(AwkQuery {
+        file: args.get(index).cloned(),
+    })
+}
+
+struct CutQuery {
+    file: Option<String>,
+}
+
+fn cut_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = cut_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(query.file.as_deref(), input, depth, substitutions)
+}
+
+fn cut_query(args: &[String]) -> Option<CutQuery> {
+    let mut index = 0usize;
+    let mut identity = false;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-c" {
+            if args.get(index + 1).is_some_and(|spec| spec == "1-") {
+                identity = true;
+                index += 2;
+                continue;
+            }
+            return None;
+        }
+        if let Some(rest) = arg.strip_prefix("-c")
+            && !rest.is_empty()
+        {
+            if rest != "1-" {
+                return None;
+            }
+            identity = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        break;
+    }
+    if !identity || args.len() - index > 1 {
+        return None;
+    }
+    Some(CutQuery {
+        file: args.get(index).cloned(),
+    })
+}
+
 enum StdinFor {
     Ready(Option<String>),
     Failed,
@@ -5623,6 +6664,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         }
         "grep" => grep_query(args).is_none_or(|query| query.file.is_none()),
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
+        "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
+        "sed" => sed_query(args).is_none_or(|query| query.file.is_none()),
+        "awk" => awk_query(args).is_none_or(|query| query.file.is_none()),
+        "cut" => cut_query(args).is_none_or(|query| query.file.is_none()),
         _ => false,
     }
 }
@@ -5697,6 +6742,14 @@ fn peel_redirects(stage: &str) -> Option<Peeled> {
                 index += 1;
             }
             '<' | '>' | '&' => {
+                if matches!(ch, '<' | '>') && chars.get(index + 1) == Some(&'(') {
+                    let end = take_proc_subst(&chars, index)?.1;
+                    kept.extend(chars[index..end].iter());
+                    index = end;
+                    word_start = false;
+                    fd_digits = None;
+                    continue;
+                }
                 let fd = take_fd(&mut fd_digits, &mut kept)?;
                 apply_redirect(&chars, &mut index, fd, &mut state)?;
                 word_start = true;
@@ -6065,6 +7118,10 @@ fn split_list(body: &str) -> Option<Vec<Piece>> {
                 word_start = false;
                 index = skip_backtick(&chars, index)?;
             }
+            '<' | '>' if chars.get(index + 1) == Some(&'(') => {
+                word_start = false;
+                index = take_proc_subst(&chars, index)?.1;
+            }
             '(' | ')' | '*' | '?' | '[' | ']' | '{' | '}' | '~' => return None,
             _ => {
                 word_start = false;
@@ -6137,8 +7194,21 @@ fn read_word_fields(
 ) -> Option<Vec<String>> {
     let mut fields = vec![String::new()];
     let mut saw = false;
+    let mut quoted_word = false;
     while *index < chars.len() {
         let ch = chars[*index];
+        if matches!(ch, '<' | '>') && chars.get(*index + 1) == Some(&'(') {
+            let (body, next) = take_proc_subst(chars, *index)?;
+            let mut word = String::new();
+            word.push(ch);
+            word.push('(');
+            word.push_str(&body);
+            word.push(')');
+            push_field(&mut fields, &word);
+            *index = next;
+            saw = true;
+            continue;
+        }
         if matches!(ch, ' ' | '\t' | '\n' | '\r' | ';' | '|' | '&' | '<' | '>') {
             break;
         }
@@ -6150,6 +7220,7 @@ fn read_word_fields(
                 *index += 1;
                 push_field(&mut fields, &take_single(chars, index)?);
                 saw = true;
+                quoted_word = true;
             }
             '"' => {
                 *index += 1;
@@ -6158,6 +7229,7 @@ fn read_word_fields(
                     &take_double(chars, index, depth, substitutions, unscanned)?,
                 );
                 saw = true;
+                quoted_word = true;
             }
             '$' if chars.get(*index + 1) == Some(&'(') => {
                 let (body, next) = take_command_subst(chars, *index)?;
@@ -6196,7 +7268,7 @@ fn read_word_fields(
             }
         }
     }
-    if fields.len() == 1 && fields[0].is_empty() {
+    if fields.len() == 1 && fields[0].is_empty() && !quoted_word {
         return Some(Vec::new());
     }
     Some(fields)
@@ -6288,7 +7360,22 @@ fn take_command_subst(chars: &[char], start: usize) -> Option<(String, usize)> {
     if chars.get(start) != Some(&'$') || chars.get(start + 1) != Some(&'(') {
         return None;
     }
-    let mut index = start + 2;
+    take_balanced_parens(chars, start + 1)
+}
+
+/// `<(...)` or `>(...)` starting at `<` or `>`.
+fn take_proc_subst(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if !matches!(chars.get(start), Some('<' | '>')) || chars.get(start + 1) != Some(&'(') {
+        return None;
+    }
+    take_balanced_parens(chars, start + 1)
+}
+
+fn take_balanced_parens(chars: &[char], open: usize) -> Option<(String, usize)> {
+    if chars.get(open) != Some(&'(') {
+        return None;
+    }
+    let mut index = open + 1;
     let mut depth = 1usize;
     let mut quote: Option<char> = None;
     let body_start = index;
@@ -7036,8 +8123,13 @@ fn push_shell_segment(
     stdin_bodies: &mut Vec<String>,
     parts: &mut Vec<ShellPart>,
     isolated: bool,
+    pending: &mut PendingSegment,
 ) {
-    if current.is_empty() && substitutions.is_empty() && stdin_bodies.is_empty() {
+    if current.is_empty()
+        && substitutions.is_empty()
+        && stdin_bodies.is_empty()
+        && pending.is_empty()
+    {
         in_eval.clear();
         return;
     }
@@ -7054,7 +8146,70 @@ fn push_shell_segment(
         heredocs: std::mem::take(stdin_bodies),
         substitutions: std::mem::take(substitutions),
         isolated,
+        proc_inputs: std::mem::take(&mut pending.proc_inputs),
+        stdin_file: pending.stdin_file.take(),
+        stdin_proc: pending.stdin_proc.take(),
+        read_heredoc: std::mem::take(&mut pending.read_heredoc),
     }));
+}
+
+enum StdinTarget {
+    Path(String),
+    Proc(String),
+    Opaque,
+}
+
+/// The word after `<`. A literal path is kept. `<(...)` is the printed
+/// text of that command. Quotes, globs, and expansions are not a path.
+fn take_stdin_target<I>(
+    chars: &mut std::iter::Peekable<I>,
+    substitutions: &mut Vec<String>,
+) -> StdinTarget
+where
+    I: Iterator<Item = char> + Clone,
+{
+    while matches!(chars.peek(), Some(' ' | '\t')) {
+        chars.next();
+    }
+    let mut look = chars.clone();
+    if look.next() == Some('<') && look.next() == Some('(') {
+        chars.next();
+        chars.next();
+        let body = read_balanced_parens(chars);
+        substitutions.push(body.clone());
+        return StdinTarget::Proc(body);
+    }
+    match chars.peek().copied() {
+        None => return StdinTarget::Opaque,
+        Some(
+            '\'' | '"' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\'
+            | '#' | '&' | '|' | ';' | '>' | '<',
+        ) => {
+            skip_redirect_word(chars, substitutions);
+            return StdinTarget::Opaque;
+        }
+        Some(_) => {}
+    }
+    let mut path = String::new();
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() || matches!(ch, ';' | '&' | '|' | '<' | '>' | '#') {
+            break;
+        }
+        if matches!(
+            ch,
+            '\'' | '"' | '\\' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')'
+        ) {
+            skip_unquoted_target(chars, substitutions);
+            return StdinTarget::Opaque;
+        }
+        chars.next();
+        path.push(ch);
+    }
+    if path.is_empty() {
+        StdinTarget::Opaque
+    } else {
+        StdinTarget::Path(path)
+    }
 }
 
 pub fn effective_gates(
@@ -7864,6 +9019,31 @@ mod tests {
             "eval \"$(echo 'git push origin main' < /dev/null)\"",
             "eval \"$(echo 'git push origin main' 2>/dev/null)\"",
             "eval \"$(echo hidden > /dev/null && echo 'git push origin main')\"",
+            "mapfile -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -t x <<< 'git push origin main'; eval \"$x\"",
+            "mapfile -t x <<< 'git push origin main'; eval \"${x}\"",
+            "mapfile -t x <<< 'git push origin main'; eval \"${x[@]}\"",
+            "mapfile -t x <<< 'git push origin main'; eval \"${x[*]}\"",
+            "mapfile x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "readarray -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -n 0 -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -s 0 -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -O 0 -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -u 0 -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -d '' -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "mapfile -C 'git push origin main' -c 1 -t x <<< hello",
+            "f() { mapfile -t x <<< 'git push origin main'; }; f; eval \"${x[0]}\"",
+            "f() { local x; mapfile -t x <<< 'git push origin main'; eval \"${x[0]}\"; }; f",
+            "read <<< 'git push origin main'; eval \"$REPLY\"",
+            "mapfile -t <<< 'git push origin main'; eval \"${MAPFILE[0]}\"",
+            "source <(echo 'git push origin main')",
+            ". <(echo 'git push origin main')",
+            "bash <(echo 'git push origin main')",
+            "sh <(echo 'git push origin main')",
+            "source <(printf '%s\\n' 'git push origin main')",
+            "eval \"$(cat <(echo 'git push origin main'))\"",
+            "eval \"$(tail -n 1 <(echo 'git push origin main'))\"",
+            "read x < <(echo 'git push origin main'); eval \"$x\"",
         ];
         for command in push {
             let want = if command.contains("rm -rf") {
@@ -7921,6 +9101,19 @@ mod tests {
             "eval \"$(echo 'git push origin main' >&2)\"",
             "eval \"$(echo 'git push origin main'2>/dev/null)\"",
             "eval \"$(echo 'git push origin main' &&)\"",
+            "mapfile -O 2 -t x <<< 'git push origin main'; eval \"${x[0]}\"",
+            "f() { local x; mapfile -t x <<< 'git push origin main'; }; f; eval \"${x[0]}\"",
+            "mapfile -t x <<< 'git push origin main' | true; eval \"${x[0]}\"",
+            "( mapfile -t x <<< 'git push origin main' ); eval \"${x[0]}\"",
+            "source <(echo 'echo hello')",
+            "bash -c 'echo hi' <(echo 'git push origin main')",
+            "eval \"$(echo <(echo 'git push origin main'))\"",
+            "mapfile -C 'git push origin main' -c 5000 -t x <<< hello",
+            "mapfile -C git -c 1 -t x <<< 'git push origin main'",
+            "mapfile -t x <<< alpha; eval \"${x[0]}\"",
+            "read x y <<< 'git push origin main'; eval \"$x\"",
+            "read x y <<< 'git push origin main'; eval \"$y\"",
+            "mapfile -t x <<< 'git push origin main'; x=echo; eval \"${x[0]}\"",
         ];
         for command in neither {
             assert!(
@@ -8894,16 +10087,19 @@ mod tests {
         let push = dir.join(format!("snapif-c29-push-{pid}.sh"));
         let echo = dir.join(format!("snapif-c29-echo-{pid}.sh"));
         let assign = dir.join(format!("snapif-c29-assign-{pid}.sh"));
+        let multi = dir.join(format!("snapif-c29-multi-{pid}.txt"));
         let big = dir.join(format!("snapif-c29-big-{pid}.sh"));
         std::fs::write(&push, "git push origin main\n").expect("push script");
         std::fs::write(&echo, "echo hello\n").expect("echo script");
         std::fs::write(&assign, "x='git push origin main'\n").expect("assign script");
+        std::fs::write(&multi, "alpha\nbeta\ngit push origin main\n").expect("multi script");
         let mut big_body = b"git push origin main\n".to_vec();
         big_body.resize(super::SCRIPT_FILE_CAP as usize + 1, b' ');
         std::fs::write(&big, &big_body).expect("big script");
         let push_s = plain_script_path(&push);
         let echo_s = plain_script_path(&echo);
         let assign_s = plain_script_path(&assign);
+        let multi_s = plain_script_path(&multi);
         let big_s = plain_script_path(&big);
         let missing = dir.join(format!("snapif-c29-missing-{pid}.sh"));
         let missing2 = dir.join(format!("snapif-c29-missing2-{pid}.sh"));
@@ -8950,6 +10146,42 @@ mod tests {
             format!("eval \"$(cat {missing_s} || echo 'git push origin main')\""),
             format!("eval \"$(cat {push_s} < {sub_s})\""),
             format!("eval \"$(echo 'git push origin main' < {sub_s})\""),
+            format!("eval \"$(tail -n 1 {push_s})\""),
+            format!("eval \"$(tail {push_s})\""),
+            format!("eval \"$(tail -n1 {push_s})\""),
+            format!("eval \"$(tail -1 {push_s})\""),
+            format!("eval \"$(tail -n +1 {push_s})\""),
+            format!("eval \"$(tail -n+1 {push_s})\""),
+            format!("eval \"$(tail -n +0 {push_s})\""),
+            format!("eval \"$(tail -n -1 {push_s})\""),
+            format!("eval \"$(tail +1 {push_s})\""),
+            format!("eval \"$(tail -n 1 {push_s} | cat)\""),
+            format!("eval \"$(sed -n 1p {push_s})\""),
+            format!("eval \"$(sed -n '1p' {push_s})\""),
+            format!("eval \"$(sed -n p {push_s})\""),
+            format!("eval \"$(sed '' {push_s})\""),
+            format!("eval \"$(sed p {push_s})\""),
+            format!("eval \"$(sed 1p {push_s})\""),
+            format!("eval \"$(sed 1,1p {push_s})\""),
+            format!("eval \"$(sed -n 1,1p {push_s})\""),
+            format!("eval \"$(awk '{{print}}' {push_s})\""),
+            format!("eval \"$(awk '1' {push_s})\""),
+            format!("eval \"$(awk '{{print $0}}' {push_s})\""),
+            format!("eval \"$(awk '{{print $0;}}' {push_s})\""),
+            format!("eval \"$(cut -c 1- {push_s})\""),
+            format!("eval \"$(cut -c1- {push_s})\""),
+            format!("eval \"$(tail -n 1 {multi_s})\""),
+            format!("eval \"$(sed 1p {multi_s})\""),
+            format!("read x < {push_s}; eval \"$x\""),
+            format!("read -r x < {push_s}; eval \"$x\""),
+            format!("read < {push_s}; eval \"$REPLY\""),
+            format!("mapfile -t x < {push_s}; eval \"${{x[0]}}\""),
+            format!("readarray -t x < {push_s}; eval \"${{x[0]}}\""),
+            format!("mapfile -t x < {multi_s}; eval \"${{x[2]}}\""),
+            format!("mapfile -s 2 -t x < {multi_s}; eval \"${{x[0]}}\""),
+            format!("mapfile -O 2 -t x < {push_s}; eval \"${{x[2]}}\""),
+            format!("mapfile -O 2 -t x < {multi_s}; eval \"${{x[4]}}\""),
+            format!("f() {{ mapfile -t x < {push_s}; }}; f; eval \"${{x[0]}}\""),
         ];
         for command in &positives {
             assert_eq!(
@@ -8966,6 +10198,12 @@ mod tests {
             format!("eval \"$(cat {big_s} {push_s})\""),
             format!("eval \"$(cat {push_s} {big_s})\""),
             format!("eval \"$(cat < {big_s})\""),
+            format!("eval \"$(tail -n 1 {big_s})\""),
+            format!("eval \"$(sed -n p {big_s})\""),
+            format!("eval \"$(awk '{{print}}' {big_s})\""),
+            format!("eval \"$(cut -c 1- {big_s})\""),
+            format!("read x < {big_s}; eval \"$x\""),
+            format!("mapfile -t x < {big_s}; eval \"${{x[0]}}\""),
         ] {
             assert_eq!(
                 matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
@@ -9002,6 +10240,20 @@ mod tests {
             format!("eval \"$(cat {missing_s} {missing2_s})\""),
             format!("eval \"$(cat < {sub_s})\""),
             format!("eval \"$(head -n 0 {push_s})\""),
+            format!("eval \"$(sed -n 1p {multi_s})\""),
+            format!("eval \"$(sed -n '' {push_s})\""),
+            format!("eval \"$(cut -c 1-5 {push_s})\""),
+            format!("eval \"$(cut -c1-5 {push_s})\""),
+            format!("eval \"$(tail -n 0 {push_s})\""),
+            format!("mapfile -t x < {multi_s}; eval \"${{x[0]}}\""),
+            format!("mapfile -O 2 -t x < {push_s}; eval \"${{x[0]}}\""),
+            format!("mapfile -O 2 -t x < {multi_s}; eval \"${{x[2]}}\""),
+            format!("read x y < {push_s}; eval \"$x\""),
+            format!("read x y < {push_s}; eval \"$y\""),
+            format!("read x < {missing_s}; eval \"$x\""),
+            format!("f() {{ local x; mapfile -t x < {push_s}; }}; f; eval \"${{x[0]}}\""),
+            "bash -c 'echo hi' <(echo 'git push origin main')".to_string(),
+            "source <(echo 'echo hello')".to_string(),
         ];
         for command in &neithers {
             assert!(
@@ -9032,6 +10284,8 @@ mod tests {
                 format!("x=$(<{fifo_s}); eval \"$x\""),
                 format!("eval \"$(cat < {fifo_s})\""),
                 format!("eval \"$(echo 'git push origin main' < {fifo_s})\""),
+                format!("eval \"$(tail {fifo_s})\""),
+                format!("read x < {fifo_s}; eval \"$x\""),
             ] {
                 assert!(
                     matched_action(&policy, "Bash", Some(&command)).is_none(),
@@ -9041,7 +10295,7 @@ mod tests {
             let _ = std::fs::remove_file(&link);
             let _ = std::fs::remove_file(&fifo);
         }
-        for path in [&push, &echo, &assign, &big] {
+        for path in [&push, &echo, &assign, &multi, &big] {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(&sub);
