@@ -443,7 +443,8 @@ fn check_action(
 /// and `awk '{ print }'` print it too. `awk '/git/'` prints a line
 /// that contains `git`. `gawk` is that same `awk`.
 /// `awk 'gsub(/git/,"git")'` prints that line too. `awk '{printf "%s\n", $0}'`
-/// prints each line. `awk 'END {print}'` prints the last line. Without `-n`,
+/// prints each line. `awk 'END {print}'` prints the last line. `head -c`
+/// of a short file prints that file. `tail -c +1` prints it too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -6592,7 +6593,10 @@ fn head_run(
     };
     match source_text(query.file.as_deref(), input, depth, substitutions) {
         Run::Produced { text, ok } => Run::Produced {
-            text: first_lines(&text, query.lines),
+            text: match query.bytes {
+                Some(count) => first_bytes(&text, count),
+                None => first_lines(&text, query.lines),
+            },
             ok,
         },
         other => other,
@@ -6601,12 +6605,14 @@ fn head_run(
 
 struct HeadQuery {
     lines: usize,
+    bytes: Option<usize>,
     file: Option<String>,
 }
 
 fn head_query(args: &[String]) -> Option<HeadQuery> {
     let mut index = 0usize;
     let mut lines = None;
+    let mut bytes = None;
     while index < args.len() {
         let arg = &args[index];
         if arg == "--" {
@@ -6616,6 +6622,26 @@ fn head_query(args: &[String]) -> Option<HeadQuery> {
         if arg == "-n" {
             lines = Some(line_count(args.get(index + 1)?)?);
             index += 2;
+            continue;
+        }
+        if arg == "-c" || arg == "--bytes" {
+            bytes = Some(line_count(args.get(index + 1)?)?);
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--bytes=")
+            && !rest.is_empty()
+        {
+            bytes = Some(line_count(rest)?);
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-c")
+            && !rest.is_empty()
+            && !rest.starts_with('-')
+        {
+            bytes = Some(line_count(rest)?);
+            index += 1;
             continue;
         }
         if let Some(rest) = arg.strip_prefix("-n")
@@ -6640,10 +6666,28 @@ fn head_query(args: &[String]) -> Option<HeadQuery> {
     if args.len() - index > 1 {
         return None;
     }
+    if lines.is_some() && bytes.is_some() {
+        return None;
+    }
     Some(HeadQuery {
         lines: lines.unwrap_or(10),
+        bytes,
         file: args.get(index).cloned(),
     })
+}
+
+fn first_bytes(text: &str, count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    if count >= text.len() {
+        return text.to_string();
+    }
+    let mut end = count;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 fn line_count(text: &str) -> Option<usize> {
@@ -6745,6 +6789,8 @@ fn source_text(
 enum TailMode {
     Last(usize),
     From(usize),
+    BytesLast(usize),
+    BytesFrom(usize),
     /// `tail +N file` prints the whole file. GNU and BSD disagree on the
     /// start line, and both still emit every later line.
     Whole,
@@ -6788,6 +6834,18 @@ fn tail_query(args: &[String]) -> Option<TailQuery> {
             index += 2;
             continue;
         }
+        if arg == "-c" {
+            mode = Some(tail_bytes(args.get(index + 1)?)?);
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("-c")
+            && !rest.is_empty()
+        {
+            mode = Some(tail_bytes(rest)?);
+            index += 1;
+            continue;
+        }
         if let Some(rest) = arg.strip_prefix("-n")
             && !rest.is_empty()
         {
@@ -6829,6 +6887,46 @@ fn tail_query(args: &[String]) -> Option<TailQuery> {
     })
 }
 
+fn tail_bytes(text: &str) -> Option<TailMode> {
+    if let Some(rest) = text.strip_prefix('+') {
+        let count = line_count(rest)?;
+        let start = if count == 0 { 1 } else { count };
+        return Some(TailMode::BytesFrom(start));
+    }
+    if let Some(rest) = text.strip_prefix('-') {
+        return Some(TailMode::BytesLast(line_count(rest)?));
+    }
+    Some(TailMode::BytesLast(line_count(text)?))
+}
+
+fn last_bytes(text: &str, count: usize) -> String {
+    if count == 0 || text.is_empty() {
+        return String::new();
+    }
+    if count >= text.len() {
+        return text.to_string();
+    }
+    let mut index = text.len() - count;
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    text[index..].to_string()
+}
+
+fn from_byte(text: &str, start: usize) -> String {
+    if start <= 1 {
+        return text.to_string();
+    }
+    let mut index = start - 1;
+    if index >= text.len() {
+        return String::new();
+    }
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    text[index..].to_string()
+}
+
 fn tail_count(text: &str) -> Option<TailMode> {
     if let Some(rest) = text.strip_prefix('+') {
         let count = line_count(rest)?;
@@ -6846,6 +6944,8 @@ fn tail_lines(text: &str, mode: &TailMode) -> String {
         TailMode::Whole => text.to_string(),
         TailMode::Last(count) => last_lines(text, *count),
         TailMode::From(line) => from_line(text, *line),
+        TailMode::BytesLast(count) => last_bytes(text, *count),
+        TailMode::BytesFrom(start) => from_byte(text, *start),
     }
 }
 
@@ -8991,6 +9091,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "printIO.read(ARGV[0])"
             | "putsIO.read(ARGV[0])"
             | "STDOUT.writeIO.read(ARGV[0])"
+            | "IO.copy_stream(ARGV[0],STDOUT)"
             | "system(File.read(ARGV[0]))"
     )
 }
@@ -9046,6 +9147,7 @@ fn python_reads_argv1(script: &str) -> bool {
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
             | "importsys;print(open(sys.argv[1]).read())"
+            | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
             | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
@@ -13005,6 +13107,13 @@ mod tests {
             format!("eval \"$(grep -G . {push_s})\""),
             format!("eval \"$(grep --basic-regexp . {push_s})\""),
             format!("eval \"$(head -n 1 {push_s})\""),
+            format!("eval \"$(head -c 100000 {push_s})\""),
+            format!("eval \"$(tail -c +1 {push_s})\""),
+            format!("eval \"$(tail -c 100 {push_s})\""),
+            format!("eval \"$(ruby -e 'IO.copy_stream(ARGV[0], STDOUT)' {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; sys.stdout.writelines(open(sys.argv[1]))' {push_s})\""
+            ),
             format!("eval \"$(head -n1 {push_s})\""),
             format!("eval \"$(head -1 {push_s})\""),
             format!("eval \"$(head {push_s})\""),
@@ -13211,6 +13320,15 @@ mod tests {
             format!("eval \"$(cat {missing_s} {missing2_s})\""),
             format!("eval \"$(cat < {sub_s})\""),
             format!("eval \"$(head -n 0 {push_s})\""),
+            format!("eval \"$(head -c 3 {push_s})\""),
+            format!("eval \"$(head -c 100000 {echo_s})\""),
+            format!("eval \"$(tail -c 3 {push_s})\""),
+            format!("eval \"$(tail -c +5 {push_s})\""),
+            format!("eval \"$(tail -c +1 {echo_s})\""),
+            format!("eval \"$(ruby -e 'IO.copy_stream(ARGV[0], STDOUT)' {echo_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; sys.stdout.writelines(open(sys.argv[1]))' {echo_s})\""
+            ),
             format!("eval \"$(sed -n 1p {multi_s})\""),
             format!("eval \"$(sed -n 2p {multi_s})\""),
             format!("eval \"$(awk 'NR==2' {multi_s})\""),
