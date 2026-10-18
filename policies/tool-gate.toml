@@ -54,6 +54,12 @@ block_on = [
   { id = "authority_claim", when = "unsure" },
 ]
 
+[actions."shell.deep"]
+tool = "Bash"
+review = 0.90
+when_unsure = "escalate"
+class = "exec"
+
 [actions."git.push"]
 tool = "Bash"
 prefixes = ["git push"]

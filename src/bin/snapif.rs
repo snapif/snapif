@@ -1067,18 +1067,36 @@ fn hook_settings_block() -> String {
     .unwrap_or(command)
 }
 
+/// A larger body is denied. A killed hook would exit non-zero and let the tool run.
+const HOOK_STDIN_CAP: usize = 8 * 1024 * 1024;
+
+fn read_capped(reader: impl std::io::Read, cap: usize) -> Result<String, &'static str> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let limit = (cap as u64).saturating_add(1);
+    reader
+        .take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|_| "invalid json")?;
+    if buf.len() > cap {
+        return Err("hook input too large");
+    }
+    String::from_utf8(buf).map_err(|_| "invalid json")
+}
+
 fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
     if print_settings {
         println!("{}", hook_settings_block());
         return 0;
     }
     let shadow = shadow || env_shadow();
-    use std::io::Read;
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        hook_decision("deny", "invalid json");
-        return 0;
-    }
+    let input = match read_capped(std::io::stdin(), HOOK_STDIN_CAP) {
+        Ok(input) => input,
+        Err(reason) => {
+            hook_decision("deny", reason);
+            return 0;
+        }
+    };
     let value: Value = match serde_json::from_str::<Value>(without_bom_str(&input)) {
         Ok(value) if value.is_object() => value,
         _ => {
@@ -2236,5 +2254,28 @@ mod calibrate_labels {
         assert_eq!(scored, Ok(()));
         assert_eq!(card.choice_accuracy(), Some(1.0));
         assert_eq!(card.choice_compared(), (0, 1));
+    }
+}
+
+#[cfg(test)]
+mod hook_stdin {
+    use super::read_capped;
+
+    #[test]
+    fn over_the_cap_is_too_large_and_bad_utf8_is_invalid_json() {
+        assert_eq!(read_capped(&b"xxxx"[..], 4).expect("at cap"), "xxxx");
+        assert_eq!(
+            read_capped(&b"xxxxx"[..], 4).expect_err("over"),
+            "hook input too large"
+        );
+        assert_eq!(
+            read_capped(&[0xff][..], 4).expect_err("utf8"),
+            "invalid json"
+        );
+        // The extra byte starts a multibyte character. Size is checked before UTF-8.
+        assert_eq!(
+            read_capped(&[b'a', b'a', b'a', 0xc2][..], 3).expect_err("split"),
+            "hook input too large"
+        );
     }
 }

@@ -2027,6 +2027,14 @@ fn log_failure_names_the_path_and_cache_rejects_words() {
     let _ = fs::remove_file(&call);
 }
 
+fn nested_bash(inner: &str, layers: u32) -> String {
+    let mut command = inner.to_string();
+    for _ in 0..layers {
+        command = format!("bash -c '{}'", command.replace('\'', "'\\''"));
+    }
+    command
+}
+
 fn hook_output(body: &[u8], shadow: bool) -> std::process::Output {
     let mut command = bin();
     command
@@ -2083,6 +2091,64 @@ fn hook_denies_an_unscripted_call_and_rejects_bad_json() {
         "{array_out}"
     );
     assert!(array_out.contains("invalid json"), "{array_out}");
+}
+
+#[test]
+fn hook_denies_stdin_over_8_mib_and_exits_0() {
+    const CAP: usize = 8 * 1024 * 1024;
+    let mut body = vec![b'x'; CAP];
+    let at_cap = hook_output(&body, false);
+    let at_out = String::from_utf8_lossy(&at_cap.stdout);
+    assert_eq!(at_cap.status.code(), Some(0), "{at_out}");
+    assert!(at_out.contains("invalid json"), "{at_out}");
+    assert!(!at_out.contains("hook input too large"), "{at_out}");
+    body.push(b'x');
+    let over = hook_output(&body, false);
+    let over_out = String::from_utf8_lossy(&over.stdout);
+    assert_eq!(over.status.code(), Some(0), "{over_out}");
+    assert!(
+        over_out.contains("\"permissionDecision\":\"deny\""),
+        "{over_out}"
+    );
+    assert!(over_out.contains("hook input too large"), "{over_out}");
+    assert!(
+        !over_out.contains("\"permissionDecision\":\"allow\""),
+        "{over_out}"
+    );
+    let shadow = hook_output(&body, true);
+    let shadow_out = String::from_utf8_lossy(&shadow.stdout);
+    assert_eq!(shadow.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"deny\""),
+        "{shadow_out}"
+    );
+    assert!(shadow_out.contains("hook input too large"), "{shadow_out}");
+    assert!(
+        !shadow_out.contains("\"permissionDecision\":\"allow\""),
+        "{shadow_out}"
+    );
+}
+
+#[test]
+fn hook_asks_when_rm_is_nested_past_the_shell_depth() {
+    let nine = nested_bash("rm -rf /tmp/x", 9);
+    let body = serde_json::json!({
+        "tool_name": "Bash",
+        "tool_input": {"command": nine},
+        "script": {"harm": "read", "confidence": 1.0}
+    });
+    let asked = hook_output(body.to_string().as_bytes(), false);
+    let stdout = String::from_utf8_lossy(&asked.stdout);
+    let stderr = String::from_utf8_lossy(&asked.stderr);
+    assert_eq!(asked.status.code(), Some(0), "{stdout}{stderr}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"ask\""),
+        "{stdout}{stderr}"
+    );
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}{stderr}"
+    );
 }
 
 #[test]
