@@ -446,7 +446,8 @@ fn check_action(
 /// prints each line. `awk 'END {print}'` prints the last line. `head -c`
 /// of a short file prints that file. `tail -c +1` prints it too.
 /// `cat -u` still prints the file. `stdbuf -o0 cat` prints it too.
-/// `gcat`, `ghead -c`, and `gtail -c +1` print that file. `timeout 1 cat`
+/// `gcat`, `ghead -c`, `gtail -c +1`, `gfold`, `gfmt`, `gpaste`, and `gsort`
+/// print that file. `timeout 1 cat`
 /// and `gxargs cat` print it too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
@@ -2920,6 +2921,10 @@ fn stage_command_name(token: &str) -> String {
         "gcat" => "cat".to_string(),
         "ghead" => "head".to_string(),
         "gtail" => "tail".to_string(),
+        "gfold" => "fold".to_string(),
+        "gfmt" => "fmt".to_string(),
+        "gpaste" => "paste".to_string(),
+        "gsort" => "sort".to_string(),
         _ => {
             if aliased == lowered && base != lowered {
                 base.to_string()
@@ -13264,6 +13269,10 @@ mod tests {
             format!("eval \"$(gcat {push_s})\""),
             format!("eval \"$(ghead -c 100000 {push_s})\""),
             format!("eval \"$(gtail -c +1 {push_s})\""),
+            format!("eval \"$(gfold {push_s})\""),
+            format!("eval \"$(gfmt {push_s})\""),
+            format!("eval \"$(gpaste {push_s})\""),
+            format!("eval \"$(gsort {push_s})\""),
             format!("eval \"$(timeout 1 cat {push_s})\""),
             format!("eval \"$(gtimeout 1 cat {push_s})\""),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
@@ -13492,6 +13501,10 @@ mod tests {
             format!("eval \"$(gcat {echo_s})\""),
             format!("eval \"$(ghead -c 100000 {echo_s})\""),
             format!("eval \"$(gtail -c +1 {echo_s})\""),
+            format!("eval \"$(gfold {echo_s})\""),
+            format!("eval \"$(gfmt {echo_s})\""),
+            format!("eval \"$(gpaste {echo_s})\""),
+            format!("eval \"$(gsort {echo_s})\""),
             format!("eval \"$(timeout 1 cat {echo_s})\""),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
