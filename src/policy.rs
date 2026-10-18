@@ -432,7 +432,8 @@ fn check_action(
 /// `grep . path`, and `head -n 1 path` are that text. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
-/// too. `sed -n 3p` and `awk 'NR==3'` print that line. Without `-n`,
+/// too. `sed -n 3p` and `awk 'NR==3'` print that line. `awk 'NR==1 {print}'`
+/// and `awk '{ print }'` print it too. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -6915,10 +6916,14 @@ fn awk_query(args: &[String]) -> Option<AwkQuery> {
 }
 
 fn awk_program(program: &str) -> Option<AwkSel> {
-    if matches!(program, "{print}" | "1" | "{print $0}" | "{print $0;}") {
+    let compact: String = program.chars().filter(|ch| !ch.is_whitespace()).collect();
+    if matches!(
+        compact.as_str(),
+        "{print}" | "1" | "{print$0}" | "{print$0;}"
+    ) {
         return Some(AwkSel::All);
     }
-    let pieces = split_statements(program);
+    let pieces = split_statements(&compact);
     if pieces.is_empty() {
         return None;
     }
@@ -6964,23 +6969,28 @@ fn split_statements(program: &str) -> Vec<&str> {
     pieces
 }
 
+fn awk_drop_print(text: &str) -> &str {
+    text.strip_suffix("{print;}")
+        .or_else(|| text.strip_suffix("{print}"))
+        .or_else(|| text.strip_suffix("{print$0;}"))
+        .or_else(|| text.strip_suffix("{print$0}"))
+        .unwrap_or(text)
+}
+
 fn awk_one(program: &str) -> Option<AwkSel> {
-    if matches!(program, "{print}" | "1" | "{print $0}" | "{print $0;}") {
+    if matches!(program, "{print}" | "1" | "{print$0}" | "{print$0;}") {
         return Some(AwkSel::All);
     }
     let rest = program.strip_prefix("NR==")?;
     if let Some((left, right)) = rest.split_once(",NR==") {
-        let start = line_count(left)?;
-        let end = line_count(right)?;
+        let start = line_count(awk_drop_print(left))?;
+        let end = line_count(awk_drop_print(right))?;
         if start == 0 || end == 0 {
             return None;
         }
         return Some(AwkSel::Range { start, end });
     }
-    let body = rest
-        .strip_suffix("{print;}")
-        .or_else(|| rest.strip_suffix("{print}"))
-        .unwrap_or(rest);
+    let body = awk_drop_print(rest);
     let line = line_count(body)?;
     if line == 0 {
         return None;
@@ -12139,6 +12149,9 @@ mod tests {
             format!("eval \"$(sed -n 3,3p {multi_s})\""),
             format!("eval \"$(sed -n '$p' {multi_s})\""),
             format!("eval \"$(awk 'NR==3' {multi_s})\""),
+            format!("eval \"$(awk 'NR==1 {{print}}' {push_s})\""),
+            format!("eval \"$(awk '{{ print }}' {push_s})\""),
+            format!("eval \"$(awk 'NR==1 {{ print }}' {push_s})\""),
             format!("eval \"$(awk 'NR==3{{print}}' {multi_s})\""),
             format!("eval \"$(awk 'NR==2,NR==3' {multi_s})\""),
             format!("eval \"$(sed -n '3p;3p' {multi_s})\""),
@@ -12216,6 +12229,7 @@ mod tests {
             format!("eval \"$(sed -n 1p {multi_s})\""),
             format!("eval \"$(sed -n 2p {multi_s})\""),
             format!("eval \"$(awk 'NR==2' {multi_s})\""),
+            format!("eval \"$(awk 'NR==2 {{print}}' {multi_s})\""),
             format!("eval \"$(sed -n '2p;2p' {multi_s})\""),
             format!("eval \"$(sed -n 2l {multi_s})\""),
             format!("eval \"$(perl -ne '' {push_s})\""),
