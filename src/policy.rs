@@ -439,7 +439,10 @@ fn check_action(
 /// prints the same bytes. `sort --compress-program` runs that program.
 /// `base64 -d` prints the decoded text.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
-/// `strings` print that line too.
+/// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
+/// `cat -s` still print it. `tee` copies its input. `tr` and
+/// `iconv -f utf-8 -t utf-8` print that text. `join` of a file with
+/// itself prints the line.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
@@ -5942,6 +5945,10 @@ fn run_builtin(
             ok: false,
         },
         "cat" => cat_run(args, input, depth, substitutions),
+        "tee" => tee_run(args, input),
+        "tr" => tr_run(args, input),
+        "iconv" => iconv_run(args, input, depth, substitutions),
+        "join" => join_run(args, input, depth, substitutions),
         "grep" => grep_run(args, input, depth, substitutions),
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
@@ -6024,12 +6031,183 @@ fn cat_operands(args: &[String]) -> Option<Vec<String>> {
             options = false;
             continue;
         }
+        if options && arg.starts_with("--") {
+            match arg.as_str() {
+                "--show-nonprinting" | "--show-ends" | "--show-tabs" | "--squeeze-blank"
+                | "--show-all" => continue,
+                _ => return None,
+            }
+        }
         if options && arg.starts_with('-') && arg != "-" {
-            return None;
+            // `-n` and `-b` number the line, so it is no longer the command.
+            // `-v`, `-e`, `-E`, `-t`, `-T`, `-s`, and `-A` still print it.
+            for ch in arg.chars().skip(1) {
+                if !matches!(ch, 'v' | 'e' | 'E' | 't' | 'T' | 's' | 'A') {
+                    return None;
+                }
+            }
+            continue;
         }
         operands.push(arg.clone());
     }
     Some(operands)
+}
+
+fn tee_run(args: &[String], input: Option<&str>) -> Run {
+    if !tee_query(args) {
+        return Run::Unknown;
+    }
+    match input {
+        Some(text) => Run::Produced {
+            text: text.to_string(),
+            ok: true,
+        },
+        None => Run::Unknown,
+    }
+}
+
+/// `tee` copies stdin to stdout. Later operands are output files.
+fn tee_query(args: &[String]) -> bool {
+    let mut options = true;
+    for arg in args {
+        if options && arg == "--" {
+            options = false;
+            continue;
+        }
+        if options
+            && (arg == "-a" || arg == "--append" || arg == "-i" || arg == "--ignore-interrupts")
+        {
+            continue;
+        }
+        if options && arg.starts_with('-') && arg != "-" {
+            return false;
+        }
+    }
+    true
+}
+
+fn tr_run(args: &[String], input: Option<&str>) -> Run {
+    if args.is_empty() {
+        return Run::Unknown;
+    }
+    match input {
+        Some(text) => Run::Produced {
+            text: text.to_string(),
+            ok: true,
+        },
+        None => Run::Unknown,
+    }
+}
+
+fn iconv_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = iconv_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn iconv_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut from = None;
+    let mut to = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "--" {
+            index += 1;
+            files.extend(args[index..].iter().cloned());
+            break;
+        }
+        if arg == "-f" || arg == "--from-code" {
+            index += 1;
+            from = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--from-code=") {
+            if value.is_empty() {
+                return None;
+            }
+            from = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if arg == "-t" || arg == "--to-code" {
+            index += 1;
+            to = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--to-code=") {
+            if value.is_empty() {
+                return None;
+            }
+            to = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(arg);
+        index += 1;
+    }
+    if files.len() > 1 {
+        return None;
+    }
+    if let (Some(from), Some(to)) = (from.as_deref(), to.as_deref()) {
+        if !same_charset(from, to) {
+            return None;
+        }
+    } else if from.is_some() || to.is_some() {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
+fn same_charset(left: &str, right: &str) -> bool {
+    charset_key(left) == charset_key(right)
+}
+
+fn charset_key(name: &str) -> String {
+    name.chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn join_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(files) = join_query(args) else {
+        return Run::Unknown;
+    };
+    load_pieces(&files, input, depth, substitutions, true).map_or_else(
+        |run| run,
+        |pieces| Run::Produced {
+            text: pieces.text,
+            ok: pieces.ok,
+        },
+    )
+}
+
+/// Two files, no flags. `join` of a file with itself still prints the line.
+fn join_query(args: &[String]) -> Option<Vec<String>> {
+    if args.iter().any(|arg| arg.starts_with('-') && arg != "-") {
+        return None;
+    }
+    if args.len() != 2 {
+        return None;
+    }
+    Some(args.to_vec())
 }
 
 fn grep_run(
@@ -7828,6 +8006,9 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "cat" => {
             cat_operands(args).is_none_or(|ops| ops.is_empty() || ops.iter().any(|op| op == "-"))
         }
+        "tee" | "tr" => true,
+        "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
+        "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
         "grep" => grep_query(args).is_none_or(|query| query.file.is_none()),
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
@@ -11328,6 +11509,8 @@ mod tests {
         names_body.push(0);
         std::fs::write(&names, names_body).expect("names");
         let names_s = plain_script_path(&names);
+        let tee_out = dir.join(format!("snapif-c31-tee-{pid}.txt"));
+        let tee_s = plain_script_path(&tee_out);
         let missing = dir.join(format!("snapif-c29-missing-{pid}.sh"));
         let missing2 = dir.join(format!("snapif-c29-missing2-{pid}.sh"));
         let _ = std::fs::remove_file(&missing);
@@ -11350,6 +11533,20 @@ mod tests {
             format!("source {assign_s}; eval \"$x\""),
             format!("command source {push_s}"),
             format!("eval \"$(cat {push_s})\""),
+            format!("eval \"$(cat -v {push_s})\""),
+            format!("eval \"$(cat -e {push_s})\""),
+            format!("eval \"$(cat -t {push_s})\""),
+            format!("eval \"$(cat -s {push_s})\""),
+            format!("eval \"$(cat -A {push_s})\""),
+            format!("eval \"$(cat -E {push_s})\""),
+            format!("eval \"$(cat -T {push_s})\""),
+            format!("eval \"$(cat -vet {push_s})\""),
+            format!("eval \"$(tee {tee_s} < {push_s})\""),
+            format!("eval \"$(cat {push_s} | tee)\""),
+            format!("eval \"$(tr a-z A-Z < {push_s})\""),
+            format!("eval \"$(iconv -f utf-8 -t utf-8 {push_s})\""),
+            format!("eval \"$(iconv -f UTF-8 -t utf8 {push_s})\""),
+            format!("eval \"$(join {push_s} {push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
             format!("eval \"$(command cat {push_s})\""),
             format!("x=$(cat {push_s}); eval \"$x\""),
@@ -11515,6 +11712,8 @@ mod tests {
             format!("cat {push_s}"),
             format!("echo \"$(cat {push_s})\""),
             format!("eval \"$(cat -n {push_s})\""),
+            format!("eval \"$(comm {push_s})\""),
+            format!("eval \"$(iconv -f utf-8 -t utf-16 {push_s})\""),
             format!("eval \"$(cat {missing_s})\""),
             format!("x=$(<{missing_s}); eval \"$x\""),
             format!("eval \"$(cat {push_s} | true)\""),
