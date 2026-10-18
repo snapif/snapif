@@ -7619,18 +7619,41 @@ fn identity_query(command: &str, args: &[String]) -> Option<Option<String>> {
 
 fn short_identity_value(name: &str, flag: char) -> Option<bool> {
     Some(match (name, flag) {
-        ("paste", 's') | ("unexpand", 'a') | ("fold", 's') | ("column", 't') | ("pr", 't') => false,
-        ("expand", 't') | ("fold", 'w') | ("fmt", 'w') | ("strings", 'n') => true,
+        ("paste", 's')
+        | ("unexpand", 'a')
+        | ("fold", 's')
+        | ("fold", 'b')
+        | ("column", 't')
+        | ("pr", 't')
+        | ("expand", 'i')
+        | ("strings", 'a')
+        | ("fmt", 's') => false,
+        ("paste", 'd')
+        | ("expand", 't')
+        | ("fold", 'w')
+        | ("fmt", 'w')
+        | ("strings", 'n')
+        | ("column", 'c') => true,
         _ => return None,
     })
 }
 
 fn long_identity_value(name: &str, flag: &str) -> Option<bool> {
     Some(match (name, flag) {
-        ("paste", "serial") | ("unexpand", "all") | ("fold", "spaces") | ("column", "table") => {
-            false
-        }
-        ("expand", "tabs") | ("fold", "width") | ("fmt", "width") | ("strings", "bytes") => true,
+        ("paste", "serial")
+        | ("unexpand", "all")
+        | ("fold", "spaces")
+        | ("fold", "bytes")
+        | ("column", "table")
+        | ("expand", "initial")
+        | ("strings", "all")
+        | ("fmt", "split-only") => false,
+        ("paste", "delimiters")
+        | ("expand", "tabs")
+        | ("fold", "width")
+        | ("fmt", "width")
+        | ("strings", "bytes")
+        | ("column", "output-width") => true,
         _ => return None,
     })
 }
@@ -11397,6 +11420,12 @@ mod tests {
             format!("eval \"$(pr -t {push_s})\""),
             format!("eval \"$(strings {push_s})\""),
             format!("eval \"$(strings -n 1 {push_s})\""),
+            format!("eval \"$(paste -d ' ' {push_s})\""),
+            format!("eval \"$(expand -i {push_s})\""),
+            format!("eval \"$(strings -a {push_s})\""),
+            format!("eval \"$(fmt -s {push_s})\""),
+            format!("eval \"$(column -c 80 {push_s})\""),
+            format!("eval \"$(fold -b {push_s})\""),
             format!("eval \"$(tail {push_s})\""),
             format!("eval \"$(tail -n1 {push_s})\""),
             format!("eval \"$(tail -1 {push_s})\""),
