@@ -445,6 +445,10 @@ fn check_action(
 /// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
 /// line. `base32 -d` prints the decoded text. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
+/// `sed -n 1l` and `sed -n '$l'` print that line too. `gsed` is that
+/// same `sed`. A python one-liner that writes `open(sys.argv[1]).read()`,
+/// a node one-liner that writes `readFileSync`, `ruby -e` that prints
+/// `File.read`, and `php -r` that echoes `file_get_contents` print the file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
 /// `eval`. `printf -v name` stores a value for a later `eval`. Inside a
@@ -5954,7 +5958,7 @@ fn run_builtin(
         "grep" => grep_run(args, input, depth, substitutions),
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
-        "sed" => sed_run(args, input, depth, substitutions),
+        "sed" | "gsed" => sed_run(args, input, depth, substitutions),
         "awk" => awk_run(args, input, depth, substitutions),
         "cut" => cut_run(args, input, depth, substitutions),
         "sort" => sort_run(args, input, depth, substitutions),
@@ -5963,8 +5967,10 @@ fn run_builtin(
         "base64" => base64_run(args, input, depth, substitutions),
         "base32" => base32_run(args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
-        "perl" | "ruby" => line_print_run(args, input, depth, substitutions),
+        "perl" | "ruby" => line_print_run(&words[0], args, input, depth, substitutions),
         "python" | "python3" => python_cat_run(args, input, depth, substitutions),
+        "node" => node_cat_run(args, input, depth, substitutions),
+        "php" => php_cat_run(args, input, depth, substitutions),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_run(&words[0], args, input, depth, substitutions)
         }
@@ -6749,7 +6755,10 @@ fn sed_script(script: &str, quiet: bool) -> Option<SedPrint> {
 }
 
 fn sed_address(script: &str) -> Option<(SedEnd, SedEnd)> {
-    let body = script.strip_suffix('p')?;
+    // `l` prints the line and a `$`. Eval expands that `$` away.
+    let body = script
+        .strip_suffix('p')
+        .or_else(|| script.strip_suffix('l'))?;
     if body.is_empty() {
         return None;
     }
@@ -8039,19 +8048,20 @@ fn dd_query(args: &[String]) -> Option<Option<String>> {
 }
 
 fn line_print_run(
+    name: &str,
     args: &[String],
     input: Option<&str>,
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let Some(file) = line_print_query(args) else {
+    let Some(file) = line_print_query(name, args) else {
         return Run::Unknown;
     };
     source_text(file.as_deref(), input, depth, substitutions)
 }
 
 /// `perl -pe ''` and `ruby -pe ''` print each line unchanged.
-fn line_print_query(args: &[String]) -> Option<Option<String>> {
+fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
     let mut index = 0usize;
     let mut print_lines = false;
     let mut script = None;
@@ -8098,14 +8108,23 @@ fn line_print_query(args: &[String]) -> Option<Option<String>> {
         files.push(arg);
         index += 1;
     }
-    if !print_lines || files.len() > 1 {
+    if files.len() > 1 {
         return None;
     }
-    let text = script?;
-    if !text.trim().is_empty() {
-        return None;
+    match script {
+        Some(text) if text.trim().is_empty() && print_lines => Some(files.first().cloned()),
+        Some(text)
+            if command_basename(name) == "ruby" && ruby_reads_argv0(&text) && files.len() == 1 =>
+        {
+            Some(files.first().cloned())
+        }
+        _ => None,
     }
-    Some(files.first().cloned())
+}
+
+fn ruby_reads_argv0(script: &str) -> bool {
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact == "printFile.read(ARGV[0])"
 }
 
 fn python_cat_run(
@@ -8154,7 +8173,101 @@ fn python_cat_query(args: &[String]) -> Option<Option<String>> {
 
 fn python_reads_argv1(script: &str) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
-    compact == "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
+    matches!(
+        compact.as_str(),
+        "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
+            | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
+    )
+}
+
+fn node_cat_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = node_cat_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn node_cat_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "-e" || arg == "--eval" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(arg);
+        index += 1;
+    }
+    let script = script?;
+    if !node_reads_argv1(&script) || files.len() != 1 {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
+fn node_reads_argv1(script: &str) -> bool {
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact == "process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
+}
+
+fn php_cat_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = php_cat_query(args) else {
+        return Run::Unknown;
+    };
+    source_text(file.as_deref(), input, depth, substitutions)
+}
+
+fn php_cat_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].clone();
+        if arg == "-r" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(arg);
+        index += 1;
+    }
+    let script = script?;
+    if !php_reads_argv1(&script) || files.len() != 1 {
+        return None;
+    }
+    Some(files.first().cloned())
+}
+
+fn php_reads_argv1(script: &str) -> bool {
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact == "echofile_get_contents($argv[1]);"
 }
 
 fn base64_run(
@@ -8326,14 +8439,16 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "tee" | "tr" => true,
         "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
         "dd" => dd_query(args).is_none_or(|query| query.is_none()),
-        "perl" | "ruby" => line_print_query(args).is_none_or(|query| query.is_none()),
+        "perl" | "ruby" => line_print_query(&words[0], args).is_none_or(|query| query.is_none()),
         "python" | "python3" => python_cat_query(args).is_none_or(|query| query.is_none()),
+        "node" => node_cat_query(args).is_none_or(|query| query.is_none()),
+        "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
         "grep" => grep_query(args).is_none_or(|query| query.file.is_none()),
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
-        "sed" => sed_query(args).is_none_or(|query| query.file.is_none()),
+        "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
         "awk" => awk_query(args).is_none_or(|query| query.file.is_none()),
         "cut" => cut_query(args).is_none_or(|query| query.file.is_none()),
         "sort" => sort_query(args).is_none_or(|query| {
@@ -11879,6 +11994,22 @@ mod tests {
             format!("eval \"$(base32 -d {b32_s})\""),
             format!("eval \"$(cut -d ' ' -f 1- {push_s})\""),
             format!("eval \"$(sed -n l {push_s})\""),
+            format!("eval \"$(sed -n 1l {push_s})\""),
+            format!("eval \"$(sed -n '$l' {push_s})\""),
+            format!("eval \"$(sed -n 3l {multi_s})\""),
+            format!("eval \"$(sed -n '$l' {multi_s})\""),
+            format!("eval \"$(gsed -n 1l {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; sys.stdout.write(open(sys.argv[1]).read())' {push_s})\""
+            ),
+            format!(
+                "eval \"$(node -e 'process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
+            ),
+            format!(
+                "eval \"$(node --eval 'process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
+            ),
+            format!("eval \"$(ruby -e 'print File.read(ARGV[0])' {push_s})\""),
+            format!("eval \"$(php -r 'echo file_get_contents($argv[1]);' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
             format!("eval \"$(command cat {push_s})\""),
@@ -12064,6 +12195,12 @@ mod tests {
             format!("eval \"$(sed -n 2p {multi_s})\""),
             format!("eval \"$(awk 'NR==2' {multi_s})\""),
             format!("eval \"$(sed -n '2p;2p' {multi_s})\""),
+            format!("eval \"$(sed -n 2l {multi_s})\""),
+            format!("eval \"$(perl -ne '' {push_s})\""),
+            format!("eval \"$(perl -e 'print File.read(ARGV[0])' {push_s})\""),
+            format!("eval \"$(base32 {b32_s})\""),
+            format!("eval \"$(cut -d ' ' -f 2 {push_s})\""),
+            format!("eval \"$(dd status=none if={push_s} of={tee_s})\""),
             format!("eval \"$(sed -n '' {push_s})\""),
             format!("eval \"$(cut -c 1-5 {push_s})\""),
             format!("eval \"$(cut -c1-5 {push_s})\""),
