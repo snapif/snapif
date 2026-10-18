@@ -168,6 +168,11 @@ where
 
 pub fn decode_response(bytes: &[u8]) -> Result<WireResponse, WireError> {
     let value: Value = serde_json::from_slice(bytes).map_err(json_error)?;
+    if !value.is_object() {
+        return Err(WireError::Json(
+            "expected a JSON object with model, answers, and usage".to_string(),
+        ));
+    }
     if let Some(answers) = value.get("answers").and_then(Value::as_object) {
         for (id, answer) in answers {
             known_type(id, answer)?;

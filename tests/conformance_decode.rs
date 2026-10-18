@@ -166,6 +166,19 @@ fn json_failures_are_not_unknown_type() {
 
     let response = decode_response(b"not-json").unwrap_err();
     assert!(matches!(response, WireError::Json(_)));
+    for bytes in [&b"[]"[..], &b"null"[..], &b"0"[..], br#""x""#] {
+        let err = decode_response(bytes).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid json: expected a JSON object with model, answers, and usage",
+            "{bytes:?}"
+        );
+    }
+    let object = decode_response(b"{}").unwrap_err();
+    assert!(
+        object.to_string().contains("missing field `model`"),
+        "{object}"
+    );
 }
 
 #[test]

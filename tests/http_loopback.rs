@@ -536,6 +536,28 @@ fn success_html_names_the_body() {
 }
 
 #[test]
+fn success_array_names_the_object() {
+    let (err, hits, _) = expect_backend_err(
+        vec![http_response(
+            "200 OK",
+            "Content-Type: application/json\r\n",
+            "[]",
+        )],
+        Duration::from_secs(2),
+    );
+    assert_eq!(hits.len(), 1);
+    let text = err.to_string();
+    assert!(
+        text.contains("expected a JSON object with model, answers, and usage"),
+        "{text}"
+    );
+    assert!(text.contains("HTTP 200"), "{text}");
+    assert!(text.contains("body: []"), "{text}");
+    assert!(!text.contains("invalid length"), "{text}");
+    assert!(!text.contains("WireResponse"), "{text}");
+}
+
+#[test]
 fn empty_204_names_the_status() {
     let (err, hits, _) = expect_backend_err(
         vec![http_response("204 No Content", "", "")],
