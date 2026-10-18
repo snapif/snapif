@@ -1609,7 +1609,11 @@ mod tests {
                 },
             ),
         ]));
-        assert!(results[0].is_err(), "{:?}", results[0]);
+        assert!(
+            matches!(results[0], Err(crate::Error::EmptyActionId)),
+            "{:?}",
+            results[0]
+        );
         let first = super::take_hint(results[1].as_ref().expect("second").clone());
         let second = super::take_hint(results[2].as_ref().expect("third").clone());
         assert_eq!(first.model, "model-a");

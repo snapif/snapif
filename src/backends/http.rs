@@ -36,7 +36,8 @@ impl HttpBackend {
     /// otherwise. This constructor never reads `TYPESAFE_API_KEY`. `http` is
     /// limited to loopback. A name that does not resolve is
     /// `http origin did not resolve`, which is a different error from a
-    /// public address.
+    /// public address. A query is `origin query`. A fragment is
+    /// `origin fragment`.
     pub fn compatible(base_url: Url, api_key: Option<String>) -> Result<Self, Error> {
         Self::open_origin(base_url, api_key, false)
     }
@@ -353,8 +354,11 @@ fn validate_origin(url: &Url, allow_private_http: bool) -> Result<(), Error> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err(policy("origin userinfo"));
     }
-    if url.query().is_some() || url.fragment().is_some() {
+    if url.query().is_some() {
         return Err(policy("origin query"));
+    }
+    if url.fragment().is_some() {
+        return Err(policy("origin fragment"));
     }
     if url.path() != "/" && !url.path().is_empty() {
         return Err(policy("origin path"));
@@ -429,9 +433,18 @@ mod tests {
         let backend = HttpBackend::typesafe("secret").expect("key");
         assert_eq!(backend.endpoint(), "https://api.typesafe.ai/v1/systemone");
         assert_eq!(backend.id(), "typesafe");
-        assert!(HttpBackend::typesafe("").is_err());
+        assert_eq!(
+            origin_error(HttpBackend::typesafe("")),
+            "auth: TYPESAFE_API_KEY"
+        );
         let before = backend.endpoint();
-        assert!(backend.replace_api_key(Some(String::new())).is_err());
+        assert_eq!(
+            backend
+                .replace_api_key(Some(String::new()))
+                .expect_err("empty")
+                .to_string(),
+            "auth: TYPESAFE_API_KEY"
+        );
         assert_eq!(
             backend.current_key().expect("key").as_deref(),
             Some("secret")
@@ -444,7 +457,13 @@ mod tests {
             Some("next-key")
         );
         assert_eq!(backend.endpoint(), before);
-        assert!(backend.replace_api_key(None).is_err());
+        assert_eq!(
+            backend
+                .replace_api_key(None)
+                .expect_err("missing")
+                .to_string(),
+            "auth: TYPESAFE_API_KEY"
+        );
         assert_eq!(
             backend.current_key().expect("key").as_deref(),
             Some("next-key")
@@ -454,11 +473,45 @@ mod tests {
     #[test]
     fn compatible_rejects_non_origin_and_public_http() {
         let key = Some("snapif-key".to_string());
-        assert!(HttpBackend::compatible(url("http://10.0.0.1"), key.clone()).is_err());
-        assert!(HttpBackend::compatible(url("https://example.com/v1"), key.clone()).is_err());
-        assert!(HttpBackend::compatible(url("https://example.com?q=1"), key.clone()).is_err());
-        assert!(HttpBackend::compatible(url("https://user:pw@example.com"), key.clone()).is_err());
-        assert!(HttpBackend::compatible(url("https://example.com#frag"), key).is_err());
+        assert_eq!(
+            origin_error(HttpBackend::compatible(url("http://10.0.0.1"), key.clone())),
+            "policy: http origin must resolve to loopback"
+        );
+        assert_eq!(
+            origin_error(HttpBackend::compatible(
+                url("https://example.com/v1"),
+                key.clone()
+            )),
+            "policy: origin path"
+        );
+        assert_eq!(
+            origin_error(HttpBackend::compatible(
+                url("https://example.com?q=1"),
+                key.clone()
+            )),
+            "policy: origin query"
+        );
+        assert_eq!(
+            origin_error(HttpBackend::compatible(
+                url("https://example.com/v1?q=1#frag"),
+                key.clone()
+            )),
+            "policy: origin query"
+        );
+        assert_eq!(
+            origin_error(HttpBackend::compatible(
+                url("https://user:pw@example.com"),
+                key.clone()
+            )),
+            "policy: origin userinfo"
+        );
+        assert_eq!(
+            origin_error(HttpBackend::compatible(
+                url("https://example.com#frag"),
+                key
+            )),
+            "policy: origin fragment"
+        );
         let loopback = HttpBackend::compatible(url("http://127.0.0.1:9"), None).expect("loopback");
         assert_eq!(loopback.id(), "compatible");
         assert_eq!(loopback.endpoint(), "http://127.0.0.1:9/v1/systemone");
@@ -471,7 +524,13 @@ mod tests {
             fallback,
             crate::backends::cascade::CascadeRule::new(0.8),
         );
-        assert!(cascaded.replace_api_key(None).is_err());
+        assert_eq!(
+            cascaded
+                .replace_api_key(None)
+                .expect_err("cascade")
+                .to_string(),
+            "auth: TYPESAFE_API_KEY"
+        );
         assert_eq!(
             cascaded.first.current_key().expect("key").as_deref(),
             Some("loop-key")
@@ -480,7 +539,10 @@ mod tests {
             cascaded.fallback.current_key().expect("key").as_deref(),
             Some("ts-key")
         );
-        assert!(HttpBackend::compatible(url("https://example.com"), None).is_err());
+        assert_eq!(
+            origin_error(HttpBackend::compatible(url("https://example.com"), None)),
+            "auth: SNAPIF_API_KEY"
+        );
     }
 
     #[test]
@@ -591,6 +653,13 @@ mod tests {
 
     fn url(text: &str) -> Url {
         Url::parse(text).expect("url")
+    }
+
+    fn origin_error(result: Result<HttpBackend, Error>) -> String {
+        match result {
+            Err(err) => err.to_string(),
+            Ok(_) => panic!("origin was accepted"),
+        }
     }
 
     #[test]
