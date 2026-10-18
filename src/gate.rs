@@ -1249,12 +1249,14 @@ mod tests {
         let req = tag_request(json!({}));
         let model = "jev-latest";
         let timeout = std::time::Duration::from_millis(2000);
-        let first = super::gate_cache_key(&client, &req, &policy, model, timeout);
-        let again = super::gate_cache_key(&client, &req, &policy, model, timeout);
+        let first =
+            super::gate_cache_key(&client, &req, &policy, model, timeout).expect("cache key");
+        let again =
+            super::gate_cache_key(&client, &req, &policy, model, timeout).expect("cache key");
         assert_eq!(first, again);
-        assert!(first.is_some());
         let changed = tag_request(json!({"n": 1}));
-        let second = super::gate_cache_key(&client, &changed, &policy, model, timeout);
+        let second =
+            super::gate_cache_key(&client, &changed, &policy, model, timeout).expect("changed key");
         assert_ne!(first, second);
         let uncached = Client::<AnyBackend>::from_config(&crate::ClientConfig {
             backend: "fake".to_string(),

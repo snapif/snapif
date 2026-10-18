@@ -505,7 +505,7 @@ mod tests {
             public_private.to_string(),
             "policy: http origin must resolve to a private address"
         );
-        assert!(http_origin_from_ips(Ok(vec!["127.0.0.1".parse().expect("ip")]), false).is_ok());
+        http_origin_from_ips(Ok(vec!["127.0.0.1".parse().expect("ip")]), false).expect("loopback");
     }
 
     #[test]

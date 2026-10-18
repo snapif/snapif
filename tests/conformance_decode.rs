@@ -303,7 +303,12 @@ fn check_response_ranges() {
             .as_bytes(),
         )
         .unwrap();
-        assert_eq!(check_response(&noul.questions, &response).is_ok(), ok);
+        match check_response(&noul.questions, &response) {
+            Ok(()) if ok => {}
+            Err(snapif::error::DecodeError::OutOfRange { key })
+                if !ok && key == QuestionId::new("is_urgent") => {}
+            other => panic!("noul {raw} ok={ok}: {other:?}"),
+        }
     }
 
     let score = decode_request(FRUSTRATION.as_bytes()).unwrap();
@@ -320,7 +325,12 @@ fn check_response_ranges() {
             .as_bytes(),
         )
         .unwrap();
-        assert_eq!(check_response(&score.questions, &response).is_ok(), ok);
+        match check_response(&score.questions, &response) {
+            Ok(()) if ok => {}
+            Err(snapif::error::DecodeError::OutOfRange { key })
+                if !ok && key == QuestionId::new("frustration") => {}
+            other => panic!("score {raw} ok={ok}: {other:?}"),
+        }
     }
 }
 
