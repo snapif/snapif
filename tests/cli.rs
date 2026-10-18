@@ -1978,7 +1978,11 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         .expect("run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("auto none"), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "raw_auto none"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "auto none"), "{stdout}");
     assert!(stdout.contains("pack tool-gate"), "{stdout}");
     assert!(stdout.contains("pack_version 1"), "{stdout}");
     assert!(stdout.contains("model jev-latest"), "{stdout}");
