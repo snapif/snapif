@@ -443,7 +443,7 @@ fn check_action(
 /// and `awk '{ print }'` print it too. `awk '/git/'` prints a line
 /// that contains `git`. `gawk` is that same `awk`.
 /// `awk 'gsub(/git/,"git")'` prints that line too. `awk '{printf "%s\n", $0}'`
-/// prints each line. Without `-n`,
+/// prints each line. `awk 'END {print}'` prints the last line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -7233,6 +7233,8 @@ enum AwkSel {
     Script(Vec<AwkAtom>),
     /// `{printf "%s", $0}` joins line bodies with no newline between them.
     Concat,
+    /// `END {print}`. The last line is kept.
+    Last,
 }
 
 enum AwkAtom {
@@ -7282,6 +7284,7 @@ fn awk_run(
                 }
                 AwkSel::Script(atoms) => awk_script(text.as_str(), &atoms),
                 AwkSel::Concat => awk_concat(text.as_str()),
+                AwkSel::Last => last_line(text.as_str()),
             },
             ok,
         },
@@ -7375,6 +7378,12 @@ fn awk_program(program: &str) -> Option<AwkSel> {
     if let Some(sel) = awk_printf(&compact) {
         return Some(sel);
     }
+    if matches!(
+        compact.as_str(),
+        "END{print}" | "END{print;}" | "END{print$0}" | "END{print$0;}"
+    ) {
+        return Some(AwkSel::Last);
+    }
     let pieces = split_statements(&compact);
     if pieces.is_empty() {
         return None;
@@ -7387,7 +7396,7 @@ fn awk_program(program: &str) -> Option<AwkSel> {
         match awk_one(piece)? {
             AwkSel::All => return Some(AwkSel::All),
             AwkSel::Range { start, end } => spans.push((start, end)),
-            AwkSel::Many(_) | AwkSel::Script(_) | AwkSel::Concat => return None,
+            AwkSel::Many(_) | AwkSel::Script(_) | AwkSel::Concat | AwkSel::Last => return None,
         }
     }
     if let [(start, end)] = spans.as_slice() {
@@ -7448,6 +7457,27 @@ fn awk_printf(compact: &str) -> Option<AwkSel> {
     }
 }
 
+fn last_line(text: &str) -> String {
+    let mut chosen = "";
+    let mut saw = false;
+    for line in text.split_inclusive('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        chosen = line;
+        saw = true;
+    }
+    if !saw {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(chosen);
+    if !chosen.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 fn awk_concat(text: &str) -> String {
     let mut out = String::new();
     for line in text.split_inclusive('\n') {
@@ -7492,7 +7522,7 @@ fn awk_atom(piece: &str) -> Option<AwkAtom> {
     match awk_one(piece)? {
         AwkSel::All => Some(AwkAtom::All),
         AwkSel::Range { start, end } => Some(AwkAtom::Range { start, end }),
-        AwkSel::Many(_) | AwkSel::Script(_) | AwkSel::Concat => None,
+        AwkSel::Many(_) | AwkSel::Script(_) | AwkSel::Concat | AwkSel::Last => None,
     }
 }
 
@@ -8960,6 +8990,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "putsIO.read(ARGV[0])"
+            | "STDOUT.writeIO.read(ARGV[0])"
             | "system(File.read(ARGV[0]))"
     )
 }
@@ -9015,6 +9046,7 @@ fn python_reads_argv1(script: &str) -> bool {
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
             | "importsys;print(open(sys.argv[1]).read())"
+            | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
             | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
@@ -9119,6 +9151,7 @@ fn php_reads_argv1(script: &str) -> bool {
         "echofile_get_contents($argv[1]);"
             | "printfile_get_contents($argv[1]);"
             | "readfile($argv[1]);"
+            | "echoreadfile($argv[1]);"
             | "system(file_get_contents($argv[1]));"
     )
 }
@@ -12782,6 +12815,8 @@ mod tests {
         std::fs::write(&echo, "echo hello\n").expect("echo script");
         std::fs::write(&assign, "x='git push origin main'\n").expect("assign script");
         std::fs::write(&multi, "alpha\nbeta\ngit push origin main\n").expect("multi script");
+        let beta_last = dir.join(format!("snapif-c33-beta-last-{pid}.txt"));
+        std::fs::write(&beta_last, "git push origin main\nbeta\n").expect("beta last");
         let coded = dir.join(format!("snapif-c30-b64-{pid}.txt"));
         std::fs::write(&coded, "Z2l0IHB1c2ggb3JpZ2luIG1haW4K\n").expect("b64");
         let b32 = dir.join(format!("snapif-c31-b32-{pid}.txt"));
@@ -12795,6 +12830,7 @@ mod tests {
         let echo_s = plain_script_path(&echo);
         let assign_s = plain_script_path(&assign);
         let multi_s = plain_script_path(&multi);
+        let beta_last_s = plain_script_path(&beta_last);
         let coded_s = plain_script_path(&coded);
         let b32_s = plain_script_path(&b32);
         let dup_s = plain_script_path(&dup);
@@ -12888,6 +12924,14 @@ mod tests {
             format!("eval \"$(awk '{{printf \"%s\\n\", $0}}' {multi_s})\""),
             format!("eval \"$(awk '{{printf \"%s\", $0}}' {push_s})\""),
             format!("eval \"$(awk '{{printf $0}}' {push_s})\""),
+            format!("eval \"$(awk 'END {{print}}' {push_s})\""),
+            format!("eval \"$(awk 'END {{print}}' {multi_s})\""),
+            format!("eval \"$(awk 'END {{print $0}}' {push_s})\""),
+            format!("eval \"$(ruby -e 'STDOUT.write IO.read(ARGV[0])' {push_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; print(open(sys.argv[1], encoding=\"utf-8\").read())' {push_s})\""
+            ),
+            format!("eval \"$(php -r 'echo readfile($argv[1]);' {push_s})\""),
             format!(
                 "eval \"$(python3 -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())' {push_s})\""
             ),
@@ -13179,6 +13223,13 @@ mod tests {
             format!("eval \"$(awk 'gsub(/zzzz/,\"zzzz\")' {push_s})\""),
             format!("eval \"$(awk '{{printf \"%s\", $0}}' {multi_s})\""),
             format!("eval \"$(awk '{{printf $0}}' {multi_s})\""),
+            format!("eval \"$(awk 'END {{print}}' {beta_last_s})\""),
+            format!("eval \"$(awk 'END {{print}}' {echo_s})\""),
+            format!("eval \"$(ruby -e 'STDOUT.write IO.read(ARGV[0])' {echo_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys; print(open(sys.argv[1], encoding=\"utf-8\").read())' {echo_s})\""
+            ),
+            format!("eval \"$(php -r 'echo readfile($argv[1]);' {echo_s})\""),
             format!(
                 "eval \"$(python3 -c 'import sys; print(open(sys.argv[1]).read())' {echo_s})\""
             ),
@@ -13294,7 +13345,7 @@ mod tests {
             let _ = std::fs::remove_file(&link);
             let _ = std::fs::remove_file(&fifo);
         }
-        for path in [&push, &echo, &assign, &multi, &coded, &big] {
+        for path in [&push, &echo, &assign, &multi, &beta_last, &coded, &big] {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(&sub);
