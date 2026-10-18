@@ -437,7 +437,8 @@ fn check_action(
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. `awk 'NR==1 {print}'`
-/// and `awk '{ print }'` print it too. Without `-n`,
+/// and `awk '{ print }'` print it too. `awk '/git/'` prints a line
+/// that contains `git`. `gawk` is that same `awk`. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -5968,7 +5969,7 @@ fn run_builtin(
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
         "sed" | "gsed" => sed_run(args, input, depth, substitutions),
-        "awk" => awk_run(args, input, depth, substitutions),
+        "awk" | "gawk" => awk_run(args, input, depth, substitutions),
         "cut" => cut_run(args, input, depth, substitutions),
         "sort" => sort_run(args, input, depth, substitutions),
         "uniq" => uniq_run(args, input, depth, substitutions),
@@ -7092,8 +7093,30 @@ fn line_span(text: &str, start: SedEnd, end: SedEnd) -> String {
 
 enum AwkSel {
     All,
-    Range { start: usize, end: usize },
+    Range {
+        start: usize,
+        end: usize,
+    },
     Many(Vec<(usize, usize)>),
+    /// Rules that print some lines. A line is kept when any rule prints it.
+    Script(Vec<AwkAtom>),
+}
+
+enum AwkAtom {
+    /// `{print}` or an unmodeled pattern. Every line is kept.
+    All,
+    Range {
+        start: usize,
+        end: usize,
+    },
+    Match(AwkPat),
+}
+
+enum AwkPat {
+    /// `index($0,"text")`. The text is literal.
+    Literal(String),
+    /// `/text/` or `$0 ~ /text/`. `.`, `*`, and `+` are the modeled regex.
+    Regex(String),
 }
 
 struct AwkQuery {
@@ -7124,6 +7147,7 @@ fn awk_run(
                         .collect();
                     union_lines(text.as_str(), &spans)
                 }
+                AwkSel::Script(atoms) => awk_script(text.as_str(), &atoms),
             },
             ok,
         },
@@ -7152,7 +7176,7 @@ fn awk_query(args: &[String]) -> Option<AwkQuery> {
 }
 
 fn awk_program(program: &str) -> Option<AwkSel> {
-    let compact: String = program.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let compact = awk_compact(program);
     if matches!(
         compact.as_str(),
         "{print}" | "1" | "{print$0}" | "{print$0;}"
@@ -7163,12 +7187,15 @@ fn awk_program(program: &str) -> Option<AwkSel> {
     if pieces.is_empty() {
         return None;
     }
+    if let Some(sel) = awk_script_sel(&pieces) {
+        return Some(sel);
+    }
     let mut spans = Vec::new();
     for piece in pieces {
         match awk_one(piece)? {
             AwkSel::All => return Some(AwkSel::All),
             AwkSel::Range { start, end } => spans.push((start, end)),
-            AwkSel::Many(_) => return None,
+            AwkSel::Many(_) | AwkSel::Script(_) => return None,
         }
     }
     if let [(start, end)] = spans.as_slice() {
@@ -7178,6 +7205,253 @@ fn awk_program(program: &str) -> Option<AwkSel> {
         });
     }
     Some(AwkSel::Many(spans))
+}
+
+/// Drop spaces that awk ignores. Spaces inside `/.../` and quotes stay,
+/// because `/push origin/` is not `/pushorigin/`.
+fn awk_compact(program: &str) -> String {
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    let mut slash = false;
+    for ch in program.chars() {
+        if let Some(mark) = quote {
+            out.push(ch);
+            if ch == mark {
+                quote = None;
+            }
+            continue;
+        }
+        if slash {
+            out.push(ch);
+            if ch == '/' {
+                slash = false;
+            }
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            quote = Some(ch);
+            out.push(ch);
+            continue;
+        }
+        if ch == '/' {
+            slash = true;
+            out.push(ch);
+            continue;
+        }
+        if ch.is_whitespace() {
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn awk_script_sel(pieces: &[&str]) -> Option<AwkSel> {
+    let mut atoms = Vec::new();
+    let mut patterned = false;
+    for piece in pieces {
+        let atom = awk_atom(piece)?;
+        if !matches!(atom, AwkAtom::Range { .. }) {
+            patterned = true;
+        }
+        atoms.push(atom);
+    }
+    if !patterned {
+        return None;
+    }
+    Some(AwkSel::Script(atoms))
+}
+
+fn awk_atom(piece: &str) -> Option<AwkAtom> {
+    if matches!(piece, "{print}" | "1" | "{print$0}" | "{print$0;}") {
+        return Some(AwkAtom::All);
+    }
+    let body = awk_drop_print(piece);
+    if let Some(atom) = awk_slash_atom(body) {
+        return Some(atom);
+    }
+    if let Some(pat) = awk_index_pat(body) {
+        return Some(AwkAtom::Match(pat));
+    }
+    match awk_one(piece)? {
+        AwkSel::All => Some(AwkAtom::All),
+        AwkSel::Range { start, end } => Some(AwkAtom::Range { start, end }),
+        AwkSel::Many(_) | AwkSel::Script(_) => None,
+    }
+}
+
+fn awk_slash_atom(body: &str) -> Option<AwkAtom> {
+    let inner = if let Some(rest) = body.strip_prefix("$0~/") {
+        rest.strip_suffix('/')?
+    } else {
+        let rest = body.strip_prefix('/')?;
+        rest.strip_suffix('/')?
+    };
+    if parse_awk_regex(inner).is_none() {
+        return Some(AwkAtom::All);
+    }
+    Some(AwkAtom::Match(AwkPat::Regex(inner.to_string())))
+}
+
+fn awk_index_pat(body: &str) -> Option<AwkPat> {
+    let rest = body.strip_prefix("index($0,\"")?;
+    let inner = rest.strip_suffix("\")")?;
+    if inner.contains('"') {
+        return None;
+    }
+    Some(AwkPat::Literal(inner.to_string()))
+}
+
+fn awk_script(text: &str, atoms: &[AwkAtom]) -> String {
+    let lines: Vec<&str> = text
+        .split_inclusive('\n')
+        .filter(|line| !line.is_empty())
+        .collect();
+    let mut out = String::new();
+    for (index, line) in lines.iter().enumerate() {
+        let nr = index + 1;
+        let body = line.trim_end_matches('\n');
+        let hit = atoms.iter().any(|atom| match atom {
+            AwkAtom::All => true,
+            AwkAtom::Range { start, end } => nr >= *start && nr <= *end,
+            AwkAtom::Match(pat) => awk_pat_hit(body, pat),
+        });
+        if hit {
+            out.push_str(line);
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+fn awk_pat_hit(line: &str, pat: &AwkPat) -> bool {
+    match pat {
+        AwkPat::Literal(text) => line.contains(text),
+        AwkPat::Regex(source) => awk_regex_hit(line, source),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AwkQuant {
+    One,
+    Star,
+    Plus,
+}
+
+#[derive(Clone, Copy)]
+enum AwkRx {
+    Any,
+    Char(char),
+}
+
+struct AwkPiece {
+    atom: AwkRx,
+    quant: AwkQuant,
+}
+
+/// `.`, a literal, and one `*` or `+` on the previous atom.
+/// Anything else is unmodeled (`None`), and the caller keeps every line.
+fn parse_awk_regex(source: &str) -> Option<Vec<AwkPiece>> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut index = 0usize;
+    let mut parts = Vec::new();
+    while index < chars.len() {
+        let atom = match chars[index] {
+            '.' => AwkRx::Any,
+            '*' | '+' | '?' | '[' | ']' | '\\' | '(' | ')' | '|' | '{' | '}' | '^' | '$' => {
+                return None;
+            }
+            ch => AwkRx::Char(ch),
+        };
+        index += 1;
+        let quant = if index < chars.len() {
+            match chars[index] {
+                '*' => {
+                    index += 1;
+                    AwkQuant::Star
+                }
+                '+' => {
+                    index += 1;
+                    AwkQuant::Plus
+                }
+                _ => AwkQuant::One,
+            }
+        } else {
+            AwkQuant::One
+        };
+        parts.push(AwkPiece { atom, quant });
+    }
+    Some(parts)
+}
+
+fn awk_regex_hit(line: &str, source: &str) -> bool {
+    let Some(parts) = parse_awk_regex(source) else {
+        return true;
+    };
+    if parts.is_empty() {
+        return true;
+    }
+    if parts
+        .iter()
+        .filter(|part| part.quant != AwkQuant::One)
+        .count()
+        > 1
+    {
+        return true;
+    }
+    let chars: Vec<char> = line.chars().collect();
+    (0..=chars.len()).any(|start| awk_match_at(&chars, &parts, start))
+}
+
+fn awk_match_at(chars: &[char], parts: &[AwkPiece], start: usize) -> bool {
+    let mut ci = start;
+    for (index, part) in parts.iter().enumerate() {
+        match part.quant {
+            AwkQuant::One => {
+                if !awk_eat(chars, ci, part.atom) {
+                    return false;
+                }
+                ci += 1;
+            }
+            AwkQuant::Star | AwkQuant::Plus => {
+                let min = if part.quant == AwkQuant::Plus { 1 } else { 0 };
+                let mut count = 0usize;
+                while awk_eat(chars, ci + count, part.atom) {
+                    count += 1;
+                }
+                if count < min {
+                    return false;
+                }
+                let suffix = &parts[index + 1..];
+                return (min..=count)
+                    .rev()
+                    .any(|take| awk_match_fixed(chars, suffix, ci + take));
+            }
+        }
+    }
+    true
+}
+
+fn awk_match_fixed(chars: &[char], parts: &[AwkPiece], mut ci: usize) -> bool {
+    for part in parts {
+        if part.quant != AwkQuant::One || !awk_eat(chars, ci, part.atom) {
+            return false;
+        }
+        ci += 1;
+    }
+    true
+}
+
+fn awk_eat(chars: &[char], index: usize, atom: AwkRx) -> bool {
+    let Some(ch) = chars.get(index) else {
+        return false;
+    };
+    match atom {
+        AwkRx::Any => true,
+        AwkRx::Char(want) => *ch == want,
+    }
 }
 
 fn split_statements(program: &str) -> Vec<&str> {
@@ -8709,7 +8983,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
-        "awk" => awk_query(args).is_none_or(|query| query.file.is_none()),
+        "awk" | "gawk" => awk_query(args).is_none_or(|query| query.file.is_none()),
         "cut" => cut_query(args).is_none_or(|query| query.file.is_none()),
         "sort" => sort_query(args).is_none_or(|query| {
             query.from0.as_deref() == Some("-")
@@ -12409,6 +12683,21 @@ mod tests {
             format!("eval \"$(awk 'NR==1 {{print}}' {push_s})\""),
             format!("eval \"$(awk '{{ print }}' {push_s})\""),
             format!("eval \"$(awk 'NR==1 {{ print }}' {push_s})\""),
+            format!("eval \"$(awk '/git/' {push_s})\""),
+            format!("eval \"$(awk '/push/' {push_s})\""),
+            format!("eval \"$(awk '/push origin/' {push_s})\""),
+            format!("eval \"$(awk '/git/ {{print}}' {push_s})\""),
+            format!("eval \"$(gawk '/git/' {push_s})\""),
+            format!("eval \"$(awk '$0 ~ /git/' {push_s})\""),
+            format!("eval \"$(awk '$0 ~ /git/ {{print}}' {push_s})\""),
+            format!("eval \"$(awk 'index($0,\"git\")' {push_s})\""),
+            format!("eval \"$(awk 'index($0,\"push origin\")' {push_s})\""),
+            format!("eval \"$(awk 'index($0,\"git\") {{print}}' {push_s})\""),
+            format!("eval \"$(awk '/git./' {push_s})\""),
+            format!("eval \"$(awk '/git*/' {push_s})\""),
+            format!("eval \"$(awk '/git/; /git/' {push_s})\""),
+            format!("eval \"$(awk '//' {push_s})\""),
+            format!("eval \"$(awk '/git/; NR==2' {multi_s})\""),
             format!("eval \"$(awk 'NR==3{{print}}' {multi_s})\""),
             format!("eval \"$(awk 'NR==2,NR==3' {multi_s})\""),
             format!("eval \"$(sed -n '3p;3p' {multi_s})\""),
@@ -12497,6 +12786,11 @@ mod tests {
             format!("eval \"$(sed -n '2p;2p' {multi_s})\""),
             format!("eval \"$(sed -n 2l {multi_s})\""),
             format!("eval \"$(sed -n '/zzzz/p' {push_s})\""),
+            format!("eval \"$(awk '/zzzz/' {push_s})\""),
+            format!("eval \"$(awk 'index($0,\"zzzz\")' {push_s})\""),
+            format!("eval \"$(awk '$0 ~ /zzzz/' {push_s})\""),
+            format!("eval \"$(awk '/no.such/' {push_s})\""),
+            format!("eval \"$(awk '/zzzz/; NR==2' {multi_s})\""),
             format!("eval \"$(perl -ne '' {push_s})\""),
             format!("eval \"$(perl -e 'print File.read(ARGV[0])' {push_s})\""),
             format!("eval \"$(base32 {b32_s})\""),
