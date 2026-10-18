@@ -417,6 +417,11 @@ fn check_action(
 /// `x=... eval '$x'` still runs, because that `$x` expands inside eval.
 /// `x=... eval "$x"` does not. A pipeline, `(x=...)`, and a background
 /// command do not reach a later eval.
+/// `readonly` sets that name for the whole shell, including inside a
+/// function. `readonly -x` sets nothing. A command substitution that
+/// only prints, such as `$(echo 'git push')` or `$(printf '%s' 'git push')`,
+/// is the text bash would print. `eval` of that text and a bare
+/// substitution match. `echo` of the same text does not.
 /// `status` does not run these,
 /// and a later argument named `credential` is not that subcommand.
 /// `timeout 1 rm` and `xargs rm` match.
@@ -432,7 +437,10 @@ fn check_action(
 /// A shell that reads its script from stdin runs a heredoc or a
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
-/// body in the same shell. `cat` and `bash -c` do not run that body.
+/// body in the same shell. `source path` and `bash path` run a regular
+/// file at that path. A missing path does not match. `bash -c` and
+/// `bash -s` do not read a later path. `cat` and `bash -c` do not run
+/// a heredoc body.
 /// An unquoted heredoc still expands `$(...)` and backticks first, so
 /// `cat <<EOF` with `$(rm)` matches. A quoted delimiter does not.
 /// Any quote in that word quotes it, so `cat <<E'OF'` and `cat <<$'EOF'`
@@ -690,6 +698,9 @@ fn consider_segment<'a>(
         );
         scope.pop_frame(exported);
     } else {
+        // `bash script` starts a new process. `source script` is handled
+        // below, in this shell.
+        score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
         if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
             prefer(policy, best, Some(id));
         }
@@ -741,10 +752,27 @@ fn consider_segment<'a>(
             );
         }
     }
-    if sourced_stdin(&executed.argv) {
-        for body in &segment.heredocs {
-            score_here(
-                policy, tool_name, body, depth, functions, local, exported, scope, git, best,
+    // A function named `source` runs instead of the builtin.
+    // `command source` still reads the file.
+    if !call_runs_function(&executed, functions) {
+        if sourced_stdin(&executed.argv) {
+            for body in &segment.heredocs {
+                score_here(
+                    policy, tool_name, body, depth, functions, local, exported, scope, git, best,
+                );
+            }
+        } else {
+            score_sourced_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                functions,
+                local,
+                exported,
+                scope,
+                git,
+                best,
             );
         }
     }
@@ -766,6 +794,17 @@ fn consider_segment<'a>(
 fn is_export(argv: &[String]) -> bool {
     argv.first()
         .is_some_and(|word| command_basename(word) == "export")
+}
+
+/// The first word names a function, and `command` or `builtin` did not
+/// peel it. That function runs instead of a builtin with the same name.
+fn call_runs_function(executed: &ExecutedArgv, functions: &Functions) -> bool {
+    !executed.exec_wrapper
+        && !executed.bypass_function
+        && executed
+            .argv
+            .first()
+            .is_some_and(|word| functions.contains_key(word))
 }
 
 /// `export NAME=value` lasts for later commands in this shell.
@@ -962,8 +1001,10 @@ impl ShellScope {
 
     /// `declare` and `typeset` set a shell variable. Inside a function
     /// they stay in that function unless `-g` is set. `local` does
-    /// nothing at the top level. `-x` exports the current value. Inside
-    /// a function that export lasts until the function returns.
+    /// nothing at the top level. `readonly` sets a global name, including
+    /// from inside a function. `-x` on `declare` exports the current
+    /// value until a function returns. `readonly -x` is not an option,
+    /// so that command sets nothing.
     fn bind_declaration(&mut self, argv: &[String], exported: &mut Vec<(String, String)>) {
         let Some(first) = argv.first() else {
             return;
@@ -972,13 +1013,14 @@ impl ShellScope {
         let declare_like =
             base.eq_ignore_ascii_case("declare") || base.eq_ignore_ascii_case("typeset");
         let local = base.eq_ignore_ascii_case("local");
-        if !declare_like && !local {
+        let readonly = base.eq_ignore_ascii_case("readonly");
+        if !declare_like && !local && !readonly {
             return;
         }
         if local && self.locals.is_empty() {
             return;
         }
-        let mut to_global = declare_like && self.locals.is_empty();
+        let mut to_global = readonly || (declare_like && self.locals.is_empty());
         let mut also_export = false;
         let mut options = true;
         for token in argv.iter().skip(1) {
@@ -988,6 +1030,16 @@ impl ShellScope {
                     continue;
                 }
                 if let Some(flags) = declaration_flags(token) {
+                    if readonly {
+                        // `-a`, `-A`, and `-p` still accept `name=value`.
+                        // `-f` is a function. Any other letter is an error
+                        // and bash stores nothing (`readonly -x`).
+                        let plain = flags.chars().all(|ch| matches!(ch, 'a' | 'A' | 'p'));
+                        if !plain {
+                            return;
+                        }
+                        continue;
+                    }
                     if flags.contains('g') {
                         to_global = true;
                     }
@@ -1148,6 +1200,73 @@ fn scan_isolated<'a>(
                 git,
             ),
         );
+    }
+}
+
+fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
+    policy.actions.keys().find(|id| id.0 == "shell.deep")
+}
+
+/// `bash path` and `sh path` run that file in a new process.
+fn score_shell_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = shell_file_operand(argv) else {
+        return;
+    };
+    let Some(loaded) = load_script_file(path) else {
+        return;
+    };
+    match loaded {
+        ScriptFile::Text(text) => {
+            scan_isolated(
+                policy,
+                tool_name,
+                std::slice::from_ref(&text),
+                depth,
+                local,
+                git,
+                best,
+            );
+        }
+        ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
+    }
+}
+
+/// `source path` and `. path` run that file in this shell.
+/// Assignments it makes stay visible to a later `eval`.
+#[allow(clippy::too_many_arguments)]
+fn score_sourced_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    functions: &mut Functions,
+    local: &[(String, String)],
+    exported: &mut Vec<(String, String)>,
+    scope: &mut ShellScope,
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = source_operand(argv) else {
+        return;
+    };
+    let Some(loaded) = load_script_file(path) else {
+        return;
+    };
+    match loaded {
+        ScriptFile::Text(text) => {
+            score_here(
+                policy, tool_name, &text, depth, functions, local, exported, scope, git, best,
+            );
+        }
+        ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
     }
 }
 
@@ -2550,6 +2669,163 @@ fn sourced_stdin(argv: &[String]) -> bool {
     argv.get(index).is_some_and(|token| is_stdin_script(token))
 }
 
+/// A regular file only. A missing path, a directory, or a fifo is not a
+/// script. Open is nonblocking, then `fstat`, so a fifo cannot stall the
+/// hook. Past one megabyte the body is `shell.deep` instead of `auto`.
+const SCRIPT_FILE_CAP: u64 = 1024 * 1024;
+
+enum ScriptFile {
+    Text(String),
+    Unscanned,
+}
+
+fn load_script_file(path: &str) -> Option<ScriptFile> {
+    let mut file = open_script_candidate(path)?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if meta.len() > SCRIPT_FILE_CAP {
+        return Some(ScriptFile::Unscanned);
+    }
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() as u64 > SCRIPT_FILE_CAP {
+            return Some(ScriptFile::Unscanned);
+        }
+    }
+    Some(ScriptFile::Text(String::from_utf8_lossy(&buf).into_owned()))
+}
+
+/// `O_NONBLOCK` so `open` of a fifo returns. The bit is not the same on
+/// every Unix. An unknown target stats first and does not pass a flag
+/// that means something else (on MIPS, 2048 is `O_NOCTTY`).
+#[cfg(unix)]
+fn open_script_candidate(path: &str) -> Option<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(flag) = unix_nonblock_flag() else {
+        return open_regular_file(path);
+    };
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flag)
+        .open(path)
+        .ok()
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+fn unix_nonblock_flag() -> Option<i32> {
+    Some(0x4)
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6"
+    )
+))]
+fn unix_nonblock_flag() -> Option<i32> {
+    Some(128)
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    any(target_arch = "sparc", target_arch = "sparc64")
+))]
+fn unix_nonblock_flag() -> Option<i32> {
+    Some(0x4000)
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    target_env = "uclibc",
+    target_arch = "arm"
+))]
+fn unix_nonblock_flag() -> Option<i32> {
+    Some(0x800)
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(
+        target_arch = "mips",
+        target_arch = "mips32r6",
+        target_arch = "mips64",
+        target_arch = "mips64r6",
+        target_arch = "sparc",
+        target_arch = "sparc64"
+    )),
+    not(all(target_env = "uclibc", target_arch = "arm"))
+))]
+fn unix_nonblock_flag() -> Option<i32> {
+    // asm-generic, including the x86_64 and aarch64 values.
+    Some(2048)
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        target_os = "linux",
+        target_os = "android"
+    ))
+))]
+fn unix_nonblock_flag() -> Option<i32> {
+    None
+}
+
+#[cfg(not(unix))]
+fn open_script_candidate(path: &str) -> Option<std::fs::File> {
+    open_regular_file(path)
+}
+
+fn open_regular_file(path: &str) -> Option<std::fs::File> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    std::fs::File::open(path).ok()
+}
+
+/// `source path` and `. path`. `source -- path` skips the option.
+/// `/dev/stdin`, `-`, and `/dev/fd/0` are the heredoc path, not a file.
+fn source_operand(argv: &[String]) -> Option<&str> {
+    let base = command_basename(argv.first()?);
+    if base != "source" && base != "." {
+        return None;
+    }
+    let mut index = 1;
+    if argv.get(index).is_some_and(|token| token == "--") {
+        index += 1;
+    }
+    let token = argv.get(index)?;
+    if is_stdin_script(token) {
+        return None;
+    }
+    Some(token.as_str())
+}
+
 fn cmd_script(argv: &[String]) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("cmd") {
@@ -3645,6 +3921,55 @@ fn shell_script(tokens: &[String]) -> Option<String> {
     None
 }
 
+/// `bash path` and `sh path` run that file. `bash -c` and `bash -s` do
+/// not. After `--`, the next word is a path, even when it looks like `-c`.
+fn shell_file_operand(argv: &[String]) -> Option<&str> {
+    let base = command_basename(argv.first()?);
+    if !is_shell_name(base) {
+        return None;
+    }
+    let mut index = 1;
+    let mut after_dash = false;
+    while index < argv.len() {
+        let token = &argv[index];
+        if !after_dash && token == "--" {
+            after_dash = true;
+            index += 1;
+            continue;
+        }
+        if after_dash {
+            return Some(token.as_str());
+        }
+        if shell_opt_takes_value(token) {
+            index += 2;
+            continue;
+        }
+        if token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            if c_argument(token, argv.get(index + 1)).is_some() {
+                return None;
+            }
+            if let Some(flags) = token.strip_prefix('-')
+                && !flags.is_empty()
+                && !flags.starts_with('-')
+                && flags.contains('s')
+            {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if is_stdin_script(token) {
+            return None;
+        }
+        return Some(token.as_str());
+    }
+    None
+}
+
 fn shell_opt_takes_value(token: &str) -> bool {
     let name = token.strip_prefix("--").unwrap_or(token);
     // Separate `-o`, `+o`, `-O`, and `+O` take the next word.
@@ -3986,12 +4311,12 @@ fn read_dollar_double<I>(
         }
         if ch != '\\' {
             if ch == '`' {
-                substitutions.push(read_backtick(chars));
+                fold_quoted_subst(read_backtick(chars), token, substitutions);
                 continue;
             }
             if ch == '$' && chars.peek() == Some(&'(') {
                 chars.next();
-                substitutions.push(read_balanced_parens(chars));
+                fold_quoted_subst(read_balanced_parens(chars), token, substitutions);
                 continue;
             }
             token.push(ch);
@@ -4080,12 +4405,16 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
             // already kept an escaped backtick literal. Single quotes
             // never reach this branch.
             if open == '"' && ch == '`' {
-                substitutions.push(read_backtick(&mut chars));
+                fold_quoted_subst(read_backtick(&mut chars), &mut token, &mut substitutions);
                 continue;
             }
             if open == '"' && ch == '$' && chars.peek() == Some(&'(') {
                 chars.next();
-                substitutions.push(read_balanced_parens(&mut chars));
+                fold_quoted_subst(
+                    read_balanced_parens(&mut chars),
+                    &mut token,
+                    &mut substitutions,
+                );
                 continue;
             }
             token.push(ch);
@@ -4108,7 +4437,15 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
             }
             if next == '(' {
                 chars.next();
-                substitutions.push(read_balanced_parens(&mut chars));
+                fold_unquoted_subst(
+                    read_balanced_parens(&mut chars),
+                    &mut token,
+                    &mut current,
+                    &mut quoted,
+                    &mut word_single,
+                    &mut in_eval_words,
+                    &mut substitutions,
+                );
                 continue;
             }
         }
@@ -4127,7 +4464,15 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                     token.push(next);
                 }
             }
-            '`' => substitutions.push(read_backtick(&mut chars)),
+            '`' => fold_unquoted_subst(
+                read_backtick(&mut chars),
+                &mut token,
+                &mut current,
+                &mut quoted,
+                &mut word_single,
+                &mut in_eval_words,
+                &mut substitutions,
+            ),
             '(' | ')' => {
                 push_token(
                     &mut token,
@@ -4524,6 +4869,549 @@ fn push_token(
     }
     *quoted = false;
     *word_single = None;
+}
+
+/// Printed text of a command substitution, when every simple command is
+/// `echo`, `printf`, `true`, `false`, or `:`. Anything else stays a
+/// substitution so the body is still scored. One pass: the printed text
+/// is not scanned again here. `eval` tokenizes it later.
+const FOLD_DEPTH: u32 = 8;
+
+fn literal_command_output(body: &str) -> Option<String> {
+    literal_command_output_depth(body, 0)
+}
+
+fn literal_command_output_depth(body: &str, depth: u32) -> Option<String> {
+    if depth > FOLD_DEPTH {
+        return None;
+    }
+    let mut out = String::new();
+    for command in split_literal_commands(body)? {
+        out.push_str(&literal_simple(&command, depth)?);
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    Some(out)
+}
+
+fn split_literal_commands(body: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = body.chars().collect();
+    let mut commands = Vec::new();
+    let mut start = 0usize;
+    let mut index = 0usize;
+    let mut quote: Option<char> = None;
+    let mut word_start = true;
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(open) = quote {
+            if open == '"' && ch == '\\' {
+                index += 1;
+                if index < chars.len() {
+                    index += 1;
+                }
+                continue;
+            }
+            if ch == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                word_start = false;
+                index += 1;
+            }
+            '\\' => {
+                word_start = false;
+                index += 1;
+                if index < chars.len() {
+                    index += 1;
+                }
+            }
+            ' ' | '\t' | '\r' => {
+                word_start = true;
+                index += 1;
+            }
+            '#' if word_start => {
+                index += 1;
+                while index < chars.len() && chars[index] != '\n' {
+                    index += 1;
+                }
+            }
+            ';' | '\n' => {
+                commands.push(chars[start..index].iter().collect());
+                index += 1;
+                start = index;
+                word_start = true;
+            }
+            '|' | '&' | '<' | '>' => return None,
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                word_start = false;
+                index = skip_command_subst(&chars, index)?;
+            }
+            '`' => {
+                word_start = false;
+                index = skip_backtick(&chars, index)?;
+            }
+            '(' | ')' | '*' | '?' | '[' | ']' | '{' | '}' | '~' => return None,
+            _ => {
+                word_start = false;
+                index += 1;
+            }
+        }
+    }
+    commands.push(chars[start..].iter().collect());
+    Some(commands)
+}
+
+fn skip_command_subst(chars: &[char], start: usize) -> Option<usize> {
+    take_command_subst(chars, start).map(|(_, next)| next)
+}
+
+fn skip_backtick(chars: &[char], start: usize) -> Option<usize> {
+    take_backtick_chars(chars, start).map(|(_, next)| next)
+}
+
+fn literal_simple(command: &str, depth: u32) -> Option<String> {
+    let mut words = parse_fields(command, depth)?;
+    let mut peeled = false;
+    if let Some(first) = words.first() {
+        let base = command_basename(first);
+        if base == "command" || base == "builtin" {
+            peeled = true;
+            if words.get(1).is_some_and(|word| word.starts_with('-')) {
+                return None;
+            }
+            words.remove(0);
+        }
+    }
+    if words.is_empty() {
+        return if peeled { None } else { Some(String::new()) };
+    }
+    match command_basename(&words[0]) {
+        "echo" => echo_output(&words[1..]),
+        "printf" => printf_literal(&words[1..]),
+        "true" | "false" | ":" => Some(String::new()),
+        _ => None,
+    }
+}
+
+fn parse_fields(command: &str, depth: u32) -> Option<Vec<String>> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut index = 0usize;
+    let mut words = Vec::new();
+    loop {
+        while index < chars.len() && matches!(chars[index], ' ' | '\t' | '\n' | '\r') {
+            index += 1;
+        }
+        if index >= chars.len() || chars[index] == '#' {
+            break;
+        }
+        let before = index;
+        words.extend(read_word_fields(&chars, &mut index, depth)?);
+        if index == before {
+            return None;
+        }
+    }
+    Some(words)
+}
+
+fn read_word_fields(chars: &[char], index: &mut usize, depth: u32) -> Option<Vec<String>> {
+    let mut fields = vec![String::new()];
+    let mut saw = false;
+    while *index < chars.len() {
+        let ch = chars[*index];
+        if matches!(ch, ' ' | '\t' | '\n' | '\r' | ';' | '|' | '&' | '<' | '>') {
+            break;
+        }
+        if ch == '#' && !saw {
+            break;
+        }
+        match ch {
+            '\'' => {
+                *index += 1;
+                push_field(&mut fields, &take_single(chars, index)?);
+                saw = true;
+            }
+            '"' => {
+                *index += 1;
+                push_field(&mut fields, &take_double(chars, index, depth)?);
+                saw = true;
+            }
+            '$' if chars.get(*index + 1) == Some(&'(') => {
+                let (body, next) = take_command_subst(chars, *index)?;
+                *index = next;
+                splice_fields(
+                    &mut fields,
+                    &literal_command_output_depth(&body, depth + 1)?,
+                );
+                saw = true;
+            }
+            '`' => {
+                let (body, next) = take_backtick_chars(chars, *index)?;
+                *index = next;
+                splice_fields(
+                    &mut fields,
+                    &literal_command_output_depth(&body, depth + 1)?,
+                );
+                saw = true;
+            }
+            '\\' => {
+                *index += 1;
+                if *index < chars.len() {
+                    let next = chars[*index];
+                    *index += 1;
+                    if next != '\n' {
+                        push_field(&mut fields, &next.to_string());
+                    }
+                }
+                saw = true;
+            }
+            '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '$' => return None,
+            _ => {
+                push_field(&mut fields, &ch.to_string());
+                *index += 1;
+                saw = true;
+            }
+        }
+    }
+    if fields.len() == 1 && fields[0].is_empty() {
+        return Some(Vec::new());
+    }
+    Some(fields)
+}
+
+fn push_field(fields: &mut [String], text: &str) {
+    if let Some(last) = fields.last_mut() {
+        last.push_str(text);
+    }
+}
+
+fn splice_fields(fields: &mut Vec<String>, text: &str) {
+    let parts = split_ifs(text);
+    let Some((first, rest)) = parts.split_first() else {
+        return;
+    };
+    push_field(fields, first);
+    fields.extend(rest.iter().cloned());
+}
+
+fn take_single(chars: &[char], index: &mut usize) -> Option<String> {
+    let mut out = String::new();
+    while *index < chars.len() {
+        let ch = chars[*index];
+        *index += 1;
+        if ch == '\'' {
+            return Some(out);
+        }
+        out.push(ch);
+    }
+    None
+}
+
+/// Double quotes with no parameter expansion. A bare `$` or `\` is not
+/// a literal, so the caller keeps the substitution.
+fn take_double(chars: &[char], index: &mut usize, depth: u32) -> Option<String> {
+    let mut out = String::new();
+    while *index < chars.len() {
+        let ch = chars[*index];
+        if ch == '"' {
+            *index += 1;
+            return Some(out);
+        }
+        if ch == '\\' || (ch == '$' && chars.get(*index + 1) != Some(&'(')) {
+            return None;
+        }
+        if ch == '$' {
+            let (body, next) = take_command_subst(chars, *index)?;
+            out.push_str(&literal_command_output_depth(&body, depth + 1)?);
+            *index = next;
+            continue;
+        }
+        if ch == '`' {
+            let (body, next) = take_backtick_chars(chars, *index)?;
+            out.push_str(&literal_command_output_depth(&body, depth + 1)?);
+            *index = next;
+            continue;
+        }
+        out.push(ch);
+        *index += 1;
+    }
+    None
+}
+
+/// `$(...)` starting at `$`. Returns the inside and the index after `)`.
+fn take_command_subst(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if chars.get(start) != Some(&'$') || chars.get(start + 1) != Some(&'(') {
+        return None;
+    }
+    let mut index = start + 2;
+    let mut depth = 1usize;
+    let mut quote: Option<char> = None;
+    let body_start = index;
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(open) = quote {
+            if open == '"' && ch == '\\' {
+                index += 1;
+                if index < chars.len() {
+                    index += 1;
+                }
+                continue;
+            }
+            if ch == open {
+                quote = None;
+            }
+            index += 1;
+            continue;
+        }
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                index += 1;
+            }
+            '\\' => {
+                index += 1;
+                if index < chars.len() {
+                    index += 1;
+                }
+            }
+            '(' => {
+                depth += 1;
+                index += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let body = chars[body_start..index].iter().collect();
+                    return Some((body, index + 1));
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+fn take_backtick_chars(chars: &[char], start: usize) -> Option<(String, usize)> {
+    if chars.get(start) != Some(&'`') {
+        return None;
+    }
+    let mut index = start + 1;
+    let mut inner = String::new();
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == '`' {
+            return Some((inner, index + 1));
+        }
+        if ch == '\\' {
+            index += 1;
+            if index >= chars.len() {
+                inner.push('\\');
+                break;
+            }
+            let next = chars[index];
+            index += 1;
+            match next {
+                '$' | '`' | '\\' => inner.push(next),
+                '\n' => {}
+                other => {
+                    inner.push('\\');
+                    inner.push(other);
+                }
+            }
+            continue;
+        }
+        inner.push(ch);
+        index += 1;
+    }
+    None
+}
+
+fn echo_output(args: &[String]) -> Option<String> {
+    let mut newline = true;
+    let mut interpret = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if let Some(flags) = arg.strip_prefix('-') {
+            if flags.is_empty() || !flags.chars().all(|ch| matches!(ch, 'n' | 'e' | 'E')) {
+                return None;
+            }
+            for ch in flags.chars() {
+                match ch {
+                    'n' => newline = false,
+                    'e' => interpret = true,
+                    'E' => interpret = false,
+                    _ => return None,
+                }
+            }
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    let mut parts = Vec::new();
+    for arg in &args[index..] {
+        if interpret {
+            parts.push(echo_escapes(arg)?);
+        } else {
+            parts.push(arg.clone());
+        }
+    }
+    let mut out = parts.join(" ");
+    if newline {
+        out.push('\n');
+    }
+    Some(out)
+}
+
+fn echo_escapes(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] != '\\' {
+            out.push(chars[index]);
+            index += 1;
+            continue;
+        }
+        let next = *chars.get(index + 1)?;
+        match next {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            '\\' => out.push('\\'),
+            _ => return None,
+        }
+        index += 2;
+    }
+    Some(out)
+}
+
+fn printf_literal(args: &[String]) -> Option<String> {
+    let format = args.first()?;
+    let chars: Vec<char> = format.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    let mut arg_index = 1usize;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => {
+                let next = *chars.get(index + 1)?;
+                match next {
+                    '\\' => out.push('\\'),
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    'r' => out.push('\r'),
+                    _ => return None,
+                }
+                index += 2;
+            }
+            '%' => {
+                let next = *chars.get(index + 1)?;
+                match next {
+                    '%' => out.push('%'),
+                    's' => {
+                        if let Some(arg) = args.get(arg_index) {
+                            out.push_str(arg);
+                            arg_index += 1;
+                        }
+                    }
+                    _ => return None,
+                }
+                index += 2;
+            }
+            ch => {
+                out.push(ch);
+                index += 1;
+            }
+        }
+    }
+    Some(out)
+}
+
+fn split_ifs(text: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut field = String::new();
+    for ch in text.chars() {
+        if matches!(ch, ' ' | '\t' | '\n') {
+            if !field.is_empty() {
+                parts.push(std::mem::take(&mut field));
+            }
+        } else {
+            field.push(ch);
+        }
+    }
+    if !field.is_empty() {
+        parts.push(field);
+    }
+    parts
+}
+
+fn fold_quoted_subst(body: String, token: &mut String, substitutions: &mut Vec<String>) {
+    match literal_command_output(&body) {
+        Some(text) => token.push_str(&text),
+        None => substitutions.push(body),
+    }
+}
+
+fn fold_unquoted_subst(
+    body: String,
+    token: &mut String,
+    current: &mut Vec<String>,
+    quoted: &mut bool,
+    word_single: &mut Option<bool>,
+    in_eval: &mut Vec<bool>,
+    substitutions: &mut Vec<String>,
+) {
+    match literal_command_output(&body) {
+        Some(text) => {
+            splice_unquoted_output(&text, token, current, quoted, word_single, in_eval);
+        }
+        None => substitutions.push(body),
+    }
+}
+
+/// An assignment keeps the whole value. A bare substitution splits on
+/// space, tab, and newline. A carriage return stays in the word.
+fn splice_unquoted_output(
+    text: &str,
+    token: &mut String,
+    current: &mut Vec<String>,
+    quoted: &mut bool,
+    word_single: &mut Option<bool>,
+    in_eval: &mut Vec<bool>,
+) {
+    if is_assignment(token) {
+        note_eval_quote(word_single, false);
+        token.push_str(text);
+        return;
+    }
+    let parts = split_ifs(text);
+    let Some((first, rest)) = parts.split_first() else {
+        return;
+    };
+    note_eval_quote(word_single, false);
+    token.push_str(first);
+    let Some((last, middle)) = rest.split_last() else {
+        return;
+    };
+    push_token(token, current, quoted, word_single, in_eval);
+    for part in middle {
+        current.push(part.clone());
+        in_eval.push(false);
+    }
+    token.push_str(last);
+    note_eval_quote(word_single, false);
 }
 
 fn is_fd_word(token: &str) -> bool {
@@ -5730,6 +6618,33 @@ mod tests {
             "x='git push origin main' eval '$x'",
             "x='git push origin main' command eval '$x'",
             "x='git push origin main'; f() { local x; x='echo ok'; }; f; eval \"$x\"",
+            "readonly x='git push origin main'; eval \"$x\"",
+            "readonly x='git push origin main'; eval '$x'",
+            "readonly -- x='git push origin main'; eval \"$x\"",
+            "command readonly x='git push origin main'; eval \"$x\"",
+            "builtin readonly x='git push origin main'; eval \"$x\"",
+            "f() { readonly x='git push origin main'; }; f; eval \"$x\"",
+            "f() { readonly x='git push origin main'; eval \"$x\"; }; f",
+            "readonly -a x='git push origin main'; eval \"$x\"",
+            "readonly -A x='git push origin main'; eval \"$x\"",
+            "readonly -p x='git push origin main'; eval \"$x\"",
+            "eval \"$(echo 'git push origin main')\"",
+            "eval \"$(echo -n 'git push origin main')\"",
+            "eval \"$(echo -e 'git push origin main')\"",
+            "eval \"$(printf '%s' 'git push origin main')\"",
+            "eval \"$(printf '%s\\n' 'git push origin main')\"",
+            "eval \"`echo 'git push origin main'`\"",
+            "x=$(echo 'git push origin main'); eval \"$x\"",
+            "$(echo 'git push origin main')",
+            "eval $(echo 'git push origin main')",
+            "eval \"$(echo 'git push origin main'; true)\"",
+            "eval \"$(echo $(echo 'git push origin main'))\"",
+            "eval \"$(command echo 'git push origin main')\"",
+            "eval \"$(printf 'echo a\\ngit push origin main')\"",
+            "bash <<EOF\n$(echo 'git push origin main')\nEOF",
+            "bash <<< \"$(echo 'git push origin main')\"",
+            "eval \"$(echo 'rm -rf /tmp/x')\"",
+            "$(echo 'rm -rf /tmp/x')",
         ];
         for command in push {
             let want = if command.contains("rm -rf") {
@@ -5760,6 +6675,14 @@ mod tests {
             "f() { declare x='git push origin main'; }; f; eval \"$x\"",
             "f() { local x; x='git push origin main'; }; f; eval \"$x\"",
             "f() { declare x; x='git push origin main'; }; f; eval \"$x\"",
+            "echo \"$(echo 'git push origin main')\"",
+            "eval \"echo $(echo 'git push origin main')\"",
+            "readonly -x x='git push origin main'; eval \"$x\"",
+            "readonly -g x='git push origin main'; eval \"$x\"",
+            "readonly -f x='git push origin main'; eval \"$x\"",
+            "cat <<< \"$(echo 'git push origin main')\"",
+            "cat <<EOF\n$(echo 'git push origin main')\nEOF",
+            "eval $(printf 'echo a\\ngit push origin main')",
         ];
         for command in neither {
             assert!(
@@ -6712,6 +7635,7 @@ mod tests {
             "export -n GIT_SSH_COMMAND=rm; git ls-remote ssh://example/no.git",
             "export GIT_SSH_COMMAND=rm; export -n -- GIT_SSH_COMMAND; git ls-remote ssh://example/no.git",
             "export() { true; }; export GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
+            "readonly GIT_SSH_COMMAND='rm -rf /tmp/x'; git ls-remote ssh://example/no.git",
         ];
         for command in neither {
             assert!(
@@ -6719,5 +7643,143 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    /// `source` and `.` run a regular file in this shell. `bash` and `sh`
+    /// run it in a new process. A missing path stays unmatched. `bash -c`
+    /// and `bash -s` do not read a later path.
+    #[test]
+    fn script_file_matches_the_command_bash_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let dir = std::env::temp_dir();
+        let pid = std::process::id();
+        let push = dir.join(format!("snapif-c29-push-{pid}.sh"));
+        let echo = dir.join(format!("snapif-c29-echo-{pid}.sh"));
+        let assign = dir.join(format!("snapif-c29-assign-{pid}.sh"));
+        let big = dir.join(format!("snapif-c29-big-{pid}.sh"));
+        std::fs::write(&push, "git push origin main\n").expect("push script");
+        std::fs::write(&echo, "echo hello\n").expect("echo script");
+        std::fs::write(&assign, "x='git push origin main'\n").expect("assign script");
+        let mut big_body = b"git push origin main\n".to_vec();
+        big_body.resize(super::SCRIPT_FILE_CAP as usize + 1, b' ');
+        std::fs::write(&big, &big_body).expect("big script");
+        let push_s = plain_script_path(&push);
+        let echo_s = plain_script_path(&echo);
+        let assign_s = plain_script_path(&assign);
+        let big_s = plain_script_path(&big);
+        let missing = dir.join(format!("snapif-c29-missing-{pid}.sh"));
+        let _ = std::fs::remove_file(&missing);
+        let missing_s = plain_script_path(&missing);
+
+        let positives = [
+            format!("source {push_s}"),
+            format!(". {push_s}"),
+            format!("source -- {push_s}"),
+            format!("bash {push_s}"),
+            format!("bash -- {push_s}"),
+            format!("sh {push_s}"),
+            format!("command bash {push_s}"),
+            format!("source {assign_s}; eval \"$x\""),
+            format!("command source {push_s}"),
+        ];
+        for command in &positives {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command:?}"
+            );
+        }
+        for command in [format!("bash {big_s}"), format!("source {big_s}")] {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
+                Some("shell.deep"),
+                "{command:?}"
+            );
+        }
+        let neithers = [
+            format!("source {missing_s}"),
+            format!(". {missing_s}"),
+            format!("source {echo_s}"),
+            format!(". {echo_s}"),
+            format!("bash {echo_s}"),
+            format!("bash -c 'echo hello' {push_s}"),
+            format!("bash -s {push_s}"),
+            "bash -- -c 'git push origin main'".to_string(),
+            format!("source() {{ echo hello; }}; source {push_s}"),
+            format!("bash() {{ echo hello; }}; bash {push_s}"),
+            "bash /dev/zero".to_string(),
+            "source /dev/zero".to_string(),
+        ];
+        for command in &neithers {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command:?}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let fifo = dir.join(format!("snapif-c29-fifo-{pid}"));
+            let link = dir.join(format!("snapif-c29-fifo-link-{pid}"));
+            let _ = std::fs::remove_file(&fifo);
+            let _ = std::fs::remove_file(&link);
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo");
+            assert!(made.success(), "mkfifo {fifo:?}");
+            std::os::unix::fs::symlink(&fifo, &link).expect("fifo symlink");
+            let fifo_s = plain_script_path(&fifo);
+            let link_s = plain_script_path(&link);
+            for command in [
+                format!("bash {fifo_s}"),
+                format!("source {fifo_s}"),
+                format!("bash {link_s}"),
+                format!("source {link_s}"),
+            ] {
+                assert!(
+                    matched_action(&policy, "Bash", Some(&command)).is_none(),
+                    "{command:?}"
+                );
+            }
+            let _ = std::fs::remove_file(&link);
+            let _ = std::fs::remove_file(&fifo);
+        }
+        for path in [&push, &echo, &assign, &big] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    fn plain_script_path(path: &std::path::Path) -> String {
+        let text = path.display().to_string();
+        assert!(
+            text.chars().all(|ch| {
+                ch.is_ascii_graphic()
+                    && !matches!(
+                        ch,
+                        '\'' | '"'
+                            | '\\'
+                            | '$'
+                            | '`'
+                            | '*'
+                            | '?'
+                            | '['
+                            | ']'
+                            | '{'
+                            | '}'
+                            | '~'
+                            | ';'
+                            | '&'
+                            | '|'
+                            | '<'
+                            | '>'
+                            | '('
+                            | ')'
+                            | '#'
+                            | ' '
+                    )
+            }),
+            "{text}"
+        );
+        text
     }
 }
