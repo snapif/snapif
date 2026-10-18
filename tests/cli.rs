@@ -1177,6 +1177,80 @@ fn script_confidence_nouls_and_timeout_name_a_wrong_type() {
 }
 
 #[test]
+fn script_must_be_an_object() {
+    let dir = std::env::temp_dir().join(format!("snapif-script-obj-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let sentence = "script must be an object";
+    for (name, script) in [("string", r#""read""#), ("array", "[1]")] {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"script":{script}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains(sentence), "{name} {err}");
+        assert!(!err.contains("ReplayScript"), "{name} {err}");
+        assert!(!err.contains("invalid type"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"one","gate_request":{"action_id":"bash.rm"},"script":"read","expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_err}");
+    assert!(
+        replay_err.contains("line 1: script must be an object"),
+        "{replay_err}"
+    );
+    assert!(!replay_err.contains("ReplayScript"), "{replay_err}");
+    let cal = dir.join("cal.jsonl");
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":"bash.rm"},"script":"read","expected":"review"}"#,
+    )
+    .expect("write");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(1), "{cal_err}");
+    assert!(
+        cal_err.contains("line 1: script must be an object"),
+        "{cal_err}"
+    );
+    assert!(!cal_err.contains("ReplayScript"), "{cal_err}");
+    assert!(
+        !cal_err.contains("a gate calibration row needs"),
+        "{cal_err}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([

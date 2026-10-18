@@ -177,6 +177,13 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
         eprintln!("call file must be a JSON object");
         return 1;
     }
+    if value
+        .get("script")
+        .is_some_and(|script| !script.is_object())
+    {
+        eprintln!("script must be an object");
+        return 1;
+    }
     let file: CallFile = match serde_json::from_value(value.clone()) {
         Ok(file) => file,
         Err(err) => {
@@ -622,6 +629,13 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
                 "line {}: a replay row needs id, gate_request, script, and expected",
                 line_no + 1
             );
+            return 1;
+        }
+        if value
+            .get("script")
+            .is_some_and(|script| !script.is_object())
+        {
+            eprintln!("line {}: script must be an object", line_no + 1);
             return 1;
         }
         let row: ReplayRow = match serde_json::from_value(value) {
@@ -1683,6 +1697,16 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         if !value.is_object() {
             eprintln!(
                 "{}: line {line_no}: a gate calibration row needs gate_request and script",
+                path.display()
+            );
+            return 1;
+        }
+        if value
+            .get("script")
+            .is_some_and(|script| !script.is_object())
+        {
+            eprintln!(
+                "{}: line {line_no}: script must be an object",
                 path.display()
             );
             return 1;
