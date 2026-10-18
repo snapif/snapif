@@ -431,7 +431,8 @@ fn check_action(
 /// `cat` of several paths keeps each file that exists. `cat < path`,
 /// `grep . path`, and `head -n 1 path` are that text. `grep -h`,
 /// `grep -i`, `grep -w`, and `grep -o '.*'` still print the matching
-/// line. `grep -n`, `grep -H`, and `grep -o .` do not. A missing path
+/// line. `grep -E` and `egrep` use that same match. `grep -n`, `grep -H`,
+/// and `grep -o .` do not. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. `awk 'NR==1 {print}'`
@@ -5961,7 +5962,7 @@ fn run_builtin(
         "tr" => tr_run(args, input),
         "iconv" => iconv_run(args, input, depth, substitutions),
         "join" => join_run(args, input, depth, substitutions),
-        "grep" => grep_run(args, input, depth, substitutions),
+        "grep" | "egrep" => grep_run(&words[0], args, input, depth, substitutions),
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
         "sed" | "gsed" => sed_run(args, input, depth, substitutions),
@@ -6229,14 +6230,18 @@ fn join_query(args: &[String]) -> Option<Vec<String>> {
 }
 
 fn grep_run(
+    name: &str,
     args: &[String],
     input: Option<&str>,
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let Some(query) = grep_query(args) else {
+    let Some(mut query) = grep_query(args) else {
         return Run::Unknown;
     };
+    if command_basename(name) == "egrep" {
+        query.extended = true;
+    }
     let text = match source_text(query.file.as_deref(), input, depth, substitutions) {
         Run::Produced { ok: false, .. } => {
             return Run::Produced {
@@ -6254,6 +6259,7 @@ fn grep_run(
         query.ignore_case,
         query.word,
         query.only,
+        query.extended,
     ) else {
         return Run::Unknown;
     };
@@ -6267,6 +6273,7 @@ struct GrepQuery {
     ignore_case: bool,
     word: bool,
     only: bool,
+    extended: bool,
     file: Option<String>,
 }
 
@@ -6276,6 +6283,7 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
     let mut ignore_case = false;
     let mut word = false;
     let mut only = false;
+    let mut extended = false;
     let mut pattern = None;
     while index < args.len() {
         let arg = &args[index];
@@ -6307,6 +6315,11 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             index += 1;
             continue;
         }
+        if arg == "-E" || arg == "--extended-regexp" {
+            extended = true;
+            index += 1;
+            continue;
+        }
         if arg == "-e" {
             if pattern.is_some() {
                 return None;
@@ -6320,8 +6333,11 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             && !rest.is_empty()
             && rest
                 .chars()
-                .all(|ch| matches!(ch, 'F' | 'h' | 'i' | 'w' | 'o'))
+                .all(|ch| matches!(ch, 'E' | 'F' | 'h' | 'i' | 'w' | 'o'))
         {
+            if rest.contains('E') {
+                extended = true;
+            }
             if rest.contains('F') {
                 fixed = true;
             }
@@ -6355,6 +6371,7 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
         ignore_case,
         word,
         only,
+        extended,
         file: args.get(index).cloned(),
     })
 }
@@ -6366,9 +6383,11 @@ fn grep_lines(
     ignore_case: bool,
     word: bool,
     only: bool,
+    extended: bool,
 ) -> Option<String> {
     let dot = !fixed && pattern == ".";
     let star = !fixed && pattern == ".*";
+    let plus = extended && !fixed && plus_prefix(pattern).is_some();
     let literal = fixed || literal_pattern(pattern);
     if only && dot {
         return None;
@@ -6376,13 +6395,16 @@ fn grep_lines(
     if word && !literal {
         return None;
     }
-    if !dot && !star && !literal {
+    if only && plus {
+        return None;
+    }
+    if !dot && !star && !literal && !plus {
         return None;
     }
     let mut out = String::new();
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
-        if star {
+        if star || (plus && plus_matches(body, pattern)) {
             out.push_str(body);
             out.push('\n');
             continue;
@@ -6408,6 +6430,43 @@ fn grep_lines(
         }
     }
     Some(out)
+}
+
+fn plus_prefix(pattern: &str) -> Option<&str> {
+    let prefix = pattern.strip_suffix('+')?;
+    if prefix.is_empty() || !literal_pattern(prefix) {
+        return None;
+    }
+    Some(prefix)
+}
+
+fn plus_matches(line: &str, pattern: &str) -> bool {
+    let Some(prefix) = plus_prefix(pattern) else {
+        return false;
+    };
+    let Some(last) = prefix.chars().next_back() else {
+        return false;
+    };
+    let head = &prefix[..prefix.len() - last.len_utf8()];
+    let mut rest = line;
+    loop {
+        let Some(rel) = rest.find(head) else {
+            return false;
+        };
+        let mut tail = &rest[rel + head.len()..];
+        let mut saw = false;
+        while tail.starts_with(last) {
+            saw = true;
+            tail = &tail[last.len_utf8()..];
+        }
+        if saw {
+            return true;
+        }
+        let Some(next) = rest[rel..].chars().next() else {
+            return false;
+        };
+        rest = &rest[rel + next.len_utf8()..];
+    }
 }
 
 fn literal_hits(
@@ -8604,7 +8663,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
-        "grep" => grep_query(args).is_none_or(|query| query.file.is_none()),
+        "grep" | "egrep" => grep_query(args).is_none_or(|query| query.file.is_none()),
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
@@ -12201,6 +12260,12 @@ mod tests {
             format!("eval \"$(grep -ho '.*' {push_s})\""),
             format!("eval \"$(grep --only-matching '.*' {push_s})\""),
             format!("eval \"$(grep -o 'git push origin main' {push_s})\""),
+            format!("eval \"$(grep -E '.*' {push_s})\""),
+            format!("eval \"$(grep -E . {push_s})\""),
+            format!("eval \"$(grep -E git {push_s})\""),
+            format!("eval \"$(grep -E 'git+' {push_s})\""),
+            format!("eval \"$(egrep '.*' {push_s})\""),
+            format!("eval \"$(grep -E 'a+' {push_s})\""),
             format!("eval \"$(head -n 1 {push_s})\""),
             format!("eval \"$(head -n1 {push_s})\""),
             format!("eval \"$(head -1 {push_s})\""),
@@ -12370,6 +12435,7 @@ mod tests {
             format!("eval \"$(grep -o . {push_s})\""),
             format!("eval \"$(grep -o git {push_s})\""),
             format!("eval \"$(grep -w it {push_s})\""),
+            format!("eval \"$(grep -E 'z+' {push_s})\""),
             format!("eval \"$(head -n 1 {missing_s})\""),
             format!("eval \"$(cat {push_s} /dev/zero)\""),
             format!("eval \"$(cat {missing_s} {missing2_s})\""),
