@@ -150,6 +150,15 @@ fn json_failures_are_not_unknown_type() {
     assert!(matches!(syntax, WireError::Json(_)));
     assert!(syntax.to_string().starts_with("invalid json: "));
 
+    for bytes in [&b"[]"[..], &b"null"[..], &b"0"[..], br#""x""#] {
+        let err = decode_request(bytes).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid json: expected a JSON object with state and questions",
+            "{bytes:?}"
+        );
+    }
+
     let structural =
         decode_request(br#"{"state":"x","questions":{"q":{"type":"choice","instructions":"x"}}}"#)
             .unwrap_err();

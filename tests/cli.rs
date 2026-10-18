@@ -995,6 +995,28 @@ fn vector_missing_state_names_the_fields() {
 }
 
 #[test]
+fn test_vectors_rejects_a_json_array() {
+    let dir = std::env::temp_dir().join(format!("snapif-vec-array-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("array.json");
+    fs::write(&path, "[]\n").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    let shown = format!(
+        "{}: invalid json: expected a JSON object with state and questions",
+        path.display()
+    );
+    assert!(err.contains(&shown), "{err}");
+    assert!(!err.contains("invalid length"), "{err}");
+}
+
+#[test]
 fn vectors_pass_locally_and_base_url_does_not_connect() {
     let output = bin()
         .args(["test", "--vectors"])

@@ -130,6 +130,11 @@ fn validate(request: &WireRequest) -> Result<(), WireError> {
 
 pub fn decode_request(bytes: &[u8]) -> Result<WireRequest, WireError> {
     let value: Value = serde_json::from_slice(bytes).map_err(json_error)?;
+    if !value.is_object() {
+        return Err(WireError::Json(
+            "expected a JSON object with state and questions".to_string(),
+        ));
+    }
     if let Some(questions) = value.get("questions").and_then(Value::as_object) {
         for (id, question) in questions {
             known_type(id, question)?;
