@@ -451,7 +451,10 @@ fn check_action(
 /// `gexpand`, `gunexpand`, `gpr -t`, `gtr`, `gtee`, and `gbase64 -d`
 /// print it too. `timeout 1 cat`
 /// and `gxargs cat` print it too. `env cat`, `nice cat`, and `nohup cat`
-/// print the file. `genv`, `gnice`, and `gnohup` do too. Without `-n`,
+/// print the file. `genv`, `gnice`, and `gnohup` do too. `time cat`,
+/// `exec cat`, and `sudo cat` print the file. `gsplit --filter=cat`
+/// and `split --filter=cat` print the file. `gsplit -n 1/1` prints it
+/// too. `gsplit --filter` runs that command. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -779,6 +782,8 @@ fn consider_segment<'a>(
         scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
         let compress = sort_compress_commands(&executed.argv);
         scan_isolated(policy, tool_name, &compress, depth, local, git, best);
+        let filters = split_filter_commands(&executed.argv);
+        scan_isolated(policy, tool_name, &filters, depth, local, git, best);
         let remotes = remote_scripts(&executed.argv);
         scan_isolated(policy, tool_name, &remotes, depth, local, git, best);
         let arms = case_arm_scripts(&executed.argv);
@@ -2945,6 +2950,7 @@ fn stage_command_name(token: &str) -> String {
         "gcomm" => "comm".to_string(),
         "gfgrep" => "fgrep".to_string(),
         "gegrep" => "egrep".to_string(),
+        "gsplit" => "split".to_string(),
         _ => {
             if aliased == lowered && base != lowered {
                 base.to_string()
@@ -6012,7 +6018,7 @@ fn peel_stage_wrappers(words: &mut Vec<String>) {
         let name = stage_command_name(&words[0]);
         if !matches!(
             name.as_str(),
-            "stdbuf" | "timeout" | "env" | "nice" | "nohup"
+            "stdbuf" | "timeout" | "env" | "nice" | "nohup" | "time" | "exec" | "sudo"
         ) {
             if name != words[0] {
                 words[0] = name;
@@ -6055,6 +6061,7 @@ fn run_builtin(
             ok: false,
         },
         "cat" => cat_run(args, input, depth, substitutions),
+        "split" => split_run(args, input, depth, substitutions),
         "stdbuf" => stdbuf_run(args, input, depth, substitutions),
         "xargs" => xargs_run(words, input, depth, substitutions),
         "tee" => tee_run(args, input),
@@ -6165,6 +6172,337 @@ fn cat_run(
         text: out,
         ok: !failed,
     }
+}
+
+enum SplitNumber {
+    Files,
+    Bytes(usize, usize),
+    Lines(usize, usize),
+    Robin(usize, usize),
+}
+
+struct SplitPlan {
+    filter: Option<String>,
+    number: Option<SplitNumber>,
+    file: Option<String>,
+}
+
+fn split_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(plan) = split_plan(args) else {
+        return Run::Unknown;
+    };
+    if let Some(number) = &plan.number
+        && split_number_is_stdout(number)
+    {
+        // GNU split refuses --filter when -n already writes the chunk to stdout.
+        if plan.filter.is_some() {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        return match load_split_file(&plan.file, input, depth, substitutions) {
+            SplitText::Text(text) => Run::Produced {
+                text: split_chunk(&text, number),
+                ok: true,
+            },
+            SplitText::Empty => Run::Produced {
+                text: String::new(),
+                ok: false,
+            },
+            SplitText::Unscanned => Run::Unscanned,
+            SplitText::Unknown => Run::Unknown,
+        };
+    }
+    if plan.filter.as_deref().is_some_and(filter_is_cat) {
+        return match load_split_file(&plan.file, input, depth, substitutions) {
+            SplitText::Text(text) => Run::Produced { text, ok: true },
+            SplitText::Empty => Run::Produced {
+                text: String::new(),
+                ok: false,
+            },
+            SplitText::Unscanned => Run::Unscanned,
+            SplitText::Unknown => Run::Unknown,
+        };
+    }
+    Run::Unknown
+}
+
+enum SplitText {
+    Text(String),
+    Empty,
+    Unscanned,
+    Unknown,
+}
+
+fn load_split_file(
+    file: &Option<String>,
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> SplitText {
+    let Some(path) = file else {
+        return SplitText::Unknown;
+    };
+    if path == "-" {
+        return match input {
+            Some(text) => SplitText::Text(text.to_string()),
+            None => SplitText::Unknown,
+        };
+    }
+    match load_text_operand(path, depth, substitutions) {
+        Loaded::Text(text) => SplitText::Text(text),
+        Loaded::Missing | Loaded::Dir | Loaded::Null => SplitText::Empty,
+        Loaded::Unscanned => SplitText::Unscanned,
+        Loaded::Fifo | Loaded::Hang | Loaded::Unknown => SplitText::Unknown,
+    }
+}
+
+fn filter_is_cat(command: &str) -> bool {
+    let mut words = command.split_whitespace();
+    words.next() == Some("cat") && words.next().is_none()
+}
+
+fn split_number_is_stdout(number: &SplitNumber) -> bool {
+    !matches!(number, SplitNumber::Files)
+}
+
+fn split_chunk(text: &str, number: &SplitNumber) -> String {
+    match *number {
+        SplitNumber::Files => String::new(),
+        SplitNumber::Bytes(k, n) => byte_chunk(text, k, n),
+        SplitNumber::Lines(k, n) => line_chunk(text, k, n),
+        SplitNumber::Robin(k, n) => robin_chunk(text, k, n),
+    }
+}
+
+fn byte_range(len: usize, k: usize, n: usize) -> Option<(usize, usize)> {
+    if n == 0 || k == 0 || k > n {
+        return None;
+    }
+    let base = len / n;
+    let rem = len % n;
+    let mut start = 0usize;
+    for i in 1..k {
+        start += base + usize::from(i <= rem);
+    }
+    let size = base + usize::from(k <= rem);
+    Some((start.min(len), start.saturating_add(size).min(len)))
+}
+
+fn byte_chunk(text: &str, k: usize, n: usize) -> String {
+    let Some((start, end)) = byte_range(text.len(), k, n) else {
+        return String::new();
+    };
+    let bytes = text.as_bytes();
+    String::from_utf8_lossy(&bytes[start..end]).into_owned()
+}
+
+fn kept_lines(text: &str) -> Vec<(usize, &str)> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0usize;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            lines.push((start, &text[start..=index]));
+            start = index + 1;
+        }
+    }
+    if start < bytes.len() {
+        lines.push((start, &text[start..]));
+    }
+    lines
+}
+
+fn line_chunk(text: &str, k: usize, n: usize) -> String {
+    let Some((start, end)) = byte_range(text.len(), k, n) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for (line_start, line) in kept_lines(text) {
+        if line_start >= start && line_start < end {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn robin_chunk(text: &str, k: usize, n: usize) -> String {
+    if n == 0 || k == 0 || k > n {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (index, (_, line)) in kept_lines(text).into_iter().enumerate() {
+        if index % n == k - 1 {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn parse_split_number(spec: &str) -> Option<SplitNumber> {
+    let positive = |token: &str| {
+        if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        token.parse::<usize>().ok().filter(|value| *value >= 1)
+    };
+    let parts: Vec<&str> = spec.split('/').collect();
+    match parts.as_slice() {
+        [n] if positive(n).is_some() => Some(SplitNumber::Files),
+        ["l", n] if positive(n).is_some() => Some(SplitNumber::Files),
+        ["r", n] if positive(n).is_some() => Some(SplitNumber::Files),
+        ["l", k, n] => Some(SplitNumber::Lines(positive(k)?, positive(n)?)),
+        ["r", k, n] => Some(SplitNumber::Robin(positive(k)?, positive(n)?)),
+        [k, n] => Some(SplitNumber::Bytes(positive(k)?, positive(n)?)),
+        _ => None,
+    }
+}
+
+fn split_plan(args: &[String]) -> Option<SplitPlan> {
+    let mut index = 0usize;
+    let mut filter = None;
+    let mut number = None;
+    let mut operands = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            operands.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            operands.push(arg.to_string());
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, inline) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (rest, None),
+            };
+            match name {
+                "verbose" | "elide-empty-files" | "unbuffered" => {
+                    if inline.is_some() {
+                        return None;
+                    }
+                    index += 1;
+                }
+                "numeric-suffixes" | "hex-suffixes" => {
+                    index += 1;
+                }
+                "filter" => {
+                    let command = match inline {
+                        Some(value) if !value.is_empty() => value.to_string(),
+                        Some(_) => return None,
+                        None => {
+                            index += 1;
+                            let command = args.get(index)?.clone();
+                            if command.is_empty() {
+                                return None;
+                            }
+                            command
+                        }
+                    };
+                    if filter.is_some() {
+                        return None;
+                    }
+                    filter = Some(command);
+                    index += 1;
+                }
+                "lines" | "bytes" | "line-bytes" | "suffix-length" | "additional-suffix"
+                | "separator" => {
+                    if inline.is_none() {
+                        index += 1;
+                        if args.get(index)?.is_empty() {
+                            return None;
+                        }
+                    } else if inline.is_some_and(str::is_empty) {
+                        return None;
+                    }
+                    index += 1;
+                }
+                "number" => {
+                    let spec = match inline {
+                        Some(value) if !value.is_empty() => value.to_string(),
+                        Some(_) => return None,
+                        None => {
+                            index += 1;
+                            args.get(index)?.clone()
+                        }
+                    };
+                    if number.is_some() {
+                        return None;
+                    }
+                    number = Some(parse_split_number(&spec)?);
+                    index += 1;
+                }
+                _ => return None,
+            }
+            continue;
+        }
+        let mut chars = arg[1..].chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                'd' | 'e' | 'u' | 'x' => {}
+                'a' | 'b' | 'C' | 'l' | 't' => {
+                    let rest: String = chars.collect();
+                    if rest.is_empty() {
+                        index += 1;
+                        if args.get(index)?.is_empty() {
+                            return None;
+                        }
+                    }
+                    break;
+                }
+                'n' => {
+                    let rest: String = chars.collect();
+                    let spec = if rest.is_empty() {
+                        index += 1;
+                        args.get(index)?.clone()
+                    } else {
+                        rest
+                    };
+                    if number.is_some() {
+                        return None;
+                    }
+                    number = Some(parse_split_number(&spec)?);
+                    break;
+                }
+                _ => return None,
+            }
+        }
+        index += 1;
+    }
+    if operands.len() > 2 {
+        return None;
+    }
+    Some(SplitPlan {
+        filter,
+        number,
+        file: operands.first().cloned(),
+    })
+}
+
+fn split_filter_commands(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("split") && !base.eq_ignore_ascii_case("gsplit") {
+        return Vec::new();
+    }
+    let Some(plan) = split_plan(&argv[1..]) else {
+        return Vec::new();
+    };
+    if plan.number.as_ref().is_some_and(split_number_is_stdout) {
+        return Vec::new();
+    }
+    plan.filter.into_iter().collect()
 }
 
 fn stdbuf_run(
@@ -12488,6 +12826,8 @@ mod tests {
             "git push origin main",
             "git push $(echo rm)",
             "bash <<< 'git push origin'",
+            "gsplit --filter='git push origin main' -l 1 /tmp/snapif-split-in",
+            "split --filter='git push origin main' /tmp/snapif-split-in",
             "source /dev/stdin <<'EOF'\ngit push origin\nEOF",
         ];
         for command in push {
@@ -12516,6 +12856,9 @@ mod tests {
             "bash <<'EOF'\nf() { rm -rf /tmp/x; }\nEOF\nf",
             "find . -exec echo -delete \\;",
             "sort --compress-program=true /tmp/snapif-sort-in",
+            "gsplit --filter=echo -l 1 /tmp/snapif-split-in",
+            "gsplit --filter='git push origin main' -n 1/1 /tmp/snapif-split-in",
+            "gsplit -n 1/1 /tmp/snapif-split-in",
             "sort -S 1k /tmp/snapif-sort-in",
             "f() { rm -rf /tmp/x; }; find . -exec f \\;",
             "cat <<< 'rm -rf /tmp/x'",
@@ -13463,6 +13806,20 @@ mod tests {
             format!("eval \"$(gnice cat {push_s})\""),
             format!("eval \"$(nohup cat {push_s})\""),
             format!("eval \"$(gnohup cat {push_s})\""),
+            format!("eval \"$(time cat {push_s})\""),
+            format!("eval \"$(time -p cat {push_s})\""),
+            format!("eval \"$(command time cat {push_s})\""),
+            format!("eval \"$(exec cat {push_s})\""),
+            format!("eval \"$(sudo -n cat {push_s})\""),
+            format!("eval \"$(sudo cat {push_s})\""),
+            format!("eval \"$(gsplit --filter=cat -l 1 {push_s})\""),
+            format!("eval \"$(split --filter=cat -l 1 {push_s})\""),
+            format!("eval \"$(gsplit -n 1/1 {push_s})\""),
+            format!("eval \"$(gsplit -n 1/2 {push_s})\""),
+            format!("eval \"$(gsplit -n l/1/1 {push_s})\""),
+            format!("eval \"$(gsplit -n r/1/1 {push_s})\""),
+            format!("eval \"$(gsplit -n l/2/3 {multi_s})\""),
+            format!("eval \"$(gsplit -n r/3/3 {multi_s})\""),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
             format!("eval \"$(printf '%s\\n' {push_s} | xargs cat)\""),
             format!("eval \"$(gxargs cat {push_s})\""),
@@ -13717,6 +14074,16 @@ mod tests {
             format!("eval \"$(nice cat {echo_s})\""),
             format!("eval \"$(genv cat {echo_s})\""),
             format!("eval \"$(nohup cat {echo_s})\""),
+            format!("eval \"$(time cat {echo_s})\""),
+            format!("eval \"$(exec cat {echo_s})\""),
+            format!("eval \"$(sudo -n cat {echo_s})\""),
+            format!("eval \"$(gsplit --filter=echo -l 1 {push_s})\""),
+            format!("eval \"$(gsplit --filter=cat -n 1/1 {push_s})\""),
+            format!("eval \"$(gsplit -l 1 {push_s})\""),
+            format!("eval \"$(gsplit -n 2/2 {push_s})\""),
+            format!("eval \"$(gsplit -n 1/2 {echo_s})\""),
+            format!("eval \"$(gsplit -n l/1/3 {multi_s})\""),
+            format!("eval \"$(gsplit -n r/1/3 {multi_s})\""),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
