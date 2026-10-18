@@ -39,7 +39,7 @@ enum Command {
         /// Return the real verdict. The exit code stays the same.
         #[arg(long)]
         shadow: bool,
-        /// Print the verdict, reasons, and scores as JSON. The exit code stays the same.
+        /// Print verdict, reasons, scores, backend_id, and first_hop_error as JSON. The exit code stays the same.
         #[arg(long)]
         json: bool,
     },
@@ -51,7 +51,7 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
-        /// Print each decision as JSON. Without this flag, stdout stays `ok`.
+        /// Print each decision as JSON, plus backend_id and first_hop_error. Without this flag, stdout stays `ok`.
         #[arg(long)]
         decisions: bool,
     },
@@ -938,6 +938,7 @@ fn decisions_json(out: &snapif::AskOut) -> String {
         "decisions": rows,
         "usage": out.usage,
         "backend_id": out.backend_id,
+        "first_hop_error": out.meta.values().any(|row| row.first_hop_error),
         "truncated": out.truncated_untrusted,
     })
     .to_string()
@@ -2080,6 +2081,8 @@ fn gate_json(verdict: &Verdict) -> String {
         "verdict": verdict_name(verdict),
         "reasons": reasons,
         "scores": hint.facts.scores,
+        "backend_id": hint.backend_id,
+        "first_hop_error": hint.meta.values().any(|row| row.first_hop_error),
     })
     .to_string()
 }

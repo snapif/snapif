@@ -170,7 +170,7 @@ cargo run --example pre_tool_use
 
 | Command | What it does |
 | --- | --- |
-| `gate` | Score one tool call. Exit 0 `auto`, 10 `review`, 11 `escalate`, 1 programmer error. `--json` prints `verdict`, `reasons`, and `scores`. The exit code stays the same. |
+| `gate` | Score one tool call. Exit 0 `auto`, 10 `review`, 11 `escalate`, 1 programmer error. `--json` prints `verdict`, `reasons`, `scores`, `backend_id`, and `first_hop_error`. The exit code stays the same. |
 | `ask` | Ask the questions in a policy. Exit 0 prints `ok`. Exit 2 is a bad body, 3 an API error, 4 rate limit, 5 auth, 1 programmer error. |
 | `explain` | Print the gates for one action. It does not call a backend. |
 | `hook` | Claude Code PreToolUse hook. Always exits 0. |
@@ -185,7 +185,7 @@ printf '%s\n' '{"trusted":{"user_request":"list"},"untrusted":null}' > state.jso
 SNAPIF_BACKEND=fake snapif ask --policy tool-gate --state state.json
 ```
 
-`--decisions` prints each decision as JSON instead of `ok`.
+`--decisions` prints each decision as JSON instead of `ok`. That object includes `backend_id` and `first_hop_error`.
 
 `explain` names the pack and the model. `git.push` has no Auto gate:
 
@@ -203,7 +203,7 @@ snapif test --vectors tests/conformance
 
 With the `http` feature, `--base-url` posts each valid vector. When `SNAPIF_TIMEOUT_MS` is unset, that command waits 5000 milliseconds. When `SNAPIF_MODEL` is set, each posted vector uses that name instead of the model field in the file. A blank value is an error, and nothing is posted.
 
-`replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. The policy word on that line is the id stored on the row. A different `--policy` or `SNAPIF_POLICY` also prints `replayed with`. A `SNAPIF_LOG` row records those reasons and the policy id. A backend failure sets `script.timeout`, so replay repeats the gate verdict instead of treating confidence 0 as a model score.
+`replay` reads JSONL. Each row needs `id`, `gate_request`, `script`, and `expected`. `tests/fixtures/actions.jsonl` is one such file. Stdout is one JSON object per row, including `id` and `got`. `--summary` still compares `expected` and prints auto, review, and escalate counts per action on stderr, plus the five most common `reasons` when the log has them. The policy word on that line is the id stored on the row. A different `--policy` or `SNAPIF_POLICY` also prints `replayed with`. A `SNAPIF_LOG` row records those reasons, the policy id, `backend_id`, and `first_hop_error`. `first_hop_error` is true when the cascade first hop failed and the fallback answer was used. A low-confidence retry uses the same `cascade:` backend id and leaves that flag false. A backend failure sets `script.timeout`, so replay repeats the gate verdict instead of treating confidence 0 as a model score.
 
 ## Call JSON
 
@@ -268,7 +268,7 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | `SNAPIF_BASE_URL` | Required for `compatible`. Origin only. |
 | `SNAPIF_API_KEY` | Required for `compatible` when the base URL is not a loopback address. |
 | `SNAPIF_ALLOW_PRIVATE_HTTP` | `1` or `true` allows `http` to loopback, link-local, RFC1918, and IPv6 unique-local addresses. Unset keeps `http` on loopback only. The same rule applies to `SNAPIF_CASCADE_BASE_URL` and to `test --base-url`. |
-| `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. Shipped battery questions always go to the fallback. If that hop errors, or it leaves one of those questions out, the gate does not score the first hop's answer. |
+| `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. Shipped battery questions always go to the fallback. If that hop errors, or it leaves one of those questions out, the gate does not score the first hop's answer. `first_hop_error` on the log, on `gate --json`, and on `ask --decisions` is true only for that failure. |
 
 `typesafe` calls the TypeSafe API. `compatible` calls another server that speaks the same System One shape. Both send the model `jev-latest` unless `SNAPIF_MODEL` is set.
 

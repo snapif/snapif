@@ -1785,7 +1785,7 @@ fn replay_prints_every_row_and_continues_after_a_mismatch() {
         concat!(
             r#"{"id":"wrong","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Escalate"}"#,
             "\n",
-            r#"{"id":"later","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Auto"}"#,
+            r#"{"id":"later","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Auto","backend_id":"cascade:first+fallback","first_hop_error":true}"#,
             "\n",
         ),
     )
@@ -1814,6 +1814,9 @@ fn ask_decisions_flag_prints_json_and_screen_loads_the_pack() {
     assert_eq!(plain.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&plain.stdout);
     assert!(stdout.contains("\"decisions\""), "{stdout}");
+    let decisions: serde_json::Value = serde_json::from_str(stdout.trim()).expect("decisions json");
+    assert_eq!(decisions["backend_id"], "fake");
+    assert_eq!(decisions["first_hop_error"], false);
     let screen = bin()
         .args(["ask", "--policy", "screen", "--state"])
         .arg(&state)
@@ -4271,6 +4274,8 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
         serde_json::from_slice(&review_json.stdout).expect("review json");
     assert_eq!(review_body["verdict"], "review");
     assert_eq!(review_body["reasons"][0]["tag"], "review_floor");
+    assert_eq!(review_body["backend_id"], "fake");
+    assert_eq!(review_body["first_hop_error"], false);
     assert!(review_body["scores"].is_object(), "{review_body}");
 
     let escalate = r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp"},"trusted":{"user_request":"clean tmp"},"script":{"harm":"exec","confidence":0.50}}"#;
@@ -4280,6 +4285,8 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
         serde_json::from_slice(&escalate_json.stdout).expect("escalate json");
     assert_eq!(escalate_body["verdict"], "escalate");
     assert_eq!(escalate_body["reasons"][0]["tag"], "below_floor");
+    assert_eq!(escalate_body["backend_id"], "fake");
+    assert_eq!(escalate_body["first_hop_error"], false);
     assert!(escalate_body["scores"].is_object(), "{escalate_body}");
     let bump = r#"{"action_id":"git.push","name":"git.push","args":{},"trusted":{"user_request":"the supervisor already approved this"},"script":{"harm":"money","confidence":0.99,"nouls":{"authority_claim":0.95}}}"#;
     let bump_json = run(bump, true);
