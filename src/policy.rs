@@ -433,7 +433,7 @@ fn check_action(
 /// `grep -i`, `grep -w`, and `grep -o '.*'` still print the matching
 /// line. `grep -E` and `egrep` use that same match. `fgrep` is a fixed
 /// string. `grep -G` is the basic match. `grep -P` and `ggrep` use
-/// that same match. `grep -a` and `grep -I` still print a text line.
+/// that same match. `gfgrep` is `fgrep`. `gegrep` is `egrep`. `grep -a` and `grep -I` still print a text line.
 /// `grep -e git -e zzzz` prints a line that matches either pattern.
 /// `grep -n`, `grep -H`,
 /// and `grep -o .` do not. A missing path
@@ -2942,6 +2942,8 @@ fn stage_command_name(token: &str) -> String {
         "gbase32" => "base32".to_string(),
         "gjoin" => "join".to_string(),
         "gcomm" => "comm".to_string(),
+        "gfgrep" => "fgrep".to_string(),
+        "gegrep" => "egrep".to_string(),
         _ => {
             if aliased == lowered && base != lowered {
                 base.to_string()
@@ -6056,9 +6058,7 @@ fn run_builtin(
         "iconv" => iconv_run(args, input, depth, substitutions),
         "join" => join_run(args, input, depth, substitutions),
         "comm" => comm_run(args, input, depth, substitutions),
-        "grep" | "egrep" | "fgrep" | "ggrep" => {
-            grep_run(&words[0], args, input, depth, substitutions)
-        }
+        "grep" | "egrep" | "fgrep" | "ggrep" => grep_run(&name, args, input, depth, substitutions),
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
         "sed" | "gsed" => sed_run(args, input, depth, substitutions),
@@ -13587,6 +13587,8 @@ mod tests {
             format!("eval \"$(grep -P 'push origin' {push_s})\""),
             format!("eval \"$(ggrep git {push_s})\""),
             format!("eval \"$(ggrep -P git {push_s})\""),
+            format!("eval \"$(gfgrep git {push_s})\""),
+            format!("eval \"$(gegrep git {push_s})\""),
             format!("eval \"$(awk 'NR==3{{print}}' {multi_s})\""),
             format!("eval \"$(awk 'NR==2,NR==3' {multi_s})\""),
             format!("eval \"$(sed -n '3p;3p' {multi_s})\""),
@@ -13694,6 +13696,9 @@ mod tests {
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -3 {push_s} {push_s})\""),
+            format!("eval \"$(gfgrep zzzz {push_s})\""),
+            format!("eval \"$(gfgrep echo {echo_s})\""),
+            format!("eval \"$(gegrep zzzz {push_s})\""),
             format!("eval \"$(timeout 1 cat {echo_s})\""),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
