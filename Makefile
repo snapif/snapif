@@ -26,7 +26,7 @@ deny: ## cargo deny plus forbidden crates
 	cargo deny --manifest-path fuzz/Cargo.toml check
 	bash scripts/forbid-deps.sh fuzz/Cargo.toml
 
-stealth: ## empty About, no topics, no README pitch
+stealth: ## empty homepage and FUNDING; keep description, topics, and keywords
 	bash scripts/assert-stealth.sh snapif/snapif
 
 workflows: ## actionlint and zizmor, same bar as CI
