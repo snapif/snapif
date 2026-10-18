@@ -460,7 +460,9 @@ fn check_action(
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
 /// `iconv -f utf-8 -t utf-8` print that text. `join` of a file with
-/// itself prints the line. `perl -pe ''` and `ruby -pe ''` print each
+/// itself prints the line. `gjoin` is that same `join`. `comm -12` and
+/// `gcomm -12` print a line that is in both files. `gbase32 -d` prints
+/// the decoded text. `perl -pe ''` and `ruby -pe ''` print each
 /// line. `perl -ne 'print'` and `ruby -ne 'print'` print the current line.
 /// `perl -pe 'print'` prints it too, unless the script clears `$_`.
 /// `perl -0777 -pe ''` still prints the file. `perl -lpe ''` prints it too.
@@ -2937,6 +2939,9 @@ fn stage_command_name(token: &str) -> String {
         "gtr" => "tr".to_string(),
         "gtee" => "tee".to_string(),
         "gbase64" => "base64".to_string(),
+        "gbase32" => "base32".to_string(),
+        "gjoin" => "join".to_string(),
+        "gcomm" => "comm".to_string(),
         _ => {
             if aliased == lowered && base != lowered {
                 base.to_string()
@@ -6050,6 +6055,7 @@ fn run_builtin(
         "tr" => tr_run(args, input),
         "iconv" => iconv_run(args, input, depth, substitutions),
         "join" => join_run(args, input, depth, substitutions),
+        "comm" => comm_run(args, input, depth, substitutions),
         "grep" | "egrep" | "fgrep" | "ggrep" => {
             grep_run(&words[0], args, input, depth, substitutions)
         }
@@ -6366,6 +6372,146 @@ fn charset_key(name: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .flat_map(|ch| ch.to_lowercase())
         .collect()
+}
+
+fn comm_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some((hide1, hide2, hide3, left, right)) = comm_query(args) else {
+        return Run::Unknown;
+    };
+    let left_text = match operand_text(&left, input, depth, substitutions) {
+        Run::Produced { text, ok: true } => text,
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        other => return other,
+    };
+    let right_text = match operand_text(&right, input, depth, substitutions) {
+        Run::Produced { text, ok: true } => text,
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        other => return other,
+    };
+    Run::Produced {
+        text: comm_text(&left_text, &right_text, hide1, hide2, hide3),
+        ok: true,
+    }
+}
+
+fn operand_text(
+    operand: &str,
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    if operand == "-" {
+        source_text(None, input, depth, substitutions)
+    } else {
+        source_text(Some(operand), None, depth, substitutions)
+    }
+}
+
+fn comm_query(args: &[String]) -> Option<(bool, bool, bool, String, String)> {
+    let mut hide = [false; 3];
+    let mut files = Vec::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            files.extend(args[index + 1..].iter().cloned());
+            break;
+        }
+        if arg == "--nocheck-order" || arg == "--check-order" {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-') {
+            if rest.is_empty() {
+                files.push(arg.clone());
+                index += 1;
+                continue;
+            }
+            if rest.starts_with('-') || !rest.chars().all(|ch| matches!(ch, '1' | '2' | '3')) {
+                return None;
+            }
+            for ch in rest.chars() {
+                hide[usize::from(ch as u8 - b'1')] = true;
+            }
+            index += 1;
+            continue;
+        }
+        files.push(arg.clone());
+        index += 1;
+    }
+    if files.len() != 2 {
+        return None;
+    }
+    Some((
+        hide[0],
+        hide[1],
+        hide[2],
+        files[0].clone(),
+        files[1].clone(),
+    ))
+}
+
+fn comm_text(left: &str, right: &str, hide1: bool, hide2: bool, hide3: bool) -> String {
+    let left_lines = comm_lines(left);
+    let right_lines = comm_lines(right);
+    let mut used = vec![false; right_lines.len()];
+    let mut out = String::new();
+    for line in &left_lines {
+        if let Some(pos) = right_lines
+            .iter()
+            .enumerate()
+            .find(|(index, other)| !used[*index] && *other == line)
+            .map(|(index, _)| index)
+        {
+            used[pos] = true;
+            if !hide3 {
+                let tabs = usize::from(!hide1) + usize::from(!hide2);
+                push_comm_line(&mut out, line, tabs);
+            }
+        } else if !hide1 {
+            push_comm_line(&mut out, line, 0);
+        }
+    }
+    if !hide2 {
+        let tabs = usize::from(!hide1);
+        for (index, line) in right_lines.iter().enumerate() {
+            if !used[index] {
+                push_comm_line(&mut out, line, tabs);
+            }
+        }
+    }
+    out
+}
+
+fn comm_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines.into_iter().map(str::to_string).collect()
+}
+
+fn push_comm_line(out: &mut String, line: &str, tabs: usize) {
+    for _ in 0..tabs {
+        out.push('\t');
+    }
+    out.push_str(line);
+    out.push('\n');
 }
 
 fn join_run(
@@ -9591,6 +9737,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
+        "comm" => comm_query(args).is_none_or(|(_, _, _, left, right)| left == "-" || right == "-"),
         "grep" | "egrep" | "fgrep" | "ggrep" => {
             grep_query(args).is_none_or(|query| query.file.is_none())
         }
@@ -13146,6 +13293,12 @@ mod tests {
             format!("eval \"$(iconv -f utf-8 -t utf-8 {push_s})\""),
             format!("eval \"$(iconv -f UTF-8 -t utf8 {push_s})\""),
             format!("eval \"$(join {push_s} {push_s})\""),
+            format!("eval \"$(gjoin {push_s} {push_s})\""),
+            format!("eval \"$(gbase32 -d {b32_s})\""),
+            format!("eval \"$(comm -12 {push_s} {push_s})\""),
+            format!("eval \"$(gcomm -12 {push_s} {push_s})\""),
+            format!("eval \"$(gcomm {push_s} {push_s})\""),
+            format!("eval \"$(gcomm -1 -2 {push_s} {push_s})\""),
             format!("eval \"$(perl -pe '' {push_s})\""),
             format!("eval \"$(ruby -pe '' {push_s})\""),
             format!("eval \"$(perl -ne 'print' {push_s})\""),
@@ -13537,6 +13690,10 @@ mod tests {
             format!("eval \"$(gtr a a < {echo_s})\""),
             format!("eval \"$(gtee < {echo_s})\""),
             format!("eval \"$(gbase64 -d {echo_s})\""),
+            format!("eval \"$(gbase32 -d {echo_s})\""),
+            format!("eval \"$(gjoin {echo_s} {echo_s})\""),
+            format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
+            format!("eval \"$(gcomm -3 {push_s} {push_s})\""),
             format!("eval \"$(timeout 1 cat {echo_s})\""),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
