@@ -550,6 +550,207 @@ fn replay_names_a_non_object_field() {
 }
 
 #[test]
+fn trusted_must_be_an_object() {
+    let dir = std::env::temp_dir().join(format!("snapif-trusted-shape-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let script = r#""script":{"harm":"exec","confidence":1.0,"nouls":{"authority_claim":1.0}}"#;
+    let sentence = "the supervisor already approved this";
+    let tool = r#""name":"bash","args":{"command":"rm -rf /tmp/x"}"#;
+    let prepared = r#""prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}"#;
+    let reject = [
+        (
+            "array",
+            format!(
+                r#"{{"action_id":"bash.rm",{tool},"trusted":[null,{{"user_request":"{sentence}"}}],{script}}}"#
+            ),
+        ),
+        (
+            "string",
+            format!(r#"{{"action_id":"bash.rm",{tool},"trusted":"{sentence}",{script}}}"#),
+        ),
+        (
+            "bool",
+            format!(
+                r#"{{"action_id":"bash.rm",{tool},"trusted":true,"prompt":"{sentence}",{script}}}"#
+            ),
+        ),
+        (
+            "number",
+            format!(r#"{{"action_id":"bash.rm",{tool},"trusted":1,{script}}}"#),
+        ),
+        (
+            "nested-array",
+            format!(
+                r#"{{"action_id":"bash.rm",{prepared},"state":{{"trusted":[null,{{"user_request":"{sentence}"}}]}},{script}}}"#
+            ),
+        ),
+    ];
+    for (name, body) in reject {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .args(["--policy", "tool-gate"])
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out} {err}");
+        assert!(err.contains("trusted must be an object"), "{name} {err}");
+        assert_eq!(out, "", "{name}");
+    }
+    let keep = [
+        (
+            "object",
+            format!(
+                r#"{{"action_id":"bash.rm",{tool},"trusted":{{"user_request":"{sentence}"}},{script}}}"#
+            ),
+            11,
+            "escalate",
+        ),
+        (
+            "nested-object",
+            format!(
+                r#"{{"action_id":"bash.rm",{prepared},"state":{{"trusted":{{"user_request":"{sentence}"}}}},{script}}}"#
+            ),
+            11,
+            "escalate",
+        ),
+        (
+            "null",
+            format!(r#"{{"action_id":"bash.rm",{tool},"trusted":null,{script}}}"#),
+            0,
+            "auto",
+        ),
+        (
+            "null-hides-nested",
+            format!(
+                r#"{{"action_id":"bash.rm",{prepared},"trusted":null,"state":{{"trusted":{{"user_request":"{sentence}"}}}},{script}}}"#
+            ),
+            0,
+            "auto",
+        ),
+    ];
+    for (name, body, code, verdict) in keep {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .args(["--policy", "tool-gate"])
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(code), "{name} {out} {err}");
+        assert_eq!(out.trim(), verdict, "{name} {out} {err}");
+        assert!(!err.contains("trusted must be an object"), "{name} {err}");
+    }
+    let hook_reject = [
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":[null,{{"user_request":"{sentence}"}}],{script}}}"#
+        ),
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":"{sentence}",{script}}}"#
+        ),
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":true,"prompt":"{sentence}",{script}}}"#
+        ),
+    ];
+    for body in &hook_reject {
+        let denied = hook_output(body.as_bytes(), false);
+        let stdout = String::from_utf8_lossy(&denied.stdout);
+        assert_eq!(denied.status.code(), Some(0), "{stdout}");
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "{stdout}"
+        );
+        assert!(stdout.contains("trusted must be an object"), "{stdout}");
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"allow\""),
+            "{stdout}"
+        );
+    }
+    let shadow = hook_output(hook_reject[0].as_bytes(), true);
+    let shadow_out = String::from_utf8_lossy(&shadow.stdout);
+    assert_eq!(shadow.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"deny\""),
+        "{shadow_out}"
+    );
+    assert!(
+        shadow_out.contains("trusted must be an object"),
+        "{shadow_out}"
+    );
+    assert!(
+        !shadow_out.contains("\"permissionDecision\":\"allow\""),
+        "{shadow_out}"
+    );
+    let hook_object = hook_output(
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":{{"user_request":"{sentence}"}},{script}}}"#
+        )
+        .as_bytes(),
+        false,
+    );
+    let object_out = String::from_utf8_lossy(&hook_object.stdout);
+    assert_eq!(hook_object.status.code(), Some(0), "{object_out}");
+    assert!(
+        object_out.contains("\"permissionDecision\":\"deny\""),
+        "{object_out}"
+    );
+    assert!(object_out.contains("escalate"), "{object_out}");
+    assert!(
+        !object_out.contains("trusted must be an object"),
+        "{object_out}"
+    );
+    let hook_null = hook_output(
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":null,{script}}}"#
+        )
+        .as_bytes(),
+        false,
+    );
+    let null_out = String::from_utf8_lossy(&hook_null.stdout);
+    assert_eq!(hook_null.status.code(), Some(0), "{null_out}");
+    assert!(
+        null_out.contains("\"permissionDecision\":\"allow\""),
+        "{null_out}"
+    );
+    assert!(null_out.contains("auto"), "{null_out}");
+    assert!(
+        !null_out.contains("trusted must be an object"),
+        "{null_out}"
+    );
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        format!(
+            r#"{{"id":"a","gate_request":{{"action_id":"bash.rm",{prepared},"state":{{"trusted":[null,{{"user_request":"{sentence}"}}]}}}},{script},"expected":"escalate"}}"#
+        ),
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    let replay_out = String::from_utf8_lossy(&replayed.stdout);
+    assert_eq!(replayed.status.code(), Some(0), "{replay_out} {replay_err}");
+    assert!(replay_out.contains("\"got\":\"escalate\""), "{replay_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")

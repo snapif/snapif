@@ -283,6 +283,20 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     // copies that text. Gate already accepts the same body for the
     // command, so a missing trusted object uses the same copy.
     // An explicit object still wins, including an empty one.
+    // Nested `state.trusted` is read only when the top-level key is
+    // absent. `hook_trusted` does not look under `state`. A non-object
+    // there is not a missing field: dropping it lets an approval
+    // sentence score as if it were absent. JSON null stays absent.
+    if !has("trusted")
+        && value.get("state").is_some_and(|state| {
+            state
+                .get("trusted")
+                .is_some_and(|trusted| !trusted.is_null() && !trusted.is_object())
+        })
+    {
+        eprintln!("trusted must be an object");
+        return 1;
+    }
     let trusted_from_state = if has("trusted") {
         file.trusted.filter(|item| item.is_object())
     } else {
@@ -1427,7 +1441,16 @@ fn reason_tag(reason: &snapif::verdict::UnsureReason) -> String {
 }
 
 fn hook_trusted(value: &Value) -> Result<Value, std::io::Error> {
-    if let Some(trusted) = value.get("trusted").filter(|item| item.is_object()) {
+    // A present non-object is not missing. Dropping it lets an approval
+    // sentence score as if the field were absent. JSON null stays absent
+    // so a prompt can still supply the turn.
+    if let Some(trusted) = value.get("trusted").filter(|item| !item.is_null()) {
+        if !trusted.is_object() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "trusted must be an object",
+            ));
+        }
         return Ok(trusted.clone());
     }
     let Some(full) = hook_user_turn(value)? else {
