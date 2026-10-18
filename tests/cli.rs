@@ -1017,6 +1017,28 @@ fn test_vectors_rejects_a_json_array() {
 }
 
 #[test]
+fn test_vectors_names_a_questions_array() {
+    let dir = std::env::temp_dir().join(format!("snapif-vec-questions-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("questions.json");
+    fs::write(&path, "{\"state\":{},\"questions\":[]}\n").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    let shown = format!(
+        "{}: invalid json: questions must be a JSON object",
+        path.display()
+    );
+    assert!(err.contains(&shown), "{err}");
+    assert!(!err.contains("expected a map"), "{err}");
+}
+
+#[test]
 fn vectors_pass_locally_and_base_url_does_not_connect() {
     let output = bin()
         .args(["test", "--vectors"])

@@ -179,6 +179,22 @@ fn json_failures_are_not_unknown_type() {
         object.to_string().contains("missing field `model`"),
         "{object}"
     );
+
+    let questions = decode_request(br#"{"state":{},"questions":[]}"#).unwrap_err();
+    assert_eq!(
+        questions.to_string(),
+        "invalid json: questions must be a JSON object"
+    );
+    let answers = decode_response(br#"{"model":"m","answers":[],"usage":{}}"#).unwrap_err();
+    assert_eq!(
+        answers.to_string(),
+        "invalid json: answers must be a JSON object"
+    );
+    let usage = decode_response(br#"{"model":"m","answers":{},"usage":[]}"#).unwrap_err();
+    assert_eq!(
+        usage.to_string(),
+        "invalid json: usage must be a JSON object"
+    );
 }
 
 #[test]

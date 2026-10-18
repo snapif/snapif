@@ -135,7 +135,12 @@ pub fn decode_request(bytes: &[u8]) -> Result<WireRequest, WireError> {
             "expected a JSON object with state and questions".to_string(),
         ));
     }
-    if let Some(questions) = value.get("questions").and_then(Value::as_object) {
+    if let Some(questions) = value.get("questions") {
+        let Some(questions) = questions.as_object() else {
+            return Err(WireError::Json(
+                "questions must be a JSON object".to_string(),
+            ));
+        };
         for (id, question) in questions {
             known_type(id, question)?;
         }
@@ -173,10 +178,18 @@ pub fn decode_response(bytes: &[u8]) -> Result<WireResponse, WireError> {
             "expected a JSON object with model, answers, and usage".to_string(),
         ));
     }
-    if let Some(answers) = value.get("answers").and_then(Value::as_object) {
+    if let Some(answers) = value.get("answers") {
+        let Some(answers) = answers.as_object() else {
+            return Err(WireError::Json("answers must be a JSON object".to_string()));
+        };
         for (id, answer) in answers {
             known_type(id, answer)?;
         }
+    }
+    if let Some(usage) = value.get("usage")
+        && !usage.is_object()
+    {
+        return Err(WireError::Json("usage must be a JSON object".to_string()));
     }
     serde_json::from_value(value).map_err(json_error)
 }
