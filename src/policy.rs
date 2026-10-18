@@ -431,7 +431,8 @@ fn check_action(
 /// `cat` of several paths keeps each file that exists. `cat < path`,
 /// `grep . path`, and `head -n 1 path` are that text. `grep -h`,
 /// `grep -i`, `grep -w`, and `grep -o '.*'` still print the matching
-/// line. `grep -E` and `egrep` use that same match. `grep -n`, `grep -H`,
+/// line. `grep -E` and `egrep` use that same match. `fgrep` is a fixed
+/// string. `grep -G` is the basic match. `grep -n`, `grep -H`,
 /// and `grep -o .` do not. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
@@ -5962,7 +5963,7 @@ fn run_builtin(
         "tr" => tr_run(args, input),
         "iconv" => iconv_run(args, input, depth, substitutions),
         "join" => join_run(args, input, depth, substitutions),
-        "grep" | "egrep" => grep_run(&words[0], args, input, depth, substitutions),
+        "grep" | "egrep" | "fgrep" => grep_run(&words[0], args, input, depth, substitutions),
         "head" => head_run(args, input, depth, substitutions),
         "tail" => tail_run(args, input, depth, substitutions),
         "sed" | "gsed" => sed_run(args, input, depth, substitutions),
@@ -6239,8 +6240,10 @@ fn grep_run(
     let Some(mut query) = grep_query(args) else {
         return Run::Unknown;
     };
-    if command_basename(name) == "egrep" {
-        query.extended = true;
+    match command_basename(name) {
+        "egrep" => query.extended = true,
+        "fgrep" => query.fixed = true,
+        _ => {}
     }
     let text = match source_text(query.file.as_deref(), input, depth, substitutions) {
         Run::Produced { ok: false, .. } => {
@@ -6317,6 +6320,10 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
         }
         if arg == "-E" || arg == "--extended-regexp" {
             extended = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-G" || arg == "--basic-regexp" {
             index += 1;
             continue;
         }
@@ -8663,7 +8670,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
-        "grep" | "egrep" => grep_query(args).is_none_or(|query| query.file.is_none()),
+        "grep" | "egrep" | "fgrep" => grep_query(args).is_none_or(|query| query.file.is_none()),
         "head" => head_query(args).is_none_or(|query| query.file.is_none()),
         "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
@@ -12266,6 +12273,10 @@ mod tests {
             format!("eval \"$(grep -E 'git+' {push_s})\""),
             format!("eval \"$(egrep '.*' {push_s})\""),
             format!("eval \"$(grep -E 'a+' {push_s})\""),
+            format!("eval \"$(fgrep git {push_s})\""),
+            format!("eval \"$(fgrep 'git push origin main' {push_s})\""),
+            format!("eval \"$(grep -G . {push_s})\""),
+            format!("eval \"$(grep --basic-regexp . {push_s})\""),
             format!("eval \"$(head -n 1 {push_s})\""),
             format!("eval \"$(head -n1 {push_s})\""),
             format!("eval \"$(head -1 {push_s})\""),
@@ -12436,6 +12447,7 @@ mod tests {
             format!("eval \"$(grep -o git {push_s})\""),
             format!("eval \"$(grep -w it {push_s})\""),
             format!("eval \"$(grep -E 'z+' {push_s})\""),
+            format!("eval \"$(fgrep 'no such line' {push_s})\""),
             format!("eval \"$(head -n 1 {missing_s})\""),
             format!("eval \"$(cat {push_s} /dev/zero)\""),
             format!("eval \"$(cat {missing_s} {missing2_s})\""),
