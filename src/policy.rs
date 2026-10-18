@@ -6423,6 +6423,8 @@ enum SedPrint {
         start: SedEnd,
         end: SedEnd,
     },
+    /// Several quiet print commands. A selected line is kept once.
+    Many(Vec<(SedEnd, SedEnd)>),
 }
 
 struct SedQuery {
@@ -6507,17 +6509,42 @@ fn sed_program(script: &str, quiet: bool) -> Option<SedPrint> {
         ("p", false) => Some(SedPrint::Double),
         ("1p" | "1,1p", true) => Some(SedPrint::First),
         ("1p" | "1,1p", false) => Some(SedPrint::FirstPlus),
-        _ => {
-            let (start, end) = sed_address(script)?;
-            if quiet {
-                Some(SedPrint::Range { start, end })
-            } else {
-                // Default sed still prints every line. The address only
-                // adds another copy of the selected lines.
-                Some(SedPrint::All)
-            }
-        }
+        _ => sed_script(script, quiet),
     }
+}
+
+fn sed_script(script: &str, quiet: bool) -> Option<SedPrint> {
+    let pieces: Vec<&str> = script
+        .split(';')
+        .map(str::trim)
+        .filter(|piece| !piece.is_empty())
+        .collect();
+    if pieces.is_empty() {
+        return None;
+    }
+    let mut spans = Vec::new();
+    for piece in pieces {
+        if piece == "p" {
+            return Some(if quiet {
+                SedPrint::All
+            } else {
+                SedPrint::Double
+            });
+        }
+        let (start, end) = sed_address(piece)?;
+        spans.push((start, end));
+    }
+    if !quiet {
+        // Default sed still prints every line.
+        return Some(SedPrint::All);
+    }
+    if let [(start, end)] = spans.as_slice() {
+        return Some(SedPrint::Range {
+            start: *start,
+            end: *end,
+        });
+    }
+    Some(SedPrint::Many(spans))
 }
 
 fn sed_address(script: &str) -> Option<(SedEnd, SedEnd)> {
@@ -6568,10 +6595,11 @@ fn sed_apply(text: &str, kind: SedPrint) -> String {
             out
         }
         SedPrint::Range { start, end } => line_span(text, start, end),
+        SedPrint::Many(spans) => union_lines(text, &spans),
     }
 }
 
-fn line_span(text: &str, start: SedEnd, end: SedEnd) -> String {
+fn union_lines(text: &str, spans: &[(SedEnd, SedEnd)]) -> String {
     let lines: Vec<&str> = text
         .split_inclusive('\n')
         .filter(|line| !line.is_empty())
@@ -6580,23 +6608,42 @@ fn line_span(text: &str, start: SedEnd, end: SedEnd) -> String {
         return String::new();
     }
     let last = lines.len() - 1;
-    let start = match start {
-        SedEnd::Line(line) => line.saturating_sub(1),
-        SedEnd::Last => last,
-    };
-    let end = match end {
-        SedEnd::Line(line) => line.saturating_sub(1),
-        SedEnd::Last => last,
-    };
-    if start > end || start >= lines.len() {
-        return String::new();
+    let mut picked = vec![false; lines.len()];
+    for (start, end) in spans {
+        let start = sed_index(*start, last);
+        let end = sed_index(*end, last);
+        if start > end || start >= lines.len() {
+            continue;
+        }
+        let stop = end.min(last);
+        for slot in picked.iter_mut().take(stop + 1).skip(start) {
+            *slot = true;
+        }
     }
-    lines[start..=end.min(last)].concat()
+    let mut out = String::new();
+    for (slot, line) in lines.iter().enumerate() {
+        if picked[slot] {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn sed_index(end: SedEnd, last: usize) -> usize {
+    match end {
+        SedEnd::Line(line) => line.saturating_sub(1),
+        SedEnd::Last => last,
+    }
+}
+
+fn line_span(text: &str, start: SedEnd, end: SedEnd) -> String {
+    union_lines(text, &[(start, end)])
 }
 
 enum AwkSel {
     All,
     Range { start: usize, end: usize },
+    Many(Vec<(usize, usize)>),
 }
 
 struct AwkQuery {
@@ -6619,6 +6666,13 @@ fn awk_run(
                 AwkSel::All => text,
                 AwkSel::Range { start, end } => {
                     line_span(text.as_str(), SedEnd::Line(start), SedEnd::Line(end))
+                }
+                AwkSel::Many(spans) => {
+                    let spans: Vec<(SedEnd, SedEnd)> = spans
+                        .iter()
+                        .map(|(start, end)| (SedEnd::Line(*start), SedEnd::Line(*end)))
+                        .collect();
+                    union_lines(text.as_str(), &spans)
                 }
             },
             ok,
@@ -6648,6 +6702,56 @@ fn awk_query(args: &[String]) -> Option<AwkQuery> {
 }
 
 fn awk_program(program: &str) -> Option<AwkSel> {
+    if matches!(program, "{print}" | "1" | "{print $0}" | "{print $0;}") {
+        return Some(AwkSel::All);
+    }
+    let pieces = split_statements(program);
+    if pieces.is_empty() {
+        return None;
+    }
+    let mut spans = Vec::new();
+    for piece in pieces {
+        match awk_one(piece)? {
+            AwkSel::All => return Some(AwkSel::All),
+            AwkSel::Range { start, end } => spans.push((start, end)),
+            AwkSel::Many(_) => return None,
+        }
+    }
+    if let [(start, end)] = spans.as_slice() {
+        return Some(AwkSel::Range {
+            start: *start,
+            end: *end,
+        });
+    }
+    Some(AwkSel::Many(spans))
+}
+
+fn split_statements(program: &str) -> Vec<&str> {
+    let mut pieces = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0i32;
+    for (index, ch) in program.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ';' if depth == 0 => {
+                let piece = program[start..index].trim();
+                if !piece.is_empty() {
+                    pieces.push(piece);
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let piece = program[start..].trim();
+    if !piece.is_empty() {
+        pieces.push(piece);
+    }
+    pieces
+}
+
+fn awk_one(program: &str) -> Option<AwkSel> {
     if matches!(program, "{print}" | "1" | "{print $0}" | "{print $0;}") {
         return Some(AwkSel::All);
     }
@@ -10287,6 +10391,8 @@ mod tests {
             format!("eval \"$(awk 'NR==3' {multi_s})\""),
             format!("eval \"$(awk 'NR==3{{print}}' {multi_s})\""),
             format!("eval \"$(awk 'NR==2,NR==3' {multi_s})\""),
+            format!("eval \"$(sed -n '3p;3p' {multi_s})\""),
+            format!("eval \"$(awk 'NR==3; NR==1' {multi_s})\""),
             format!("read x < {push_s}; eval \"$x\""),
             format!("read -r x < {push_s}; eval \"$x\""),
             format!("read < {push_s}; eval \"$REPLY\""),
@@ -10358,6 +10464,7 @@ mod tests {
             format!("eval \"$(sed -n 1p {multi_s})\""),
             format!("eval \"$(sed -n 2p {multi_s})\""),
             format!("eval \"$(awk 'NR==2' {multi_s})\""),
+            format!("eval \"$(sed -n '2p;2p' {multi_s})\""),
             format!("eval \"$(sed -n '' {push_s})\""),
             format!("eval \"$(cut -c 1-5 {push_s})\""),
             format!("eval \"$(cut -c1-5 {push_s})\""),
