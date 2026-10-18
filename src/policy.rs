@@ -429,7 +429,9 @@ fn check_action(
 /// `echo ... || true` prints the echo and does not run the right side.
 /// `cat path` and `$(<path)` are a regular file, up to one megabyte.
 /// `cat` of several paths keeps each file that exists. `cat < path`,
-/// `grep . path`, and `head -n 1 path` are that text. A missing path
+/// `grep . path`, and `head -n 1 path` are that text. `grep -h`,
+/// `grep -i`, `grep -w`, and `grep -o '.*'` still print the matching
+/// line. `grep -n`, `grep -H`, and `grep -o .` do not. A missing path
 /// is not those bytes. A larger file matches `shell.deep`.
 /// `tail`, `sed -n p`, `awk '{print}'`, and `cut -c 1-` print that text
 /// too. `sed -n 3p` and `awk 'NR==3'` print that line. `awk 'NR==1 {print}'`
@@ -6245,7 +6247,14 @@ fn grep_run(
         Run::Produced { text, ok: true } => text,
         other => return other,
     };
-    let Some(matched) = grep_lines(&text, &query.pattern, query.fixed) else {
+    let Some(matched) = grep_lines(
+        &text,
+        &query.pattern,
+        query.fixed,
+        query.ignore_case,
+        query.word,
+        query.only,
+    ) else {
         return Run::Unknown;
     };
     let ok = !matched.is_empty();
@@ -6255,12 +6264,18 @@ fn grep_run(
 struct GrepQuery {
     pattern: String,
     fixed: bool,
+    ignore_case: bool,
+    word: bool,
+    only: bool,
     file: Option<String>,
 }
 
 fn grep_query(args: &[String]) -> Option<GrepQuery> {
     let mut index = 0usize;
     let mut fixed = false;
+    let mut ignore_case = false;
+    let mut word = false;
+    let mut only = false;
     let mut pattern = None;
     while index < args.len() {
         let arg = &args[index];
@@ -6268,8 +6283,27 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             index += 1;
             break;
         }
-        if arg == "-F" {
+        if arg == "-F" || arg == "--fixed-strings" {
             fixed = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-h" || arg == "--no-filename" {
+            index += 1;
+            continue;
+        }
+        if arg == "-i" || arg == "--ignore-case" {
+            ignore_case = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-w" || arg == "--word-regexp" {
+            word = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-o" || arg == "--only-matching" {
+            only = true;
             index += 1;
             continue;
         }
@@ -6279,6 +6313,28 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
             }
             pattern = Some(args.get(index + 1)?.clone());
             index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-')
+            && !arg.starts_with("--")
+            && !rest.is_empty()
+            && rest
+                .chars()
+                .all(|ch| matches!(ch, 'F' | 'h' | 'i' | 'w' | 'o'))
+        {
+            if rest.contains('F') {
+                fixed = true;
+            }
+            if rest.contains('i') {
+                ignore_case = true;
+            }
+            if rest.contains('w') {
+                word = true;
+            }
+            if rest.contains('o') {
+                only = true;
+            }
+            index += 1;
             continue;
         }
         if arg.starts_with('-') {
@@ -6296,30 +6352,109 @@ fn grep_query(args: &[String]) -> Option<GrepQuery> {
     Some(GrepQuery {
         pattern: pattern?,
         fixed,
+        ignore_case,
+        word,
+        only,
         file: args.get(index).cloned(),
     })
 }
 
-fn grep_lines(text: &str, pattern: &str, fixed: bool) -> Option<String> {
+fn grep_lines(
+    text: &str,
+    pattern: &str,
+    fixed: bool,
+    ignore_case: bool,
+    word: bool,
+    only: bool,
+) -> Option<String> {
     let dot = !fixed && pattern == ".";
+    let star = !fixed && pattern == ".*";
     let literal = fixed || literal_pattern(pattern);
-    if !dot && !literal {
+    if only && dot {
+        return None;
+    }
+    if word && !literal {
+        return None;
+    }
+    if !dot && !star && !literal {
         return None;
     }
     let mut out = String::new();
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
-        let hit = if dot {
-            !body.is_empty()
-        } else {
-            body.contains(pattern)
+        if star {
+            out.push_str(body);
+            out.push('\n');
+            continue;
+        }
+        if dot {
+            if !body.is_empty() {
+                out.push_str(body);
+                out.push('\n');
+            }
+            continue;
+        }
+        let Some(ranges) = literal_hits(body, pattern, ignore_case, word) else {
+            continue;
         };
-        if hit {
+        if only {
+            for range in ranges {
+                out.push_str(&body[range]);
+                out.push('\n');
+            }
+        } else {
             out.push_str(body);
             out.push('\n');
         }
     }
     Some(out)
+}
+
+fn literal_hits(
+    line: &str,
+    pattern: &str,
+    ignore_case: bool,
+    word: bool,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let hay = if ignore_case {
+        line.to_ascii_lowercase()
+    } else {
+        line.to_string()
+    };
+    let needle = if ignore_case {
+        pattern.to_ascii_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    while start < hay.len() {
+        let Some(rel) = hay[start..].find(&needle) else {
+            break;
+        };
+        let at = start + rel;
+        let end = at + needle.len();
+        let before = at == 0 || !is_grep_word(hay.as_bytes()[at - 1]);
+        let after = end >= hay.len() || !is_grep_word(hay.as_bytes()[end]);
+        if !word || (before && after) {
+            ranges.push(at..end);
+            start = end.max(at + 1);
+        } else {
+            start = at + 1;
+        }
+    }
+    if ranges.is_empty() {
+        None
+    } else {
+        Some(ranges)
+    }
+}
+
+fn is_grep_word(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn literal_pattern(pattern: &str) -> bool {
@@ -12057,6 +12192,15 @@ mod tests {
             format!("eval \"$(grep . {push_s} | cat)\""),
             format!("eval \"$(grep git {push_s})\""),
             format!("eval \"$(grep 'push origin' {push_s})\""),
+            format!("eval \"$(grep -h . {push_s})\""),
+            format!("eval \"$(grep --no-filename . {push_s})\""),
+            format!("eval \"$(grep -i git {push_s})\""),
+            format!("eval \"$(grep -i 'push origin' {push_s})\""),
+            format!("eval \"$(grep -w git {push_s})\""),
+            format!("eval \"$(grep -o '.*' {push_s})\""),
+            format!("eval \"$(grep -ho '.*' {push_s})\""),
+            format!("eval \"$(grep --only-matching '.*' {push_s})\""),
+            format!("eval \"$(grep -o 'git push origin main' {push_s})\""),
             format!("eval \"$(head -n 1 {push_s})\""),
             format!("eval \"$(head -n1 {push_s})\""),
             format!("eval \"$(head -1 {push_s})\""),
@@ -12221,6 +12365,11 @@ mod tests {
             format!("eval \"$(cat < {missing_s})\""),
             format!("eval \"$(cat {push_s} < {missing_s})\""),
             format!("eval \"$(grep . {missing_s})\""),
+            format!("eval \"$(grep -H . {push_s})\""),
+            format!("eval \"$(grep -n . {push_s})\""),
+            format!("eval \"$(grep -o . {push_s})\""),
+            format!("eval \"$(grep -o git {push_s})\""),
+            format!("eval \"$(grep -w it {push_s})\""),
             format!("eval \"$(head -n 1 {missing_s})\""),
             format!("eval \"$(cat {push_s} /dev/zero)\""),
             format!("eval \"$(cat {missing_s} {missing2_s})\""),
