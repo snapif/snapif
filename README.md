@@ -268,7 +268,7 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 | `SNAPIF_BASE_URL` | Required for `compatible`. Origin only. |
 | `SNAPIF_API_KEY` | Required for `compatible` when the base URL is not a loopback address. |
 | `SNAPIF_ALLOW_PRIVATE_HTTP` | `1` or `true` allows `http` to loopback, link-local, RFC1918, and IPv6 unique-local addresses. Unset keeps `http` on loopback only. The same rule applies to `SNAPIF_CASCADE_BASE_URL` and to `test --base-url`. |
-| `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. |
+| `SNAPIF_CASCADE_BASE_URL` | When set, and the backend is not `fake`, the first hop is this origin with `SNAPIF_API_KEY`. The fallback is `typesafe` or `compatible`. Shipped battery questions always go to the fallback. If that hop errors, or it leaves one of those questions out, the gate does not score the first hop's answer. |
 
 `typesafe` calls the TypeSafe API. `compatible` calls another server that speaks the same System One shape. Both send the model `jev-latest` unless `SNAPIF_MODEL` is set.
 
