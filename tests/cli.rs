@@ -4350,6 +4350,116 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
 }
 
 #[test]
+fn calibrate_labels_must_be_an_object() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-labels-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let cases = [
+        (
+            "array.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":[]}\n",
+            "labels must be an object",
+        ),
+        (
+            "string.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":\"yes\"}\n",
+            "labels must be an object",
+        ),
+        (
+            "null.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":null}\n",
+            "labels must be an object",
+        ),
+        (
+            "number.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":1}\n",
+            "labels must be an object",
+        ),
+    ];
+    for (name, body, needle) in cases {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .arg("calibrate")
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{name} {err}");
+        assert!(err.contains(needle), "{name} {err}");
+        assert!(!err.contains("missing labels"), "{name} {err}");
+        assert!(!err.contains("missing answer"), "{name} {err}");
+    }
+    let omitted = dir.join("omitted.jsonl");
+    fs::write(&omitted, "{\"trusted\":{},\"untrusted\":null}\n").expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&omitted)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("missing labels"), "{err}");
+    assert!(!err.contains("labels must be an object"), "{err}");
+    let empty = dir.join("empty.jsonl");
+    fs::write(
+        &empty,
+        "{\"trusted\":{},\"untrusted\":null,\"labels\":{}}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&empty)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("no labeled scores"), "{err}");
+    let screen = dir.join("screen.jsonl");
+    fs::write(
+        &screen,
+        "{\"trusted\":{\"user_request\":\"hello\"},\"untrusted\":null,\"labels\":[]}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&screen)
+        .args(["--policy", "screen"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("labels must be an object"), "{err}");
+    assert!(!err.contains("missing answer"), "{err}");
+    let gated = dir.join("gate.jsonl");
+    fs::write(
+        &gated,
+        "{\"gate_request\":{\"action_id\":\"tag\",\"prepared\":{\"name\":\"tag\",\"args\":{}},\"state\":{\"trusted\":{},\"untrusted\":null}},\"script\":{\"harm\":\"read\",\"confidence\":1.0},\"expected\":\"review\",\"labels\":[]}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&gated)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("labels must be an object"), "{err}");
+    assert!(!err.contains("invalid type"), "{err}");
+    assert!(!err.contains("gate_request"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_gate_array_names_the_row_fields() {
     let dir = std::env::temp_dir().join(format!("snapif-cal-gate-array-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");

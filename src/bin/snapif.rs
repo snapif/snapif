@@ -1721,6 +1721,16 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
             );
             return 1;
         }
+        if value
+            .get("labels")
+            .is_some_and(|labels| !labels.is_object())
+        {
+            eprintln!(
+                "{}: line {line_no}: labels must be an object",
+                path.display()
+            );
+            return 1;
+        }
         let row: GateCalRow = match serde_json::from_value(value) {
             Ok(row) => row,
             Err(err) => {
@@ -1894,17 +1904,23 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
             .iter()
             .map(|question| (question.id().0.clone(), AskedKind::from(question)))
             .collect();
+        let Some(labels_value) = row.get("labels") else {
+            eprintln!("{}: line {line_no}: missing labels", path.display());
+            return 1;
+        };
+        let Some(labels) = labels_value.as_object() else {
+            eprintln!(
+                "{}: line {line_no}: labels must be an object",
+                path.display()
+            );
+            return 1;
+        };
         let out = match block_on(client.ask(state, questions)) {
             Ok(out) => out,
             Err(err) => {
                 eprintln!("{}: line {line_no}: {err}", path.display());
                 return ask_code(&err);
             }
-        };
-        let labels = row.get("labels").and_then(Value::as_object);
-        let Some(labels) = labels else {
-            eprintln!("{}: line {line_no}: missing labels", path.display());
-            return 1;
         };
         for (id, score) in &out.scores {
             let Some(label) = labels.get(id) else {
