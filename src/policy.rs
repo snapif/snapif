@@ -455,8 +455,8 @@ fn check_action(
 /// `exec cat`, and `sudo cat` print the file. `gsplit --filter=cat`
 /// and `split --filter=cat` print the file. `gsplit -n 1/1` prints it
 /// too. `gsplit --filter` runs that command. `while read -r`
-/// then `printf` of that name prints the file. `mapfile -t` then
-/// `printf` of the first element prints that line. `read -r line < path`
+/// then `printf` or `echo` of that name prints the file. `mapfile -t` then
+/// `printf` or `echo` of the first element prints that line. `read -r line < path`
 /// then `printf` or `echo` of that name prints that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
@@ -5864,19 +5864,28 @@ fn while_read_path(words: &[String]) -> Option<&str> {
         return None;
     }
     index += 1;
-    if words.get(index).map(String::as_str) != Some("printf") {
-        return None;
-    }
-    index += 1;
-    if words.get(index).map(String::as_str) != Some("%s\\n") {
-        return None;
-    }
-    index += 1;
     let expect = format!("${name}");
-    if words.get(index).map(String::as_str) != Some(expect.as_str()) {
-        return None;
+    match words.get(index).map(String::as_str) {
+        Some("printf") => {
+            index += 1;
+            if words.get(index).map(String::as_str) != Some("%s\\n") {
+                return None;
+            }
+            index += 1;
+            if words.get(index).map(String::as_str) != Some(expect.as_str()) {
+                return None;
+            }
+            index += 1;
+        }
+        Some("echo") => {
+            index += 1;
+            if words.get(index).map(String::as_str) != Some(expect.as_str()) {
+                return None;
+            }
+            index += 1;
+        }
+        _ => return None,
     }
-    index += 1;
     redirect_path(words, index)
 }
 
@@ -5891,18 +5900,28 @@ fn mapfile_first_path(words: &[String]) -> Option<&str> {
         return None;
     }
     let (path, next) = split_redirect(words, 3)?;
-    if words.get(next).map(String::as_str) != Some("printf") {
-        return None;
-    }
-    if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
-        return None;
-    }
     let expect = format!("${{{name}[0]}}");
-    if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
-        return None;
-    }
-    if words.len() != next + 3 {
-        return None;
+    match words.get(next).map(String::as_str) {
+        Some("printf") => {
+            if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
+                return None;
+            }
+            if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
+                return None;
+            }
+            if words.len() != next + 3 {
+                return None;
+            }
+        }
+        Some("echo") => {
+            if words.get(next + 1).map(String::as_str) != Some(expect.as_str()) {
+                return None;
+            }
+            if words.len() != next + 2 {
+                return None;
+            }
+        }
+        _ => return None,
     }
     Some(path)
 }
@@ -14061,6 +14080,8 @@ mod tests {
             format!("eval \"$(gsplit -n l/2/3 {multi_s})\""),
             format!("eval \"$(gsplit -n r/3/3 {multi_s})\""),
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {push_s})""#),
+            format!(r#"eval "$(while read -r line; do echo "$line"; done < {push_s})""#),
+            format!(r#"eval "$(mapfile -t x < {push_s}; echo "${{x[0]}}")""#),
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {multi_s})""#),
             format!(r#"eval "$(mapfile -t x < {push_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(read -r line < {push_s}; printf '%s\n' "$line")""#),
@@ -14332,7 +14353,9 @@ mod tests {
             format!("eval \"$(gsplit -n l/1/3 {multi_s})\""),
             format!("eval \"$(gsplit -n r/1/3 {multi_s})\""),
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {echo_s})""#),
+            format!(r#"eval "$(while read -r line; do echo "$line"; done < {echo_s})""#),
             format!(r#"eval "$(mapfile -t x < {echo_s}; printf '%s\n' "${{x[0]}}")""#),
+            format!(r#"eval "$(mapfile -t x < {echo_s}; echo "${{x[0]}}")""#),
             format!(r#"eval "$(mapfile -t x < {multi_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(read -r line < {echo_s}; printf '%s\n' "$line")""#),
             format!(r#"eval "$(read -r line < {echo_s}; echo "$line")""#),
