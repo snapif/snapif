@@ -48,6 +48,7 @@ lz4_flex = "0.14.0"
 brotli-decompressor = "6.1.0"
 tar = { version = "0.4.46", default-features = false }
 zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
+sevenz-rust2 = { version = "0.24.1", default-features = false, features = ["util", "compress"] }
 
 [dev-dependencies]
 pollster = "1.0"

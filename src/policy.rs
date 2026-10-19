@@ -491,7 +491,7 @@ fn check_action(
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
 /// `brotli -dc` prints a brotli stream. `pzstd -dc` prints a zstd
 /// frame. `tar -xOf` prints the named member. `unzip -p` prints that
-/// member.
+/// member. `7z e -so` prints the archive.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -6983,6 +6983,93 @@ fn produced_archive(path: &str, text: impl FnOnce(&[u8]) -> Option<String>) -> R
     Run::Produced { text, ok: true }
 }
 
+fn sevenz_query(args: &[String]) -> Option<ArchiveQuery> {
+    let mut index = 0usize;
+    let mut command = None;
+    let mut stdout = false;
+    let mut positionals = Vec::new();
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if command.is_none() && !arg.starts_with('-') {
+            if arg == "e" || arg == "x" {
+                command = Some(());
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+        if arg == "-so" {
+            stdout = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-bd" | "-y" | "-bso0" | "-bse0" | "-bsp0") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        positionals.push(arg.clone());
+        index += 1;
+    }
+    positionals.extend(args[index..].iter().cloned());
+    if command.is_none() || !stdout || positionals.is_empty() || positionals.len() > 2 {
+        return None;
+    }
+    Some(ArchiveQuery {
+        archive: positionals.remove(0),
+        member: positionals.into_iter().next(),
+    })
+}
+
+fn sevenz_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
+    let mut out = Vec::new();
+    let mut found = false;
+    sevenz_rust2::decompress_with_extract_fn(
+        std::io::Cursor::new(bytes),
+        std::env::temp_dir(),
+        |entry, reader, _dest| {
+            if entry.is_directory() {
+                return Ok(true);
+            }
+            let name = entry.name();
+            if let Some(member) = member
+                && !member_matches(name, member)
+            {
+                std::io::copy(reader, &mut std::io::sink()).map_err(sevenz_rust2::Error::from)?;
+                return Ok(true);
+            }
+            std::io::Read::read_to_end(reader, &mut out).map_err(sevenz_rust2::Error::from)?;
+            found = true;
+            Ok(true)
+        },
+    )
+    .ok()?;
+    if !found {
+        return None;
+    }
+    String::from_utf8(out).ok()
+}
+
+fn sevenz_run(
+    args: &[String],
+    _input: Option<&str>,
+    _depth: u32,
+    _substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = sevenz_query(args) else {
+        return Run::Unknown;
+    };
+    produced_archive(&query.archive, |bytes| {
+        sevenz_text(bytes, query.member.as_deref())
+    })
+}
+
 fn tar_run(
     args: &[String],
     _input: Option<&str>,
@@ -7071,6 +7158,7 @@ fn run_builtin(
         }
         "tar" => tar_run(args, input, depth, substitutions),
         "unzip" => unzip_run(args, input, depth, substitutions),
+        "7z" | "7za" | "7zz" => sevenz_run(args, input, depth, substitutions),
         "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, substitutions),
         "brotli" => brotli_run(&name, args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
@@ -11917,6 +12005,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         }
         "tar" => tar_query(args).is_some_and(|query| query.archive == "-"),
         "unzip" => unzip_query(args).is_some_and(|query| query.archive == "-"),
+        "7z" | "7za" | "7zz" => sevenz_query(args).is_some_and(|query| query.archive == "-"),
         "lz4" | "unlz4" | "lz4cat" => {
             lz4_query(&name, args).is_some_and(|query| query.file.is_none())
         }
@@ -15547,6 +15636,23 @@ mod tests {
         std::fs::write(&zip_file, zip_bytes("git.txt", "git push origin main\n")).expect("zip");
         let zip_hello = dir.join(format!("snapif-c39-zip-hello-{pid}.zip"));
         std::fs::write(&zip_hello, zip_bytes("echo.txt", "echo hello\n")).expect("zip hello");
+        let seven_src = dir.join(format!("snapif-c39-7zsrc-{pid}"));
+        let seven_hello_src = dir.join(format!("snapif-c39-7zhello-{pid}"));
+        std::fs::create_dir_all(&seven_src).expect("7z dir");
+        std::fs::create_dir_all(&seven_hello_src).expect("7z hello dir");
+        std::fs::write(seven_src.join("git.txt"), "git push origin main\n").expect("7z src");
+        std::fs::write(seven_hello_src.join("echo.txt"), "echo hello\n").expect("7z hello src");
+        let seven_file = dir.join(format!("snapif-c39-7z-{pid}.7z"));
+        let seven_cursor =
+            sevenz_rust2::compress(&seven_src, std::io::Cursor::new(Vec::new())).expect("7z");
+        std::fs::write(&seven_file, seven_cursor.into_inner()).expect("7z write");
+        let seven_hello = dir.join(format!("snapif-c39-7z-hello-{pid}.7z"));
+        let seven_hello_cursor =
+            sevenz_rust2::compress(&seven_hello_src, std::io::Cursor::new(Vec::new()))
+                .expect("7z hello");
+        std::fs::write(&seven_hello, seven_hello_cursor.into_inner()).expect("7z hello write");
+        std::fs::remove_dir_all(&seven_src).ok();
+        std::fs::remove_dir_all(&seven_hello_src).ok();
         let lz4_file = dir.join(format!("snapif-c39-lz4-{pid}.lz4"));
         std::fs::write(&lz4_file, lz4_bytes("git push origin main\n")).expect("lz4");
         let lz4_hello = dir.join(format!("snapif-c39-lz4-hello-{pid}.lz4"));
@@ -15617,6 +15723,8 @@ mod tests {
         let tar_hello_s = plain_script_path(&tar_hello);
         let zip_s = plain_script_path(&zip_file);
         let zip_hello_s = plain_script_path(&zip_hello);
+        let seven_s = plain_script_path(&seven_file);
+        let seven_hello_s = plain_script_path(&seven_hello);
         let lz4_s = plain_script_path(&lz4_file);
         let lz4_hello_s = plain_script_path(&lz4_hello);
         let br_s = plain_script_path(&br);
@@ -15853,6 +15961,8 @@ mod tests {
             format!("eval \"$(gtar -xOf {tar_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s})\""),
+            format!("eval \"$(7z e -so {seven_s})\""),
+            format!("eval \"$(7z x -so {seven_s})\""),
             format!("eval \"$(lz4 -dc {lz4_s})\""),
             format!("eval \"$(lz4 -d -c {lz4_s})\""),
             format!("eval \"$(lz4 -c {lz4_s})\""),
@@ -16294,6 +16404,8 @@ mod tests {
             format!("eval \"$(pzstd -dc {zst_hello_s})\""),
             format!("eval \"$(tar -xOf {tar_hello_s} echo.txt)\""),
             format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
+            format!("eval \"$(7z e -so {seven_hello_s})\""),
+            format!("eval \"$(7z e {seven_s})\""),
             format!("eval \"$(tar -xOf {tar_s} missing.txt)\""),
             format!("eval \"$(zstd -d {zst_s})\""),
             format!("eval \"$(lz4 -dc {lz4_hello_s})\""),
