@@ -491,7 +491,8 @@ fn check_action(
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
 /// `brotli -dc` prints a brotli stream. `pzstd -dc` prints a zstd
 /// frame. `tar -xOf` prints the named member. `unzip -p` prints that
-/// member. `7z e -so` prints the archive.
+/// member. `tar -xzOf` prints a member from a gzip archive. `-xJOf`
+/// and `-xjOf` do too. `7z e -so` prints the archive.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -6823,6 +6824,10 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
             index += 1;
             continue;
         }
+        if matches!(arg.as_str(), "--gzip" | "--gunzip" | "--bzip2" | "--xz") {
+            index += 1;
+            continue;
+        }
         if let Some(rest) = arg.strip_prefix('-')
             && !rest.is_empty()
             && !rest.starts_with('-')
@@ -6833,7 +6838,7 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
                 match bytes[cursor] {
                     b'x' => extract = true,
                     b'O' => stdout = true,
-                    b'v' => {}
+                    b'v' | b'z' | b'j' | b'J' => {}
                     b'f' => {
                         let glued = &rest[cursor + 1..];
                         if glued.is_empty() {
@@ -6872,7 +6877,35 @@ fn member_matches(path: &str, member: &str) -> bool {
     path == member || path.rsplit('/').next() == Some(member)
 }
 
+fn inflate_all(mut decoder: impl std::io::Read) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    Some(out)
+}
+
+fn tar_payload(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        return inflate_all(flate2::read::GzDecoder::new(bytes));
+    }
+    if bytes.starts_with(b"BZh") {
+        return inflate_all(bzip2::read::BzDecoder::new(bytes));
+    }
+    if bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
+        let mut input = std::io::Cursor::new(bytes);
+        let mut out = Vec::new();
+        lzma_rs::xz_decompress(&mut input, &mut out).ok()?;
+        return Some(out);
+    }
+    if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) || bytes.starts_with(&[0x50, 0x2a, 0x4d, 0x18])
+    {
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(zstd_frame(bytes)).ok()?;
+        return inflate_all(&mut decoder);
+    }
+    Some(bytes.to_vec())
+}
+
 fn tar_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
+    let bytes = tar_payload(bytes)?;
     let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
     let mut out = Vec::new();
     let mut found = false;
@@ -15483,6 +15516,26 @@ mod tests {
             encoder.write_all(text.as_bytes()).expect("gzip write");
             encoder.finish().expect("gzip finish")
         }
+        fn gzip_bytes_raw(bytes: &[u8]) -> Vec<u8> {
+            use std::io::Write;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(bytes).expect("gzip raw");
+            encoder.finish().expect("gzip raw finish")
+        }
+        fn bzip_bytes_raw(bytes: &[u8]) -> Vec<u8> {
+            use std::io::Write;
+            let mut encoder =
+                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            encoder.write_all(bytes).expect("bzip raw");
+            encoder.finish().expect("bzip raw finish")
+        }
+        fn xz_bytes_raw(bytes: &[u8]) -> Vec<u8> {
+            let mut input = std::io::Cursor::new(bytes);
+            let mut out = Vec::new();
+            lzma_rs::xz_compress(&mut input, &mut out).expect("xz raw");
+            out
+        }
         fn bzip_bytes(text: &str) -> Vec<u8> {
             use std::io::Write;
             let mut encoder =
@@ -15632,6 +15685,30 @@ mod tests {
         std::fs::write(&tar_file, tar_bytes("git.txt", "git push origin main\n")).expect("tar");
         let tar_hello = dir.join(format!("snapif-c39-tar-hello-{pid}.tar"));
         std::fs::write(&tar_hello, tar_bytes("echo.txt", "echo hello\n")).expect("tar hello");
+        let tgz = dir.join(format!("snapif-c39-tgz-{pid}.tar.gz"));
+        std::fs::write(
+            &tgz,
+            gzip_bytes_raw(&tar_bytes("git.txt", "git push origin main\n")),
+        )
+        .expect("tgz");
+        let tgz_hello = dir.join(format!("snapif-c39-tgz-hello-{pid}.tar.gz"));
+        std::fs::write(
+            &tgz_hello,
+            gzip_bytes_raw(&tar_bytes("echo.txt", "echo hello\n")),
+        )
+        .expect("tgz hello");
+        let txz = dir.join(format!("snapif-c39-txz-{pid}.tar.xz"));
+        std::fs::write(
+            &txz,
+            xz_bytes_raw(&tar_bytes("git.txt", "git push origin main\n")),
+        )
+        .expect("txz");
+        let tbz = dir.join(format!("snapif-c39-tbz-{pid}.tar.bz2"));
+        std::fs::write(
+            &tbz,
+            bzip_bytes_raw(&tar_bytes("git.txt", "git push origin main\n")),
+        )
+        .expect("tbz");
         let zip_file = dir.join(format!("snapif-c39-zip-{pid}.zip"));
         std::fs::write(&zip_file, zip_bytes("git.txt", "git push origin main\n")).expect("zip");
         let zip_hello = dir.join(format!("snapif-c39-zip-hello-{pid}.zip"));
@@ -15721,6 +15798,10 @@ mod tests {
         let pz_s = plain_script_path(&pz);
         let tar_s = plain_script_path(&tar_file);
         let tar_hello_s = plain_script_path(&tar_hello);
+        let tgz_s = plain_script_path(&tgz);
+        let tgz_hello_s = plain_script_path(&tgz_hello);
+        let txz_s = plain_script_path(&txz);
+        let tbz_s = plain_script_path(&tbz);
         let zip_s = plain_script_path(&zip_file);
         let zip_hello_s = plain_script_path(&zip_hello);
         let seven_s = plain_script_path(&seven_file);
@@ -15959,6 +16040,12 @@ mod tests {
             format!("eval \"$(tar -xOf {tar_s} git.txt)\""),
             format!("eval \"$(tar -xO -f {tar_s} git.txt)\""),
             format!("eval \"$(gtar -xOf {tar_s} git.txt)\""),
+            format!("eval \"$(tar -xzOf {tgz_s} git.txt)\""),
+            format!("eval \"$(tar -xOzf {tgz_s} git.txt)\""),
+            format!("eval \"$(tar -xOf {tgz_s} git.txt)\""),
+            format!("eval \"$(gtar -xzOf {tgz_s} git.txt)\""),
+            format!("eval \"$(tar -xJOf {txz_s} git.txt)\""),
+            format!("eval \"$(tar -xjOf {tbz_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s})\""),
             format!("eval \"$(7z e -so {seven_s})\""),
@@ -16403,6 +16490,7 @@ mod tests {
             format!("eval \"$(zstd -dc {zst_hello_s})\""),
             format!("eval \"$(pzstd -dc {zst_hello_s})\""),
             format!("eval \"$(tar -xOf {tar_hello_s} echo.txt)\""),
+            format!("eval \"$(tar -xzOf {tgz_hello_s} echo.txt)\""),
             format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
             format!("eval \"$(7z e -so {seven_hello_s})\""),
             format!("eval \"$(7z e {seven_s})\""),
