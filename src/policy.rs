@@ -467,7 +467,9 @@ fn check_action(
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
 /// prints the same bytes. `sort --compress-program` runs that program.
-/// `base64 -d` prints the decoded text.
+/// `base64 -d` prints the decoded text. `openssl base64 -d -in` and
+/// `openssl enc -a -d -in` print that text too. A redirect into
+/// `openssl base64 -d` does too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
@@ -6407,6 +6409,7 @@ fn run_builtin(
         "uniq" => uniq_run(args, input, depth, substitutions),
         "tac" => tac_run(args, input, depth, substitutions),
         "base64" => base64_run(args, input, depth, substitutions),
+        "openssl" => openssl_b64_run(args, input, depth, substitutions),
         "base32" => base32_run(args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
         "perl" | "ruby" => line_print_run(&words[0], args, input, depth, substitutions),
@@ -10296,6 +10299,76 @@ fn base64_query(args: &[String]) -> Option<Base64Query> {
     Some(Base64Query { file })
 }
 
+struct OpensslDecode {
+    file: Option<String>,
+}
+
+fn openssl_b64_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = openssl_b64_query(args) else {
+        return Run::Unknown;
+    };
+    let raw = match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        Run::Produced { text, ok: true } => text,
+        other => return other,
+    };
+    let Some(text) = b64_decode(&raw) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn openssl_b64_query(args: &[String]) -> Option<OpensslDecode> {
+    let sub = args.first().map(String::as_str)?;
+    if sub != "base64" && sub != "enc" {
+        return None;
+    }
+    let mut index = 1usize;
+    let mut decode = false;
+    let mut base64_mode = sub == "base64";
+    let mut file = None;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if matches!(arg, "-d" | "-D" | "--decode") {
+            decode = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "-a" | "-base64" | "--base64") {
+            base64_mode = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-A" {
+            index += 1;
+            continue;
+        }
+        if arg == "-in" {
+            if file.is_some() {
+                return None;
+            }
+            file = Some(args.get(index + 1)?.clone());
+            index += 2;
+            continue;
+        }
+        return None;
+    }
+    if !decode || !base64_mode {
+        return None;
+    }
+    Some(OpensslDecode { file })
+}
+
 fn b64_decode(text: &str) -> Option<String> {
     fn value(byte: u8) -> Option<u8> {
         match byte {
@@ -10426,6 +10499,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             query.files.is_empty() || query.files.iter().any(|file| file == "-")
         }),
         "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
+        "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
         }
@@ -13908,6 +13982,8 @@ mod tests {
         std::fs::write(&beta_last, "git push origin main\nbeta\n").expect("beta last");
         let coded = dir.join(format!("snapif-c30-b64-{pid}.txt"));
         std::fs::write(&coded, "Z2l0IHB1c2ggb3JpZ2luIG1haW4K\n").expect("b64");
+        let echo_b64 = dir.join(format!("snapif-c36-echo-b64-{pid}.txt"));
+        std::fs::write(&echo_b64, "ZWNobyBoZWxsbwo=\n").expect("echo b64");
         let b32 = dir.join(format!("snapif-c31-b32-{pid}.txt"));
         std::fs::write(&b32, "M5UXIIDQOVZWQIDPOJUWO2LOEBWWC2LOBI======\n").expect("b32");
         let dup = dir.join(format!("snapif-c30-dup-{pid}.txt"));
@@ -13921,6 +13997,7 @@ mod tests {
         let multi_s = plain_script_path(&multi);
         let beta_last_s = plain_script_path(&beta_last);
         let coded_s = plain_script_path(&coded);
+        let echo_b64_s = plain_script_path(&echo_b64);
         let b32_s = plain_script_path(&b32);
         let dup_s = plain_script_path(&dup);
         let big_s = plain_script_path(&big);
@@ -14232,6 +14309,12 @@ mod tests {
             format!("eval \"$(tac {echo_s} {push_s})\""),
             format!("eval \"$(sort {multi_s})\""),
             format!("eval \"$(base64 -d {coded_s})\""),
+            format!("eval \"$(openssl base64 -d -A -in {coded_s})\""),
+            format!("eval \"$(openssl base64 -A -d -in {coded_s})\""),
+            format!("eval \"$(openssl base64 -d -in {coded_s})\""),
+            format!("eval \"$(openssl enc -base64 -d -A -in {coded_s})\""),
+            format!("eval \"$(openssl enc -a -d -in {coded_s})\""),
+            format!("eval \"$(openssl base64 -d -A < {coded_s})\""),
             format!("eval \"$(base64 --decode {coded_s})\""),
             format!("eval \"$(base64 -d -i {coded_s})\""),
             format!("eval \"$(paste {push_s})\""),
@@ -14426,6 +14509,8 @@ mod tests {
             format!("eval \"$(gtr a a < {echo_s})\""),
             format!("eval \"$(gtee < {echo_s})\""),
             format!("eval \"$(gbase64 -d {echo_s})\""),
+            format!("eval \"$(openssl base64 -d -A -in {echo_b64_s})\""),
+            format!("eval \"$(openssl base64 -d -A < {echo_b64_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
