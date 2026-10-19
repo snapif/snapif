@@ -467,7 +467,8 @@ fn check_action(
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
 /// prints the same bytes. `sort --compress-program` runs that program.
-/// `base64 -d` prints the decoded text. `openssl base64 -d -in` and
+/// `base64 -d` prints the decoded text. `-w0`, `--ignore-garbage`, and
+/// `-di` do too. `openssl base64 -d -in` and
 /// `openssl enc -a -d -in` print that text too. A redirect into
 /// `openssl base64 -d` does too. `python3 -c` that writes
 /// `base64.b64decode` of that file prints the decoded text. `ruby -e`
@@ -498,7 +499,7 @@ fn check_action(
 /// `perl -0777 -pe ''` still prints the file. `perl -lpe ''` prints it too.
 /// `perl -w -pe ''` prints it too. `perl -X -pe ''` prints it too.
 /// `jq -Rr .` prints each raw line.
-/// `base32 -d` prints the decoded text. `dd if=path` copies that
+/// `base32 -d` prints the decoded text. `-i` does too. `dd if=path` copies that
 /// file. `cut -d ' ' -f 1-` keeps the line. `sed -n l` prints the line.
 /// `sed -n '/git/p'` prints a line that contains `git`.
 /// `sed -n 's/git/git/p'` prints that line too.
@@ -9786,6 +9787,77 @@ fn base32_run(
     Run::Produced { text, ok: true }
 }
 
+struct CoreutilsShort {
+    decode: bool,
+    wrap_needs_arg: bool,
+}
+
+/// GNU `base64` and `base32` cluster `-d`, `-i`, and `-w` COLS.
+/// `-dw0` is decode plus a wrap size. `-wd0` is not a wrap size.
+fn coreutils_short_opts(arg: &str, allow_upper_d: bool) -> Option<CoreutilsShort> {
+    let rest = arg.strip_prefix('-')?;
+    if rest.len() < 2 || rest.starts_with('-') {
+        return None;
+    }
+    let mut decode = false;
+    let bytes = rest.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'd' => decode = true,
+            b'D' if allow_upper_d => decode = true,
+            b'i' => {}
+            b'w' => {
+                let cols = &rest[index + 1..];
+                if cols.is_empty() {
+                    return Some(CoreutilsShort {
+                        decode,
+                        wrap_needs_arg: true,
+                    });
+                }
+                if !cols.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                return Some(CoreutilsShort {
+                    decode,
+                    wrap_needs_arg: false,
+                });
+            }
+            _ => return None,
+        }
+        index += 1;
+    }
+    Some(CoreutilsShort {
+        decode,
+        wrap_needs_arg: false,
+    })
+}
+
+fn apply_coreutils_short(
+    args: &[String],
+    index: &mut usize,
+    decode: &mut bool,
+    allow_upper_d: bool,
+) -> Option<bool> {
+    let arg = args.get(*index)?;
+    let Some(opts) = coreutils_short_opts(arg, allow_upper_d) else {
+        return Some(false);
+    };
+    if opts.decode {
+        *decode = true;
+    }
+    if opts.wrap_needs_arg {
+        let next = args.get(*index + 1)?;
+        if next.is_empty() || !next.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *index += 2;
+    } else {
+        *index += 1;
+    }
+    Some(true)
+}
+
 fn base32_query(args: &[String]) -> Option<Base64Query> {
     let mut index = 0usize;
     let mut decode = false;
@@ -9819,6 +9891,15 @@ fn base32_query(args: &[String]) -> Option<Base64Query> {
             }
             index += 1;
             continue;
+        }
+        if arg == "-i" || arg == "--ignore-garbage" {
+            index += 1;
+            continue;
+        }
+        match apply_coreutils_short(args, &mut index, &mut decode, false) {
+            None => return None,
+            Some(true) => continue,
+            Some(false) => {}
         }
         if arg.starts_with('-') {
             return None;
@@ -10919,23 +11000,36 @@ fn base64_query(args: &[String]) -> Option<Base64Query> {
             index += 1;
             continue;
         }
-        if arg == "-i" || arg == "--input" {
-            if file.is_some() {
+        if arg == "-i" || arg == "--ignore-garbage" {
+            index += 1;
+            continue;
+        }
+        if arg == "-w" || arg == "--wrap" {
+            let next = args.get(index + 1)?;
+            if next.is_empty() || !next.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
-            file = Some(args.get(index + 1)?.clone());
             index += 2;
             continue;
         }
-        if let Some(rest) = arg.strip_prefix("--input=")
-            && !rest.is_empty()
-        {
-            if file.is_some() {
+        if let Some(cols) = arg.strip_prefix("--wrap=") {
+            if cols.is_empty() || !cols.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
-            file = Some(rest.to_string());
             index += 1;
             continue;
+        }
+        if let Some(cols) = arg.strip_prefix("-w") {
+            if !cols.is_empty() && cols.bytes().all(|byte| byte.is_ascii_digit()) {
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+        match apply_coreutils_short(args, &mut index, &mut decode, true) {
+            None => return None,
+            Some(true) => continue,
+            Some(false) => {}
         }
         if arg.starts_with('-') {
             return None;
@@ -14837,6 +14931,10 @@ mod tests {
                 "eval \"$(python3 -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())' {push_s})\""
             ),
             format!("eval \"$(base32 -d {b32_s})\""),
+            format!("eval \"$(base32 -d -i {b32_s})\""),
+            format!("eval \"$(base32 -d --ignore-garbage {b32_s})\""),
+            format!("eval \"$(base32 -di {b32_s})\""),
+            format!("eval \"$(gbase32 -d -i {b32_s})\""),
             format!("eval \"$(cut -d ' ' -f 1- {push_s})\""),
             format!("eval \"$(sed -n l {push_s})\""),
             format!("eval \"$(sed -n '/git/p' {push_s})\""),
@@ -15096,6 +15194,14 @@ mod tests {
             format!("eval \"$(openssl base64 -d -A < {coded_s})\""),
             format!("eval \"$(base64 --decode {coded_s})\""),
             format!("eval \"$(base64 -d -i {coded_s})\""),
+            format!("eval \"$(base64 -d -w0 {coded_s})\""),
+            format!("eval \"$(base64 -d --wrap=0 {coded_s})\""),
+            format!("eval \"$(base64 -d --ignore-garbage {coded_s})\""),
+            format!("eval \"$(base64 -d -w 0 {coded_s})\""),
+            format!("eval \"$(base64 -di {coded_s})\""),
+            format!("eval \"$(base64 -dw0 {coded_s})\""),
+            format!("eval \"$(gbase64 -d -w0 {coded_s})\""),
+            format!("eval \"$(base64 -d -w0 < {coded_s})\""),
             format!("eval \"$(paste {push_s})\""),
             format!("eval \"$(paste -s {push_s})\""),
             format!("eval \"$(expand {push_s})\""),
@@ -15321,6 +15427,8 @@ mod tests {
             format!("eval \"$(basenc --z85 -d {z85_hello_s})\""),
             format!("eval \"$(basenc --base64 -d -i {echo_b64_s})\""),
             format!("eval \"$(basenc --base58 -d {b58_hello_s})\""),
+            format!("eval \"$(base64 -d -w0 {echo_b64_s})\""),
+            format!("eval \"$(base32 -d -i {b32_hello_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {echo_b64_s})\""
             ),
