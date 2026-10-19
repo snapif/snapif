@@ -562,7 +562,8 @@ fn check_action(
 /// or prints `file_get_contents` print the file. A node one-liner that
 /// `console.log`s `readFileSync` prints it too.
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
-/// `readFileSync`, `File.binread`, `Path.read_bytes`,
+/// `readFileSync`, `File.binread`, `IO.binread`, `Path.read_bytes`,
+/// `open(..., "rb")`,
 /// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
@@ -11548,6 +11549,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "printFile.binread(ARGV[0])"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
+            | "printIO.binread(ARGV[0])"
             | "printARGF.read"
             | "putsARGF.read"
             | "putsIO.read(ARGV[0])"
@@ -12047,6 +12049,8 @@ fn python_reads_argv1(script: &str) -> bool {
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
             | "importpathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
+            | "importsys;sys.stdout.buffer.write(open(sys.argv[1],\"rb\").read())"
+            | "importsys;sys.stdout.buffer.write(open(sys.argv[1],'rb').read())"
             | "importsys;print(open(sys.argv[1]).read())"
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
@@ -17294,6 +17298,13 @@ mod tests {
                 r#"eval "$(python3 -c "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())" {push_s})""#
             ),
             format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'print IO.binread(ARGV[0])' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.buffer.write(open(sys.argv[1],'rb').read())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1],"rb").read())' {push_s})""#
+            ),
             format!(
                 r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))" {push_s})""#
             ),
@@ -18554,6 +18565,13 @@ mod tests {
                 r#"eval "$(python3 -c "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())" {echo_s})""#
             ),
             format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'print IO.binread(ARGV[0])' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.buffer.write(open(sys.argv[1],'rb').read())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys; sys.stdout.buffer.write(open(sys.argv[1],"rb").read())' {echo_s})""#
+            ),
             format!(
                 r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))" {echo_s})""#
             ),
