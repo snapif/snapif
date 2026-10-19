@@ -563,7 +563,8 @@ fn check_action(
 /// `console.log`s `readFileSync` prints it too.
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
 /// `readFileSync`, `File.binread`, `IO.binread`, `Path.read_bytes`,
-/// `open(..., "rb")`,
+/// `open(..., "rb")`, `open(...).read().decode()`, `File.open(...).read`,
+/// and `perl -e 'print <>'`,
 /// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
@@ -11521,6 +11522,13 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
         {
             Some(files.first().cloned())
         }
+        Some(text)
+            if command_basename(name) == "perl"
+                && compact_ws(&text) == "print<>"
+                && files.len() == 1 =>
+        {
+            Some(files.first().cloned())
+        }
         _ => None,
     }
 }
@@ -11547,6 +11555,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
         compact.as_str(),
         "printFile.read(ARGV[0])"
             | "printFile.binread(ARGV[0])"
+            | "printFile.open(ARGV[0]).read"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "printIO.binread(ARGV[0])"
@@ -12051,6 +12060,8 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
             | "importsys;sys.stdout.buffer.write(open(sys.argv[1],\"rb\").read())"
             | "importsys;sys.stdout.buffer.write(open(sys.argv[1],'rb').read())"
+            | "importsys;sys.stdout.write(open(sys.argv[1],\"rb\").read().decode())"
+            | "importsys;sys.stdout.write(open(sys.argv[1],'rb').read().decode())"
             | "importsys;print(open(sys.argv[1]).read())"
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
@@ -17299,6 +17310,14 @@ mod tests {
             ),
             format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {push_s})""#),
             format!(r#"eval "$(ruby -e 'print IO.binread(ARGV[0])' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.open(ARGV[0]).read' {push_s})""#),
+            format!(r#"eval "$(perl -e 'print <>' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys; sys.stdout.write(open(sys.argv[1],"rb").read().decode())' {push_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.buffer.write(open(sys.argv[1],'rb').read())" {push_s})""#
             ),
@@ -18566,6 +18585,14 @@ mod tests {
             ),
             format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {echo_s})""#),
             format!(r#"eval "$(ruby -e 'print IO.binread(ARGV[0])' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.open(ARGV[0]).read' {echo_s})""#),
+            format!(r#"eval "$(perl -e 'print <>' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys; sys.stdout.write(open(sys.argv[1],"rb").read().decode())' {echo_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.buffer.write(open(sys.argv[1],'rb').read())" {echo_s})""#
             ),
