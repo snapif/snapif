@@ -488,7 +488,8 @@ fn check_action(
 /// `gzip -dc`, `gunzip -c`, and `gzcat` print the decompressed text.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
-/// `zstd -dc` does too.
+/// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
+/// `brotli -dc` prints a brotli stream.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -6455,6 +6456,20 @@ fn zstd_decode(bytes: &[u8]) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn lz4_decode(bytes: &[u8]) -> Option<String> {
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(bytes);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    String::from_utf8(out).ok()
+}
+
+fn brotli_decode(bytes: &[u8]) -> Option<String> {
+    let mut input = std::io::Cursor::new(bytes);
+    let mut out = Vec::new();
+    brotli_decompressor::BrotliDecompress(&mut input, &mut out).ok()?;
+    String::from_utf8(out).ok()
+}
+
 fn gzip_query(name: &str, args: &[String]) -> Option<GzipQuery> {
     decompress_stdout_query(
         args,
@@ -6517,6 +6532,32 @@ fn zstd_query(name: &str, args: &[String]) -> Option<GzipQuery> {
         matches!(name, "unzstd" | "zstdcat"),
         name == "zstdcat",
     )
+}
+
+fn lz4_query(name: &str, args: &[String]) -> Option<GzipQuery> {
+    if let Some(query) =
+        decompress_stdout_query(args, matches!(name, "unlz4" | "lz4cat"), name == "lz4cat")
+    {
+        return Some(query);
+    }
+    if name != "lz4" {
+        return None;
+    }
+    let query = decompress_stdout_query(args, true, false)?;
+    let path = query.file.as_deref()?;
+    let ext = path.rsplit_once('.').map(|(_, ext)| ext)?;
+    if ext.eq_ignore_ascii_case("lz4") {
+        Some(query)
+    } else {
+        None
+    }
+}
+
+fn brotli_query(name: &str, args: &[String]) -> Option<GzipQuery> {
+    if name != "brotli" {
+        return None;
+    }
+    decompress_stdout_query(args, false, false)
 }
 
 fn decompress_stdout_query(
@@ -6658,6 +6699,38 @@ fn zstd_run(
     )
 }
 
+fn lz4_run(
+    name: &str,
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    decoded_bytes_run(
+        lz4_query(name, args),
+        input,
+        depth,
+        substitutions,
+        lz4_decode,
+    )
+}
+
+fn brotli_run(
+    name: &str,
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    decoded_bytes_run(
+        brotli_query(name, args),
+        input,
+        depth,
+        substitutions,
+        brotli_decode,
+    )
+}
+
 fn decoded_bytes_run(
     query: Option<GzipQuery>,
     input: Option<&str>,
@@ -6741,6 +6814,8 @@ fn run_builtin(
             xz_run(&name, args, input, depth, substitutions)
         }
         "zstd" | "unzstd" | "zstdcat" => zstd_run(&name, args, input, depth, substitutions),
+        "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, substitutions),
+        "brotli" => brotli_run(&name, args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
         "perl" | "ruby" => line_print_run(&words[0], args, input, depth, substitutions),
         "python" | "python3" => python_cat_run(args, input, depth, substitutions),
@@ -11583,6 +11658,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "zstd" | "unzstd" | "zstdcat" => {
             zstd_query(&name, args).is_some_and(|query| query.file.is_none())
         }
+        "lz4" | "unlz4" | "lz4cat" => {
+            lz4_query(&name, args).is_some_and(|query| query.file.is_none())
+        }
+        "brotli" => brotli_query(&name, args).is_some_and(|query| query.file.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
         }
@@ -15081,6 +15160,24 @@ mod tests {
                 ruzstd::encoding::CompressionLevel::Fastest,
             )
         }
+        fn lz4_bytes(text: &str) -> Vec<u8> {
+            use std::io::Write;
+            let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
+            encoder.write_all(text.as_bytes()).expect("lz4 write");
+            encoder.finish().expect("lz4 finish")
+        }
+        fn brotli_bytes(text: &str) -> &'static [u8] {
+            match text {
+                "git push origin main\n" => &[
+                    15, 10, 128, 103, 105, 116, 32, 112, 117, 115, 104, 32, 111, 114, 105, 103,
+                    105, 110, 32, 109, 97, 105, 110, 10, 3,
+                ],
+                "echo hello\n" => &[
+                    15, 5, 128, 101, 99, 104, 111, 32, 104, 101, 108, 108, 111, 10, 3,
+                ],
+                _ => &[],
+            }
+        }
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
         let dir = std::env::temp_dir();
         let pid = std::process::id();
@@ -15151,6 +15248,14 @@ mod tests {
         std::fs::write(&zst, zstd_bytes("git push origin main\n")).expect("zst");
         let zst_hello = dir.join(format!("snapif-c39-zst-hello-{pid}.zst"));
         std::fs::write(&zst_hello, zstd_bytes("echo hello\n")).expect("zst hello");
+        let lz4_file = dir.join(format!("snapif-c39-lz4-{pid}.lz4"));
+        std::fs::write(&lz4_file, lz4_bytes("git push origin main\n")).expect("lz4");
+        let lz4_hello = dir.join(format!("snapif-c39-lz4-hello-{pid}.lz4"));
+        std::fs::write(&lz4_hello, lz4_bytes("echo hello\n")).expect("lz4 hello");
+        let br = dir.join(format!("snapif-c39-br-{pid}.br"));
+        std::fs::write(&br, brotli_bytes("git push origin main\n")).expect("br");
+        let br_hello = dir.join(format!("snapif-c39-br-hello-{pid}.br"));
+        std::fs::write(&br_hello, brotli_bytes("echo hello\n")).expect("br hello");
         let b2m = dir.join(format!("snapif-c38-b2m-{pid}.txt"));
         std::fs::write(
             &b2m,
@@ -15208,6 +15313,10 @@ mod tests {
         let lzma_hello_s = plain_script_path(&lzma_hello);
         let zst_s = plain_script_path(&zst);
         let zst_hello_s = plain_script_path(&zst_hello);
+        let lz4_s = plain_script_path(&lz4_file);
+        let lz4_hello_s = plain_script_path(&lz4_hello);
+        let br_s = plain_script_path(&br);
+        let br_hello_s = plain_script_path(&br_hello);
         let b58_hello_s = plain_script_path(&b58_hello);
         let b2m_s = plain_script_path(&b2m);
         let b2l_s = plain_script_path(&b2l);
@@ -15432,6 +15541,14 @@ mod tests {
             format!("eval \"$(zstd -d -c {zst_s})\""),
             format!("eval \"$(zstdcat {zst_s})\""),
             format!("eval \"$(unzstd -c {zst_s})\""),
+            format!("eval \"$(lz4 -dc {lz4_s})\""),
+            format!("eval \"$(lz4 -d -c {lz4_s})\""),
+            format!("eval \"$(lz4 -c {lz4_s})\""),
+            format!("eval \"$(lz4cat {lz4_s})\""),
+            format!("eval \"$(unlz4 -c {lz4_s})\""),
+            format!("eval \"$(brotli -dc {br_s})\""),
+            format!("eval \"$(brotli -d -c {br_s})\""),
+            format!("eval \"$(brotli --decompress --stdout {br_s})\""),
             format!("eval \"$(python3 -m base64 -u < {coded_s})\""),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
@@ -15863,6 +15980,10 @@ mod tests {
             format!("eval \"$(xz -d {xz_s})\""),
             format!("eval \"$(zstd -dc {zst_hello_s})\""),
             format!("eval \"$(zstd -d {zst_s})\""),
+            format!("eval \"$(lz4 -dc {lz4_hello_s})\""),
+            format!("eval \"$(lz4 -d {lz4_s})\""),
+            format!("eval \"$(brotli -dc {br_hello_s})\""),
+            format!("eval \"$(brotli -d {br_s})\""),
             format!("eval \"$(gzip -d {gz_s})\""),
             format!("eval \"$(gzip -c {push_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
