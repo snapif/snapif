@@ -493,7 +493,8 @@ fn check_action(
 /// print it. `perl -MIO::Uncompress::Gunzip` and `php` `gzdecode` print
 /// it too. `zlib.decompress` and Node `inflateSync` print a zlib
 /// payload. `unzipSync` prints gzip or zlib. `perl` `Bunzip2` and
-/// `php` `bzdecompress` print a bzip2 payload.
+/// `php` `bzdecompress` print a bzip2 payload. Node
+/// `brotliDecompressSync` prints a brotli payload.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -11595,6 +11596,7 @@ enum NodeInflate {
     Gzip,
     Zlib,
     GzipOrZlib,
+    Brotli,
 }
 
 fn node_inflate_kind(compact: &str) -> Option<NodeInflate> {
@@ -11610,6 +11612,10 @@ fn node_inflate_kind(compact: &str) -> Option<NodeInflate> {
         "constfs=require(\"fs\");constz=require(\"zlib\");process.stdout.write(z.inflateSync(fs.readFileSync(process.argv[1])))"
         | "constfs=require('fs');constz=require('zlib');process.stdout.write(z.inflateSync(fs.readFileSync(process.argv[1])))" => {
             Some(NodeInflate::Zlib)
+        }
+        "constfs=require(\"fs\");constz=require(\"zlib\");process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))"
+        | "constfs=require('fs');constz=require('zlib');process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))" => {
+            Some(NodeInflate::Brotli)
         }
         _ => None,
     }
@@ -11817,6 +11823,7 @@ fn node_cat_run(
             NodeInflate::Gzip => gzip_decode,
             NodeInflate::Zlib => zlib_decode,
             NodeInflate::GzipOrZlib => gzip_or_zlib_decode,
+            NodeInflate::Brotli => brotli_decode,
         };
         return decoded_bytes_run(
             Some(GzipQuery { file: Some(path) }),
@@ -17044,6 +17051,12 @@ mod tests {
                 r#"eval "$(perl -MIO::Uncompress::Bunzip2=bunzip2 -e 'bunzip2 $ARGV[0] => \*STDOUT' {bz_s})""#
             ),
             format!(r#"eval "$(php -r 'echo bzdecompress(file_get_contents($argv[1]));' {bz_s})""#),
+            format!(
+                r#"eval "$(node -e 'const fs=require("fs"); const z=require("zlib"); process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))' {br_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); const z=require('zlib'); process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))" {br_s})""#
+            ),
             format!("eval \"$(gzip -d -c {gz_s})\""),
             format!("eval \"$(gzip -cd {gz_s})\""),
             format!("eval \"$(gunzip -c {gz_s})\""),
@@ -17625,6 +17638,12 @@ mod tests {
             ),
             format!(
                 r#"eval "$(php -r 'echo bzdecompress(file_get_contents($argv[1]));' {bz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e 'const fs=require("fs"); const z=require("zlib"); process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))' {br_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); const z=require('zlib'); process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))" {br_hello_s})""#
             ),
             format!("eval \"$(zcat {gz_hello_s})\""),
             format!("eval \"$(bzip2 -dc {bz_hello_s})\""),
