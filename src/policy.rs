@@ -455,7 +455,8 @@ fn check_action(
 /// `exec cat`, and `sudo cat` print the file. `gsplit --filter=cat`
 /// and `split --filter=cat` print the file. `gsplit -n 1/1` prints it
 /// too. `gsplit --filter` runs that command. `while read -r`
-/// then `printf` or `echo` of that name prints the file. `mapfile -t` then
+/// then `printf` or `echo` of that name prints the file. `&&` between
+/// the `read` and that print does too. `mapfile -t` then
 /// `printf` or `echo` of the first element prints that line. `read -r line < path`
 /// then `printf` or `echo` of that name prints that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
@@ -5748,8 +5749,17 @@ fn loose_words(body: &str) -> Option<Vec<String>> {
     let mut words = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
-        while index < chars.len() && (chars[index].is_whitespace() || chars[index] == ';') {
-            index += 1;
+        while index < chars.len()
+            && (chars[index].is_whitespace()
+                || chars[index] == ';'
+                || (chars[index] == '&' && chars.get(index + 1) == Some(&'&'))
+                || (chars[index] == '|' && chars.get(index + 1) == Some(&'|')))
+        {
+            if chars[index] == '&' || chars[index] == '|' {
+                index += 2;
+            } else {
+                index += 1;
+            }
         }
         if index >= chars.len() || chars[index] == '#' {
             break;
@@ -5784,6 +5794,8 @@ fn loose_words(body: &str) -> Option<Vec<String>> {
                 && chars[index] != ';'
                 && chars[index] != '\''
                 && chars[index] != '"'
+                && !(chars[index] == '&' && chars.get(index + 1) == Some(&'&'))
+                && !(chars[index] == '|' && chars.get(index + 1) == Some(&'|'))
             {
                 word.push(chars[index]);
                 index += 1;
@@ -5931,10 +5943,14 @@ fn redirect_path(words: &[String], index: usize) -> Option<&str> {
         return None;
     }
     let (path, next) = split_redirect(words, index + 1)?;
-    if words.len() != next {
-        return None;
+    // `&& true` after the loop still leaves the loop's stdout.
+    if words[next..]
+        .iter()
+        .all(|word| matches!(word.as_str(), "true" | "false" | ":"))
+    {
+        return Some(path);
     }
-    Some(path)
+    None
 }
 
 fn split_redirect(words: &[String], index: usize) -> Option<(&str, usize)> {
@@ -6018,10 +6034,18 @@ fn fold_print(body: &str, depth: u32, substitutions: &mut Vec<String>) -> Printe
                     exit_ok = Some(ok);
                 }
                 Run::Unscanned => return Printed::Unscanned,
-                Run::Unknown => {
-                    extra.push(piece.command);
-                    exit_ok = None;
-                }
+                Run::Unknown => match read_back_print(&piece.command, depth, substitutions) {
+                    Some(Printed::Text(text)) => {
+                        any_known = true;
+                        out.push_str(&text);
+                        exit_ok = Some(true);
+                    }
+                    Some(Printed::Unscanned) => return Printed::Unscanned,
+                    Some(Printed::Unknown) | None => {
+                        extra.push(piece.command);
+                        exit_ok = None;
+                    }
+                },
             }
         }
         should_run = match piece.next {
@@ -14085,6 +14109,11 @@ mod tests {
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {multi_s})""#),
             format!(r#"eval "$(mapfile -t x < {push_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(read -r line < {push_s}; printf '%s\n' "$line")""#),
+            format!(r#"eval "$(read -r line < {push_s} && printf '%s\n' "$line")""#),
+            format!(r#"eval "$(read -r line < {push_s} && echo "$line")""#),
+            format!(
+                r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {push_s} && true)""#
+            ),
             format!(r#"eval "$(read line < {push_s}; printf '%s\n' "$line")""#),
             format!(r#"eval "$(read -r line < {push_s}; printf "%s\n" "$line")""#),
             format!(r#"eval "$(read -r line < {push_s}; echo "$line")""#),
@@ -14358,6 +14387,10 @@ mod tests {
             format!(r#"eval "$(mapfile -t x < {echo_s}; echo "${{x[0]}}")""#),
             format!(r#"eval "$(mapfile -t x < {multi_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(read -r line < {echo_s}; printf '%s\n' "$line")""#),
+            format!(r#"eval "$(read -r line < {echo_s} && printf '%s\n' "$line")""#),
+            format!(
+                r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {echo_s} && true)""#
+            ),
             format!(r#"eval "$(read -r line < {echo_s}; echo "$line")""#),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
