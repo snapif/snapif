@@ -484,7 +484,7 @@ fn check_action(
 /// `xxd -r -p` prints the
 /// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
-/// `basenc`. `python3 -m base64 -d` prints it too. `ruby -rbase64`
+/// `basenc`. `python3 -m base64 -d` and `-u` print it too. `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
@@ -10270,7 +10270,7 @@ fn python_module_b64(args: &[String]) -> Option<PyModuleB64> {
     let mut file = None;
     while index < args.len() {
         let arg = args[index].as_str();
-        if arg == "-d" {
+        if arg == "-d" || arg == "-u" {
             decode = true;
             index += 1;
             continue;
@@ -15027,6 +15027,8 @@ mod tests {
             format!("eval \"$(basenc --base64 -d < {coded_s})\""),
             format!("eval \"$(python3 -m base64 -d {coded_s})\""),
             format!("eval \"$(python3 -m base64 -d < {coded_s})\""),
+            format!("eval \"$(python3 -m base64 -u {coded_s})\""),
+            format!("eval \"$(python3 -m base64 -u < {coded_s})\""),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
@@ -15447,6 +15449,7 @@ mod tests {
             ),
             format!("eval \"$(python3 -m base64 -d {echo_b64_s})\""),
             format!("eval \"$(python3 -m base64 -d < {echo_b64_s})\""),
+            format!("eval \"$(python3 -m base64 -u {echo_b64_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
