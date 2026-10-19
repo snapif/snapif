@@ -486,7 +486,8 @@ fn check_action(
 /// decoded text. `gbasenc` is that same
 /// `basenc`. `python3 -m base64 -d` and `-u` print it too.
 /// `gzip -dc`, `gunzip -c`, and `gzcat` print the decompressed text.
-/// `bzip2 -dc` and `bzcat` do too.
+/// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
+/// `zstd -dc` does too.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -6432,6 +6433,20 @@ fn bzip2_decode(bytes: &[u8]) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn xz_decode(bytes: &[u8]) -> Option<String> {
+    let mut input = std::io::Cursor::new(bytes);
+    let mut out = Vec::new();
+    lzma_rs::xz_decompress(&mut input, &mut out).ok()?;
+    String::from_utf8(out).ok()
+}
+
+fn zstd_decode(bytes: &[u8]) -> Option<String> {
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(bytes).ok()?;
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    String::from_utf8(out).ok()
+}
+
 fn gzip_query(name: &str, args: &[String]) -> Option<GzipQuery> {
     decompress_stdout_query(
         args,
@@ -6442,6 +6457,18 @@ fn gzip_query(name: &str, args: &[String]) -> Option<GzipQuery> {
 
 fn bzip2_query(name: &str, args: &[String]) -> Option<GzipQuery> {
     decompress_stdout_query(args, matches!(name, "bunzip2" | "bzcat"), name == "bzcat")
+}
+
+fn xz_query(name: &str, args: &[String]) -> Option<GzipQuery> {
+    decompress_stdout_query(args, matches!(name, "unxz" | "xzcat"), name == "xzcat")
+}
+
+fn zstd_query(name: &str, args: &[String]) -> Option<GzipQuery> {
+    decompress_stdout_query(
+        args,
+        matches!(name, "unzstd" | "zstdcat"),
+        name == "zstdcat",
+    )
 }
 
 fn decompress_stdout_query(
@@ -6547,6 +6574,32 @@ fn bzip2_run(
     )
 }
 
+fn xz_run(
+    name: &str,
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    decoded_bytes_run(xz_query(name, args), input, depth, substitutions, xz_decode)
+}
+
+fn zstd_run(
+    name: &str,
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    decoded_bytes_run(
+        zstd_query(name, args),
+        input,
+        depth,
+        substitutions,
+        zstd_decode,
+    )
+}
+
 fn decoded_bytes_run(
     query: Option<GzipQuery>,
     input: Option<&str>,
@@ -6626,6 +6679,8 @@ fn run_builtin(
         "base32" => base32_run(args, input, depth, substitutions),
         "gzip" | "gunzip" | "gzcat" | "zcat" => gzip_run(&name, args, input, depth, substitutions),
         "bzip2" | "bunzip2" | "bzcat" => bzip2_run(&name, args, input, depth, substitutions),
+        "xz" | "unxz" | "xzcat" => xz_run(&name, args, input, depth, substitutions),
+        "zstd" | "unzstd" | "zstdcat" => zstd_run(&name, args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
         "perl" | "ruby" => line_print_run(&words[0], args, input, depth, substitutions),
         "python" | "python3" => python_cat_run(args, input, depth, substitutions),
@@ -11462,6 +11517,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "bzip2" | "bunzip2" | "bzcat" => {
             bzip2_query(&name, args).is_some_and(|query| query.file.is_none())
         }
+        "xz" | "unxz" | "xzcat" => xz_query(&name, args).is_some_and(|query| query.file.is_none()),
+        "zstd" | "unzstd" | "zstdcat" => {
+            zstd_query(&name, args).is_some_and(|query| query.file.is_none())
+        }
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
         }
@@ -14942,6 +15001,18 @@ mod tests {
             encoder.write_all(text.as_bytes()).expect("bzip write");
             encoder.finish().expect("bzip finish")
         }
+        fn xz_bytes(text: &str) -> Vec<u8> {
+            let mut input = std::io::Cursor::new(text.as_bytes());
+            let mut out = Vec::new();
+            lzma_rs::xz_compress(&mut input, &mut out).expect("xz");
+            out
+        }
+        fn zstd_bytes(text: &str) -> Vec<u8> {
+            ruzstd::encoding::compress_to_vec(
+                text.as_bytes(),
+                ruzstd::encoding::CompressionLevel::Fastest,
+            )
+        }
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
         let dir = std::env::temp_dir();
         let pid = std::process::id();
@@ -15000,6 +15071,14 @@ mod tests {
         std::fs::write(&bz, bzip_bytes("git push origin main\n")).expect("bz");
         let bz_hello = dir.join(format!("snapif-c39-bz-hello-{pid}.bz2"));
         std::fs::write(&bz_hello, bzip_bytes("echo hello\n")).expect("bz hello");
+        let xz_file = dir.join(format!("snapif-c39-xz-{pid}.xz"));
+        std::fs::write(&xz_file, xz_bytes("git push origin main\n")).expect("xz");
+        let xz_hello = dir.join(format!("snapif-c39-xz-hello-{pid}.xz"));
+        std::fs::write(&xz_hello, xz_bytes("echo hello\n")).expect("xz hello");
+        let zst = dir.join(format!("snapif-c39-zst-{pid}.zst"));
+        std::fs::write(&zst, zstd_bytes("git push origin main\n")).expect("zst");
+        let zst_hello = dir.join(format!("snapif-c39-zst-hello-{pid}.zst"));
+        std::fs::write(&zst_hello, zstd_bytes("echo hello\n")).expect("zst hello");
         let b2m = dir.join(format!("snapif-c38-b2m-{pid}.txt"));
         std::fs::write(
             &b2m,
@@ -15051,6 +15130,10 @@ mod tests {
         let gz_hello_s = plain_script_path(&gz_hello);
         let bz_s = plain_script_path(&bz);
         let bz_hello_s = plain_script_path(&bz_hello);
+        let xz_s = plain_script_path(&xz_file);
+        let xz_hello_s = plain_script_path(&xz_hello);
+        let zst_s = plain_script_path(&zst);
+        let zst_hello_s = plain_script_path(&zst_hello);
         let b58_hello_s = plain_script_path(&b58_hello);
         let b2m_s = plain_script_path(&b2m);
         let b2l_s = plain_script_path(&b2l);
@@ -15264,6 +15347,14 @@ mod tests {
             format!("eval \"$(bzip2 -d -c {bz_s})\""),
             format!("eval \"$(bzcat {bz_s})\""),
             format!("eval \"$(bunzip2 -c {bz_s})\""),
+            format!("eval \"$(xz -dc {xz_s})\""),
+            format!("eval \"$(xz -d -c {xz_s})\""),
+            format!("eval \"$(xzcat {xz_s})\""),
+            format!("eval \"$(unxz -c {xz_s})\""),
+            format!("eval \"$(zstd -dc {zst_s})\""),
+            format!("eval \"$(zstd -d -c {zst_s})\""),
+            format!("eval \"$(zstdcat {zst_s})\""),
+            format!("eval \"$(unzstd -c {zst_s})\""),
             format!("eval \"$(python3 -m base64 -u < {coded_s})\""),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
@@ -15690,6 +15781,10 @@ mod tests {
             format!("eval \"$(zcat {gz_hello_s})\""),
             format!("eval \"$(bzip2 -dc {bz_hello_s})\""),
             format!("eval \"$(bzip2 -d {bz_s})\""),
+            format!("eval \"$(xz -dc {xz_hello_s})\""),
+            format!("eval \"$(xz -d {xz_s})\""),
+            format!("eval \"$(zstd -dc {zst_hello_s})\""),
+            format!("eval \"$(zstd -d {zst_s})\""),
             format!("eval \"$(gzip -d {gz_s})\""),
             format!("eval \"$(gzip -c {push_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
