@@ -505,6 +505,8 @@ fn check_action(
 /// `php` `bzread` of `bzopen` prints a bzip2 payload.
 /// `BZ2Decompressor` and `LZMADecompressor` print those payloads.
 /// `stream_get_contents` of `bzopen` prints a bzip2 payload.
+/// `bzread` of `bzopen` with length 4096 prints it.
+/// `compress.bzip2://` prints it.
 /// `gzip.open` in text mode, `gzfile`, and `compress.zlib://` print
 /// a gzip payload. `GzipReader` `readlines` prints it too.
 /// `bz2.open` and `lzma.open` in text mode print those payloads.
@@ -12131,7 +12133,9 @@ fn php_bz_query(args: &[String]) -> Option<String> {
     if files.len() != 1
         || (compact != "echobzdecompress(file_get_contents($argv[1]));"
             && compact != "echobzread(bzopen($argv[1],\"r\"));"
-            && compact != "echostream_get_contents(bzopen($argv[1],\"r\"));")
+            && compact != "echostream_get_contents(bzopen($argv[1],\"r\"));"
+            && compact != "echobzread(bzopen($argv[1],\"r\"),4096);"
+            && compact != "echofile_get_contents(\"compress.bzip2://\".$argv[1]);")
     {
         return None;
     }
@@ -17423,6 +17427,10 @@ mod tests {
                 r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())" {bz_s})""#
             ),
             format!(r#"eval "$(php -r 'echo bzread(bzopen($argv[1],"r"));' {bz_s})""#),
+            format!(r#"eval "$(php -r 'echo bzread(bzopen($argv[1],"r"), 4096);' {bz_s})""#),
+            format!(
+                r#"eval "$(php -r 'echo file_get_contents("compress.bzip2://".$argv[1]);' {bz_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c 'import bz2,sys; sys.stdout.buffer.write(bz2.BZ2Decompressor().decompress(open(sys.argv[1],"rb").read()))' {bz_s})""#
             ),
@@ -18137,6 +18145,10 @@ mod tests {
                 r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())" {bz_hello_s})""#
             ),
             format!(r#"eval "$(php -r 'echo bzread(bzopen($argv[1],"r"));' {bz_hello_s})""#),
+            format!(r#"eval "$(php -r 'echo bzread(bzopen($argv[1],"r"), 4096);' {bz_hello_s})""#),
+            format!(
+                r#"eval "$(php -r 'echo file_get_contents("compress.bzip2://".$argv[1]);' {bz_hello_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c 'import bz2,sys; sys.stdout.buffer.write(bz2.BZ2Decompressor().decompress(open(sys.argv[1],"rb").read()))' {bz_hello_s})""#
             ),
