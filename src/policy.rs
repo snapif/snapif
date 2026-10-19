@@ -371,7 +371,9 @@ fn check_action(
 /// `/bin/trap`, and `sudo trap` do not run it. Keyword `time trap`
 /// does. `command time trap` does not, because `command` runs the
 /// `time` program. A signal bash rejects (`SIGEXIT`, `64`) does not
-/// match unless another word is a real signal. `trap - EXIT`,
+/// match unless another word is a real signal. `KILL`, `STOP`, and
+/// `9` do not match: bash stores the handler and the kernel does not
+/// deliver those signals. `trap - EXIT`,
 /// `trap '' EXIT`, `trap EXIT`, and `trap -p` do not. `exec -a rm echo` and
 /// `eval echo` do not. `if`, `then`, `else`, `elif`, `do`, `while`,
 /// `until`, `!`, `{`, and `(` are skipped, so `if true; then rm`,
@@ -4010,12 +4012,12 @@ fn sig_suffix(word: &str) -> Option<&str> {
 }
 
 /// Names from `trap -l` on bash 5.3, without the `SIG` prefix. `KILL`
-/// and `STOP` still install a handler. `PWR` and `RTMIN` are not in
-/// this list.
+/// and `STOP` are omitted: bash stores a handler, and the kernel does
+/// not deliver it. `PWR` and `RTMIN` are not in this list.
 const TRAP_SIGNAL_NAMES: &[&str] = &[
-    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "EMT", "FPE", "KILL", "BUS", "SEGV", "SYS",
-    "PIPE", "ALRM", "TERM", "URG", "STOP", "TSTP", "CONT", "CHLD", "TTIN", "TTOU", "IO", "XCPU",
-    "XFSZ", "VTALRM", "PROF", "WINCH", "INFO", "USR1", "USR2",
+    "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "EMT", "FPE", "BUS", "SEGV", "SYS", "PIPE",
+    "ALRM", "TERM", "URG", "TSTP", "CONT", "CHLD", "TTIN", "TTOU", "IO", "XCPU", "XFSZ", "VTALRM",
+    "PROF", "WINCH", "INFO", "USR1", "USR2",
 ];
 
 fn is_trap_spec(word: &str) -> bool {
@@ -4033,14 +4035,31 @@ fn is_trap_spec(word: &str) -> bool {
         || is_trap_number(word)
 }
 
-/// `0` through `31`, the numbers this bash accepts. A leading `+` is
-/// still a number (`+15` is `SIGTERM`). `+32` and `64` are not.
+/// `0` through `31`, the numbers this bash accepts, except signals the
+/// kernel does not deliver. A leading `+` is still a number (`+15` is
+/// `SIGTERM`). `+32` and `64` are not. `9` is `SIGKILL`. `SIGSTOP` is
+/// `17` on macOS and `19` on Linux.
 fn is_trap_number(word: &str) -> bool {
     let digits = word.strip_prefix('+').unwrap_or(word);
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return false;
     }
-    digits.parse::<u32>().is_ok_and(|number| number <= 31)
+    digits
+        .parse::<u32>()
+        .is_ok_and(|number| number <= 31 && !uncatchable_signal(number))
+}
+
+fn uncatchable_signal(number: u32) -> bool {
+    if number == 9 {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        number == 17
+    } else if cfg!(target_os = "linux") {
+        number == 19
+    } else {
+        false
+    }
 }
 
 fn case_arm_scripts(tokens: &[String]) -> Vec<String> {
@@ -16392,6 +16411,7 @@ mod tests {
             ("time -p trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
             ("git push origin main; trap 'rm -rf /tmp/x' EXIT", "bash.rm"),
             ("trap 'git push origin main' EXIT", "git.push"),
+            ("trap 'rm -rf /tmp/x' KILL EXIT", "bash.rm"),
         ];
         for (command, expected) in matched {
             assert_eq!(
@@ -16433,6 +16453,12 @@ mod tests {
             "trap 'rm -rf /tmp/x' +32",
             "trap 'rm -rf /tmp/x' --",
             "trap 'rm -rf /tmp/x' PWR",
+            "trap 'rm -rf /tmp/x' KILL",
+            "trap 'rm -rf /tmp/x' STOP",
+            "trap 'rm -rf /tmp/x' SIGKILL",
+            "trap 'rm -rf /tmp/x' SIGSTOP",
+            "trap 'rm -rf /tmp/x' 9",
+            "trap 'rm -rf /tmp/x' +9",
         ];
         for command in quiet {
             assert!(
@@ -16440,6 +16466,18 @@ mod tests {
                 "{command:?}"
             );
         }
+        let stop_number = if cfg!(target_os = "macos") {
+            "17"
+        } else if cfg!(target_os = "linux") {
+            "19"
+        } else {
+            return;
+        };
+        let stop = format!("trap 'rm -rf /tmp/x' {stop_number}");
+        assert!(
+            matched_action(&policy, "Bash", Some(&stop)).is_none(),
+            "{stop:?}"
+        );
     }
 
     /// `bash +e -c` and `bash +o errexit -c` still run the script.
