@@ -486,6 +486,8 @@ fn check_action(
 /// decoded text. `gbasenc` is that same
 /// `basenc`. `python3 -m base64 -d` and `-u` print it too.
 /// `gzip -dc`, `gunzip -c`, and `gzcat` print the decompressed text.
+/// `python3` `gzip.open`, `bz2.open`, and `lzma.open` print that text.
+/// `ruby -rzlib` and Node `zlib.gunzipSync` print it too.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -6568,6 +6570,10 @@ fn lzma_decode(bytes: &[u8]) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn xz_or_lzma_decode(bytes: &[u8]) -> Option<String> {
+    xz_decode(bytes).or_else(|| lzma_decode(bytes))
+}
+
 fn zstd_frame(bytes: &[u8]) -> &[u8] {
     let mut rest = bytes;
     while rest.len() >= 8 {
@@ -11043,6 +11049,15 @@ fn line_print_run(
             tar_text(bytes, query.member.as_deref(), TarCompress::Auto)
         });
     }
+    if let Some(path) = ruby_gzip_query(name, args) {
+        return decoded_bytes_run(
+            Some(GzipQuery { file: Some(path) }),
+            input,
+            depth,
+            substitutions,
+            gzip_decode,
+        );
+    }
     let Some(file) = line_print_query(name, args) else {
         return Run::Unknown;
     };
@@ -11334,12 +11349,153 @@ fn python_module_b64(args: &[String]) -> Option<PyModuleB64> {
     Some(PyModuleB64 { file })
 }
 
+enum PyCodec {
+    Gzip,
+    Bzip2,
+    Lzma,
+}
+
+fn python_codec_query(args: &[String]) -> Option<(PyCodec, String)> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-c" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "-u" | "-E" | "-B" | "-s" | "-I") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    let compact = compact_ws(&script);
+    let codec = match compact.as_str() {
+        "importsys,gzip;sys.stdout.buffer.write(gzip.open(sys.argv[1],\"rb\").read())" => {
+            PyCodec::Gzip
+        }
+        "importsys,bz2;sys.stdout.buffer.write(bz2.open(sys.argv[1],\"rb\").read())" => {
+            PyCodec::Bzip2
+        }
+        "importsys,lzma;sys.stdout.buffer.write(lzma.open(sys.argv[1],\"rb\").read())" => {
+            PyCodec::Lzma
+        }
+        _ => return None,
+    };
+    if files.len() != 1 {
+        return None;
+    }
+    Some((codec, files.remove(0)))
+}
+
+fn ruby_gzip_query(name: &str, args: &[String]) -> Option<String> {
+    if command_basename(name) != "ruby" {
+        return None;
+    }
+    let mut index = 0usize;
+    let mut script = None;
+    let mut zlib = false;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-e" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg == "-rzlib" {
+            zlib = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-r" && args.get(index + 1).map(String::as_str) == Some("zlib") {
+            zlib = true;
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    if !zlib || files.len() != 1 {
+        return None;
+    }
+    if compact_ws(&script) != "printZlib::GzipReader.open(ARGV[0]).read" {
+        return None;
+    }
+    Some(files.remove(0))
+}
+
+fn node_gzip_query(args: &[String]) -> Option<String> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-e" || arg == "--eval" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    if files.len() != 1
+        || compact_ws(&script)
+            != "constfs=require(\"fs\");constz=require(\"zlib\");process.stdout.write(z.gunzipSync(fs.readFileSync(process.argv[1])))"
+    {
+        return None;
+    }
+    Some(files.remove(0))
+}
+
 fn python_cat_run(
     args: &[String],
     input: Option<&str>,
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
+    if let Some((codec, path)) = python_codec_query(args) {
+        let decode = match codec {
+            PyCodec::Gzip => gzip_decode,
+            PyCodec::Bzip2 => bzip2_decode,
+            PyCodec::Lzma => xz_or_lzma_decode,
+        };
+        return decoded_bytes_run(
+            Some(GzipQuery { file: Some(path) }),
+            input,
+            depth,
+            substitutions,
+            decode,
+        );
+    }
     if let Some(query) = python_module_b64(args) {
         return decode_produced(source_text(
             query.file.as_deref(),
@@ -11516,6 +11672,15 @@ fn node_cat_run(
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
+    if let Some(path) = node_gzip_query(args) {
+        return decoded_bytes_run(
+            Some(GzipQuery { file: Some(path) }),
+            input,
+            depth,
+            substitutions,
+            gzip_decode,
+        );
+    }
     let Some(file) = node_cat_query(args) else {
         return Run::Unknown;
     };
@@ -12357,7 +12522,9 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
         "dd" => dd_query(args).is_none_or(|query| query.is_none()),
         "perl" | "ruby" => {
-            if perl_tar_query(&words[0], args).is_some() {
+            if perl_tar_query(&words[0], args).is_some()
+                || ruby_gzip_query(&words[0], args).is_some()
+            {
                 false
             } else {
                 line_print_query(&words[0], args).is_none_or(|query| query.is_none())
@@ -12366,14 +12533,20 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "python" | "python3" => match python_module_b64(args) {
             Some(query) => query.file.is_none(),
             None => {
-                if python_archive_query(args).is_some() {
+                if python_archive_query(args).is_some() || python_codec_query(args).is_some() {
                     false
                 } else {
                     python_cat_query(args).is_none_or(|query| query.is_none())
                 }
             }
         },
-        "node" => node_cat_query(args).is_none_or(|query| query.is_none()),
+        "node" => {
+            if node_gzip_query(args).is_some() {
+                false
+            } else {
+                node_cat_query(args).is_none_or(|query| query.is_none())
+            }
+        }
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
         "join" => join_query(args).is_none_or(|files| files.iter().any(|file| file == "-")),
@@ -16548,6 +16721,21 @@ mod tests {
             format!("eval \"$(python3 -m base64 -d < {coded_s})\""),
             format!("eval \"$(python3 -m base64 -u {coded_s})\""),
             format!("eval \"$(gzip -dc {gz_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys,gzip; sys.stdout.buffer.write(gzip.open(sys.argv[1],\"rb\").read())' {gz_s})\""
+            ),
+            format!(
+                "eval \"$(python3 -c 'import sys,bz2; sys.stdout.buffer.write(bz2.open(sys.argv[1],\"rb\").read())' {bz_s})\""
+            ),
+            format!(
+                "eval \"$(python3 -c 'import sys,lzma; sys.stdout.buffer.write(lzma.open(sys.argv[1],\"rb\").read())' {xz_s})\""
+            ),
+            format!(
+                "eval \"$(ruby -rzlib -e 'print Zlib::GzipReader.open(ARGV[0]).read' {gz_s})\""
+            ),
+            format!(
+                "eval \"$(node -e 'const fs=require(\"fs\"); const z=require(\"zlib\"); process.stdout.write(z.gunzipSync(fs.readFileSync(process.argv[1])))' {gz_s})\""
+            ),
             format!("eval \"$(gzip -d -c {gz_s})\""),
             format!("eval \"$(gzip -cd {gz_s})\""),
             format!("eval \"$(gunzip -c {gz_s})\""),
@@ -17043,6 +17231,21 @@ mod tests {
             format!("eval \"$(python3 -m base64 -d < {echo_b64_s})\""),
             format!("eval \"$(python3 -m base64 -u {echo_b64_s})\""),
             format!("eval \"$(gzip -dc {gz_hello_s})\""),
+            format!(
+                "eval \"$(python3 -c 'import sys,gzip; sys.stdout.buffer.write(gzip.open(sys.argv[1],\"rb\").read())' {gz_hello_s})\""
+            ),
+            format!(
+                "eval \"$(python3 -c 'import sys,bz2; sys.stdout.buffer.write(bz2.open(sys.argv[1],\"rb\").read())' {bz_hello_s})\""
+            ),
+            format!(
+                "eval \"$(python3 -c 'import sys,lzma; sys.stdout.buffer.write(lzma.open(sys.argv[1],\"rb\").read())' {xz_hello_s})\""
+            ),
+            format!(
+                "eval \"$(ruby -rzlib -e 'print Zlib::GzipReader.open(ARGV[0]).read' {gz_hello_s})\""
+            ),
+            format!(
+                "eval \"$(node -e 'const fs=require(\"fs\"); const z=require(\"zlib\"); process.stdout.write(z.gunzipSync(fs.readFileSync(process.argv[1])))' {gz_hello_s})\""
+            ),
             format!("eval \"$(zcat {gz_hello_s})\""),
             format!("eval \"$(bzip2 -dc {bz_hello_s})\""),
             format!("eval \"$(bzip2 -d {bz_s})\""),
