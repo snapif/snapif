@@ -509,7 +509,9 @@ fn check_action(
 /// a gzip payload. `GzipReader` `readlines` prints it too.
 /// `bz2.open` and `lzma.open` in text mode print those payloads.
 /// `gzread` of `gzopen` and `stream_get_contents` of `gzopen` print
-/// a gzip payload.
+/// a gzip payload. `gzgets` of `gzopen` prints it too. `gzip.open`
+/// with `encoding` prints it. A `GzipReader` block prints it.
+/// `perl` `AnyInflate` prints gzip, zlib, or raw deflate.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -6593,6 +6595,12 @@ fn gzip_or_zlib_decode(bytes: &[u8]) -> Option<String> {
     gzip_flate_decode(bytes).or_else(|| zlib_decode(bytes))
 }
 
+fn any_inflate_decode(bytes: &[u8]) -> Option<String> {
+    gzip_flate_decode(bytes)
+        .or_else(|| zlib_decode(bytes))
+        .or_else(|| deflate_decode(bytes))
+}
+
 fn bzip2_decode(bytes: &[u8]) -> Option<String> {
     let mut decoder = bzip2::read::BzDecoder::new(bytes);
     let mut out = Vec::new();
@@ -11192,6 +11200,43 @@ fn perl_raw_query(name: &str, args: &[String]) -> Option<String> {
     Some(files.remove(0))
 }
 
+fn perl_any_query(name: &str, args: &[String]) -> Option<String> {
+    if command_basename(name) != "perl" {
+        return None;
+    }
+    let mut index = 0usize;
+    let mut script = None;
+    let mut module = false;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-e" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg == "-MIO::Uncompress::AnyInflate=anyinflate" {
+            module = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    if !module || files.len() != 1 || compact_ws(&script) != "anyinflate$ARGV[0]=>\\*STDOUT" {
+        return None;
+    }
+    Some(files.remove(0))
+}
+
 fn line_print_run(
     name: &str,
     args: &[String],
@@ -11242,6 +11287,15 @@ fn line_print_run(
             depth,
             substitutions,
             deflate_decode,
+        );
+    }
+    if let Some(path) = perl_any_query(name, args) {
+        return decoded_bytes_run(
+            Some(GzipQuery { file: Some(path) }),
+            input,
+            depth,
+            substitutions,
+            any_inflate_decode,
         );
     }
     let Some(file) = line_print_query(name, args) else {
@@ -11578,7 +11632,11 @@ fn python_codec_query(args: &[String]) -> Option<(PyCodec, String)> {
         | "importsys,gzip;sys.stdout.buffer.write(gzip.GzipFile(sys.argv[1],\"rb\").read())"
         | "importsys,gzip;sys.stdout.buffer.write(gzip.GzipFile(sys.argv[1],'rb').read())"
         | "importsys,gzip;sys.stdout.write(gzip.open(sys.argv[1],\"rt\").read())"
-        | "importsys,gzip;sys.stdout.write(gzip.open(sys.argv[1],'rt').read())" => PyCodec::Gzip,
+        | "importsys,gzip;sys.stdout.write(gzip.open(sys.argv[1],'rt').read())"
+        | "importsys,gzip;sys.stdout.write(gzip.open(sys.argv[1],\"rt\",encoding=\"utf-8\").read())"
+        | "importsys,gzip;sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" => {
+            PyCodec::Gzip
+        }
         "importsys,bz2;sys.stdout.buffer.write(bz2.open(sys.argv[1],\"rb\").read())"
         | "importsys,bz2;sys.stdout.buffer.write(bz2.open(sys.argv[1],'rb').read())"
         | "importbz2,sys;sys.stdout.buffer.write(bz2.decompress(open(sys.argv[1],\"rb\").read()))"
@@ -11660,6 +11718,7 @@ fn ruby_gzip_query(name: &str, args: &[String]) -> Option<(RubyInflate, String)>
     let kind = match compact_ws(&script).as_str() {
         "printZlib::GzipReader.open(ARGV[0]).read"
         | "printZlib::GzipReader.open(ARGV[0]).readlines.join"
+        | "Zlib::GzipReader.open(ARGV[0]){|f|printf.read}"
         | "printZlib.gunzip(File.binread(ARGV[0]))" => RubyInflate::Gzip,
         "printZlib::Inflate.new.inflate(File.binread(ARGV[0]))"
         | "printZlib.inflate(File.binread(ARGV[0]))" => RubyInflate::Zlib,
@@ -12032,7 +12091,8 @@ fn php_gzip_query(args: &[String]) -> Option<String> {
             && compact != "echoimplode(\"\",gzfile($argv[1]));"
             && compact != "echofile_get_contents(\"compress.zlib://\".$argv[1]);"
             && compact != "echostream_get_contents(gzopen($argv[1],\"r\"));"
-            && compact != "echogzread(gzopen($argv[1],\"r\"),4096);")
+            && compact != "echogzread(gzopen($argv[1],\"r\"),4096);"
+            && compact != "echogzgets(gzopen($argv[1],\"r\"));")
     {
         return None;
     }
@@ -12949,6 +13009,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
                 || perl_gzip_query(&words[0], args).is_some()
                 || perl_bzip_query(&words[0], args).is_some()
                 || perl_raw_query(&words[0], args).is_some()
+                || perl_any_query(&words[0], args).is_some()
                 || ruby_gzip_query(&words[0], args).is_some()
             {
                 false
@@ -17292,6 +17353,25 @@ mod tests {
             ),
             format!(r#"eval "$(php -r 'echo stream_get_contents(gzopen($argv[1],"r"));' {gz_s})""#),
             format!(r#"eval "$(php -r 'echo gzread(gzopen($argv[1],"r"), 4096);' {gz_s})""#),
+            format!(r#"eval "$(php -r 'echo gzgets(gzopen($argv[1],"r"));' {gz_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" {gz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],"rt",encoding="utf-8").read())' {gz_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'Zlib::GzipReader.open(ARGV[0]) {{ |f| print f.read }}' {gz_s})""#
+            ),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::AnyInflate=anyinflate -e 'anyinflate $ARGV[0] => \*STDOUT' {gz_s})""#
+            ),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::AnyInflate=anyinflate -e 'anyinflate $ARGV[0] => \*STDOUT' {zl_s})""#
+            ),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::AnyInflate=anyinflate -e 'anyinflate $ARGV[0] => \*STDOUT' {df_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c 'import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],"rt").read())' {gz_s})""#
             ),
@@ -17982,6 +18062,19 @@ mod tests {
                 r#"eval "$(php -r 'echo stream_get_contents(gzopen($argv[1],"r"));' {gz_hello_s})""#
             ),
             format!(r#"eval "$(php -r 'echo gzread(gzopen($argv[1],"r"), 4096);' {gz_hello_s})""#),
+            format!(r#"eval "$(php -r 'echo gzgets(gzopen($argv[1],"r"));' {gz_hello_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" {gz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],"rt",encoding="utf-8").read())' {gz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'Zlib::GzipReader.open(ARGV[0]) {{ |f| print f.read }}' {gz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::AnyInflate=anyinflate -e 'anyinflate $ARGV[0] => \*STDOUT' {gz_hello_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c 'import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],"rt").read())' {gz_hello_s})""#
             ),
