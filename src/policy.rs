@@ -11430,6 +11430,9 @@ fn python_archive_query(args: &[String]) -> Option<PyArchiveQuery> {
         "importsysimportzipfilewithzipfile.ZipFile(sys.argv[1])asarchive:sys.stdout.buffer.write(archive.read(sys.argv[2]))" => {
             (PyArchive::Zip, 0, 1)
         }
+        "importsys,zipfile;sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))" => {
+            (PyArchive::Zip, 0, 1)
+        }
         _ => return None,
     };
     if files.len() != member_at + 1 {
@@ -16600,6 +16603,9 @@ mod tests {
             format!("eval \"$(python3 {pytar_s} r {tar_s} git.txt)\""),
             format!("eval \"$(python3 {pyzip_s} {zip_s} git.txt)\""),
             format!(
+                "eval \"$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' {zip_s} git.txt)\""
+            ),
+            format!(
                 "eval \"$(perl -MArchive::Tar -e 'print Archive::Tar->new($ARGV[0])->get_content($ARGV[1])' {tar_s} git.txt)\""
             ),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
@@ -17058,6 +17064,9 @@ mod tests {
                 "eval \"$(python3 -c 'import sys,tarfile; sys.stdout.buffer.write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())' {tar_hello_s} echo.txt)\""
             ),
             format!("eval \"$(python3 {pyzip_s} {zip_hello_s} echo.txt)\""),
+            format!(
+                "eval \"$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' {zip_hello_s} echo.txt)\""
+            ),
             format!(
                 "eval \"$(perl -MArchive::Tar -e 'print Archive::Tar->new($ARGV[0])->get_content($ARGV[1])' {tar_hello_s} echo.txt)\""
             ),
