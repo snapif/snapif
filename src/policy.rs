@@ -456,7 +456,8 @@ fn check_action(
 /// and `split --filter=cat` print the file. `gsplit -n 1/1` prints it
 /// too. `gsplit --filter` runs that command. `while read -r`
 /// then `printf` of that name prints the file. `mapfile -t` then
-/// `printf` of the first element prints that line. Without `-n`,
+/// `printf` of the first element prints that line. `read -r line < path`
+/// then `printf` of that name prints that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -5712,6 +5713,9 @@ fn read_back_print(body: &str, depth: u32, substitutions: &mut Vec<String>) -> O
     if let Some(path) = mapfile_first_path(&words) {
         return Some(loaded_print(path, depth, substitutions, true));
     }
+    if let Some(path) = scalar_read_path(&words) {
+        return Some(loaded_print(path, depth, substitutions, true));
+    }
     None
 }
 
@@ -5793,6 +5797,36 @@ fn shell_name(token: &str) -> bool {
         _ => return false,
     }
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn scalar_read_path(words: &[String]) -> Option<&str> {
+    if words.first().map(String::as_str) != Some("read") {
+        return None;
+    }
+    let mut index = 1usize;
+    if words.get(index).map(String::as_str) == Some("-r") {
+        index += 1;
+    }
+    let name = words.get(index)?;
+    if !shell_name(name) {
+        return None;
+    }
+    index += 1;
+    let (path, next) = split_redirect(words, index)?;
+    if words.get(next).map(String::as_str) != Some("printf") {
+        return None;
+    }
+    if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
+        return None;
+    }
+    let expect = format!("${name}");
+    if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
+        return None;
+    }
+    if words.len() != next + 3 {
+        return None;
+    }
+    Some(path)
 }
 
 fn while_read_path(words: &[String]) -> Option<&str> {
@@ -14013,6 +14047,8 @@ mod tests {
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {push_s})""#),
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {multi_s})""#),
             format!(r#"eval "$(mapfile -t x < {push_s}; printf '%s\n' "${{x[0]}}")""#),
+            format!(r#"eval "$(read -r line < {push_s}; printf '%s\n' "$line")""#),
+            format!(r#"eval "$(read line < {push_s}; printf '%s\n' "$line")""#),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
             format!("eval \"$(printf '%s\\n' {push_s} | xargs cat)\""),
             format!("eval \"$(gxargs cat {push_s})\""),
@@ -14280,6 +14316,7 @@ mod tests {
             format!(r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {echo_s})""#),
             format!(r#"eval "$(mapfile -t x < {echo_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(mapfile -t x < {multi_s}; printf '%s\n' "${{x[0]}}")""#),
+            format!(r#"eval "$(read -r line < {echo_s}; printf '%s\n' "$line")""#),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
