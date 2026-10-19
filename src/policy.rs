@@ -506,7 +506,8 @@ fn check_action(
 /// `BZ2Decompressor` and `LZMADecompressor` print those payloads.
 /// `stream_get_contents` of `bzopen` prints a bzip2 payload.
 /// `bzread` of `bzopen` with length 4096 prints it.
-/// `compress.bzip2://` prints it.
+/// `compress.bzip2://` prints it. `zip://` of a named member prints
+/// that member.
 /// `gzip.open` in text mode, `gzfile`, and `compress.zlib://` print
 /// a gzip payload. `GzipReader` `readlines` prints it too.
 /// `bz2.open` and `lzma.open` in text mode print those payloads.
@@ -12198,6 +12199,38 @@ fn php_unc_query(args: &[String]) -> Option<String> {
     Some(files.remove(0))
 }
 
+fn php_zip_query(args: &[String]) -> Option<(String, String)> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-r" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    let compact = compact_ws(&script);
+    if compact == "echofile_get_contents(\"zip://\".$argv[1].\"#\".$argv[2]);" && files.len() == 2 {
+        return Some((files.remove(0), files.remove(0)));
+    }
+    if compact == "echofile_get_contents(\"zip://\".$argv[1].\"#git.txt\");" && files.len() == 1 {
+        return Some((files.remove(0), "git.txt".to_string()));
+    }
+    None
+}
+
 fn php_cat_run(
     args: &[String],
     input: Option<&str>,
@@ -12239,6 +12272,9 @@ fn php_cat_run(
             substitutions,
             zlib_decode,
         );
+    }
+    if let Some((archive, member)) = php_zip_query(args) {
+        return produced_archive(&archive, |bytes| unzip_text(bytes, Some(&member)));
     }
     let Some(file) = php_cat_query(args) else {
         return Run::Unknown;
@@ -13049,6 +13085,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
                 || php_bz_query(args).is_some()
                 || php_raw_query(args).is_some()
                 || php_unc_query(args).is_some()
+                || php_zip_query(args).is_some()
             {
                 false
             } else {
@@ -17533,6 +17570,12 @@ mod tests {
                 "eval \"$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' {zip_s} git.txt)\""
             ),
             format!(
+                r##"eval "$(php -r 'echo file_get_contents("zip://".$argv[1]."#".$argv[2]);' {zip_s} git.txt)""##
+            ),
+            format!(
+                r##"eval "$(php -r 'echo file_get_contents("zip://".$argv[1]."#git.txt");' {zip_s})""##
+            ),
+            format!(
                 "eval \"$(perl -MArchive::Tar -e 'print Archive::Tar->new($ARGV[0])->get_content($ARGV[1])' {tar_s} git.txt)\""
             ),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
@@ -18242,6 +18285,12 @@ mod tests {
             format!("eval \"$(python3 {pyzip_s} {zip_hello_s} echo.txt)\""),
             format!(
                 "eval \"$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' {zip_hello_s} echo.txt)\""
+            ),
+            format!(
+                r##"eval "$(php -r 'echo file_get_contents("zip://".$argv[1]."#".$argv[2]);' {zip_hello_s} echo.txt)""##
+            ),
+            format!(
+                r##"eval "$(php -r 'echo file_get_contents("zip://".$argv[1]."#git.txt");' {zip_hello_s})""##
             ),
             format!(
                 "eval \"$(perl -MArchive::Tar -e 'print Archive::Tar->new($ARGV[0])->get_content($ARGV[1])' {tar_hello_s} echo.txt)\""
