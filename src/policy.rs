@@ -475,7 +475,8 @@ fn check_action(
 /// echoes `base64_decode` of `file_get_contents` prints it. Node
 /// `Buffer.from` of that file with `"base64"` prints it. `perl
 /// -MMIME::Base64` that prints `decode_base64` prints it too.
-/// `basenc --base64 -d` prints that text. `uudecode -p` prints the
+/// `basenc --base64 -d` prints that text. `xxd -r -p` prints the
+/// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
 /// `basenc`. `python3 -m base64 -d` prints it too. `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
@@ -6422,6 +6423,7 @@ fn run_builtin(
         "base64" => base64_run(args, input, depth, substitutions),
         "basenc" => basenc_run(args, input, depth, substitutions),
         "uudecode" => uudecode_run(args, input, depth, substitutions),
+        "xxd" => xxd_run(args, input, depth, substitutions),
         "openssl" => openssl_b64_run(args, input, depth, substitutions),
         "base32" => base32_run(args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
@@ -10576,6 +10578,87 @@ fn uudecode_query(args: &[String]) -> Option<Option<String>> {
     Some(file)
 }
 
+fn xxd_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = xxd_query(args) else {
+        return Run::Unknown;
+    };
+    let raw = match source_text(file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        Run::Produced { text, ok: true } => text,
+        other => return other,
+    };
+    let Some(text) = hex_decode(&raw) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn xxd_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut reverse = false;
+    let mut plain = false;
+    let mut file = None;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-r" || arg == "--reverse" {
+            reverse = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "-p" | "-ps" | "--postscript") {
+            plain = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        if file.is_some() {
+            return None;
+        }
+        file = Some(args[index].clone());
+        index += 1;
+    }
+    if !reverse || !plain {
+        return None;
+    }
+    Some(file)
+}
+
+fn hex_decode(text: &str) -> Option<String> {
+    let mut nibbles = Vec::new();
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        let value = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => return None,
+        };
+        nibbles.push(value);
+    }
+    if !nibbles.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for pair in nibbles.chunks_exact(2) {
+        out.push((pair[0] << 4) | pair[1]);
+    }
+    String::from_utf8(out).ok()
+}
+
 fn uu_value(byte: u8) -> u8 {
     byte.wrapping_sub(32) & 0x3f
 }
@@ -10875,6 +10958,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
         "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
         "uudecode" => uudecode_query(args).is_some_and(|file| file.is_none()),
+        "xxd" => xxd_query(args).is_some_and(|file| file.is_none()),
         "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
@@ -14372,6 +14456,10 @@ mod tests {
             "begin 644 hello.txt\n+96-H;R!H96QL;PH`\n`\nend\n",
         )
         .expect("uu hello");
+        let hex_push = dir.join(format!("snapif-c38-hex-{pid}.txt"));
+        std::fs::write(&hex_push, "6769742070757368206f726967696e206d61696e0a\n").expect("hex");
+        let hex_hello = dir.join(format!("snapif-c38-hex-hello-{pid}.txt"));
+        std::fs::write(&hex_hello, "6563686f2068656c6c6f0a\n").expect("hex hello");
         let b32 = dir.join(format!("snapif-c31-b32-{pid}.txt"));
         std::fs::write(&b32, "M5UXIIDQOVZWQIDPOJUWO2LOEBWWC2LOBI======\n").expect("b32");
         let dup = dir.join(format!("snapif-c30-dup-{pid}.txt"));
@@ -14388,6 +14476,8 @@ mod tests {
         let echo_b64_s = plain_script_path(&echo_b64);
         let uu_push_s = plain_script_path(&uu_push);
         let uu_hello_s = plain_script_path(&uu_hello);
+        let hex_push_s = plain_script_path(&hex_push);
+        let hex_hello_s = plain_script_path(&hex_hello);
         let b32_s = plain_script_path(&b32);
         let dup_s = plain_script_path(&dup);
         let big_s = plain_script_path(&big);
@@ -14545,6 +14635,10 @@ mod tests {
             format!("eval \"$(basenc --base64 -d {coded_s})\""),
             format!("eval \"$(gbasenc --base64 -d {coded_s})\""),
             format!("eval \"$(uudecode -p {uu_push_s})\""),
+            format!("eval \"$(xxd -r -p {hex_push_s})\""),
+            format!("eval \"$(xxd -p -r {hex_push_s})\""),
+            format!("eval \"$(xxd -r -ps {hex_push_s})\""),
+            format!("eval \"$(xxd -r -p < {hex_push_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {coded_s})\""
             ),
@@ -14944,6 +15038,8 @@ mod tests {
             format!("eval \"$(basenc --base64 -d {echo_b64_s})\""),
             format!("eval \"$(gbasenc --base64 -d {echo_b64_s})\""),
             format!("eval \"$(uudecode -p {uu_hello_s})\""),
+            format!("eval \"$(xxd -r -p {hex_hello_s})\""),
+            format!("eval \"$(xxd -r -p < {hex_hello_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {echo_b64_s})\""
             ),
