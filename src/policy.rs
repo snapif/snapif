@@ -475,7 +475,8 @@ fn check_action(
 /// echoes `base64_decode` of `file_get_contents` prints it. Node
 /// `Buffer.from` of that file with `"base64"` prints it. `perl
 /// -MMIME::Base64` that prints `decode_base64` prints it too.
-/// `basenc --base64 -d` prints that text. `xxd -r -p` prints the
+/// `basenc --base64 -d` prints that text. `basenc --base16 -d` prints
+/// the decoded hex. `xxd -r -p` prints the
 /// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
 /// `basenc`. `python3 -m base64 -d` prints it too. `ruby -rbase64`
@@ -10436,6 +10437,16 @@ fn php_b64_script(args: &[String]) -> bool {
     false
 }
 
+enum BasencKind {
+    Base64,
+    Base16,
+}
+
+struct BasencQuery {
+    file: Option<String>,
+    kind: BasencKind,
+}
+
 fn basenc_run(
     args: &[String],
     input: Option<&str>,
@@ -10455,16 +10466,20 @@ fn basenc_run(
         Run::Produced { text, ok: true } => text,
         other => return other,
     };
-    let Some(text) = b64_decode(&raw) else {
+    let text = match query.kind {
+        BasencKind::Base64 => b64_decode(&raw),
+        BasencKind::Base16 => hex_decode(&raw),
+    };
+    let Some(text) = text else {
         return Run::Unknown;
     };
     Run::Produced { text, ok: true }
 }
 
-fn basenc_query(args: &[String]) -> Option<Base64Query> {
+fn basenc_query(args: &[String]) -> Option<BasencQuery> {
     let mut index = 0usize;
     let mut decode = false;
-    let mut base64 = false;
+    let mut kind = None;
     let mut file = None;
     while index < args.len() {
         let arg = &args[index];
@@ -10477,8 +10492,15 @@ fn basenc_query(args: &[String]) -> Option<Base64Query> {
             index += 1;
             continue;
         }
-        if arg == "--base64" {
-            base64 = true;
+        if arg == "--base64" || arg == "--base16" {
+            if kind.is_some() {
+                return None;
+            }
+            kind = Some(if arg == "--base64" {
+                BasencKind::Base64
+            } else {
+                BasencKind::Base16
+            });
             index += 1;
             continue;
         }
@@ -10491,7 +10513,8 @@ fn basenc_query(args: &[String]) -> Option<Base64Query> {
         file = Some(arg.clone());
         index += 1;
     }
-    if !decode || !base64 || args.len() - index > 1 {
+    let kind = kind?;
+    if !decode || args.len() - index > 1 {
         return None;
     }
     if file.is_none() {
@@ -10499,7 +10522,7 @@ fn basenc_query(args: &[String]) -> Option<Base64Query> {
     } else if index < args.len() {
         return None;
     }
-    Some(Base64Query { file })
+    Some(BasencQuery { file, kind })
 }
 
 fn base64_run(
@@ -14639,6 +14662,11 @@ mod tests {
             format!("eval \"$(xxd -p -r {hex_push_s})\""),
             format!("eval \"$(xxd -r -ps {hex_push_s})\""),
             format!("eval \"$(xxd -r -p < {hex_push_s})\""),
+            format!("eval \"$(basenc --base16 -d {hex_push_s})\""),
+            format!("eval \"$(basenc -d --base16 {hex_push_s})\""),
+            format!("eval \"$(basenc --base16 --decode {hex_push_s})\""),
+            format!("eval \"$(basenc --base16 -d < {hex_push_s})\""),
+            format!("eval \"$(gbasenc --base16 -d {hex_push_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {coded_s})\""
             ),
@@ -15040,6 +15068,8 @@ mod tests {
             format!("eval \"$(uudecode -p {uu_hello_s})\""),
             format!("eval \"$(xxd -r -p {hex_hello_s})\""),
             format!("eval \"$(xxd -r -p < {hex_hello_s})\""),
+            format!("eval \"$(basenc --base16 -d {hex_hello_s})\""),
+            format!("eval \"$(gbasenc --base16 -d {hex_hello_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {echo_b64_s})\""
             ),
