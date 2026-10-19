@@ -577,6 +577,15 @@ fn check_action(
 /// of `file`, `stream_get_contents` of `fopen`, and `fread` of
 /// `fopen` with length 4096 print it. `fgets` of `fopen` prints the
 /// first line.
+/// `print while <>;` prints the file. `from pathlib import Path`
+/// before `import sys`, `sys.stdout.write` of `open` with
+/// `encoding='utf-8'`, and `''.join` of `readlines` print it.
+/// `File.read(...).each_line` and `File.read` with `encoding: "UTF-8"`
+/// print it. Node `{readFileSync}` from `require('fs')` prints it.
+/// PHP `foreach` of `file` and `file_get_contents` with `false` print it.
+/// `while (<>) { print; }`, `readlines.join("\n")`, `read_text` with
+/// `encoding='utf-8'`, a bare `fs=require('fs')` read, `{encoding:'utf8'}`,
+/// and `print implode` of `file` print it too.
 /// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
@@ -11565,7 +11574,12 @@ fn perl_diamond_prints(script: &str) -> bool {
     let compact = compact_ws(script);
     matches!(
         compact.as_str(),
-        "print<>" | "printwhile<>" | "while(<>){print}" | "print$_while<>"
+        "print<>"
+            | "printwhile<>"
+            | "printwhile<>;"
+            | "while(<>){print}"
+            | "while(<>){print;}"
+            | "print$_while<>"
     )
 }
 
@@ -11578,9 +11592,12 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "printFile.open(ARGV[0]).read"
             | "printFile.readlines(ARGV[0]).join"
             | "printFile.readlines(ARGV[0]).join(\"\")"
+            | "printFile.readlines(ARGV[0]).join(\"\\n\")"
             | "File.foreach(ARGV[0]){|l|printl}"
             | "IO.foreach(ARGV[0]){|l|printl}"
             | "putsFile.readlines(ARGV[0])"
+            | "File.read(ARGV[0]).each_line{|l|printl}"
+            | "printFile.read(ARGV[0],encoding:\"UTF-8\")"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "printIO.binread(ARGV[0])"
@@ -12091,9 +12108,13 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
             | "importsys;print(open(sys.argv[1],encoding='utf-8').read())"
+            | "importsys;sys.stdout.write(open(sys.argv[1],encoding='utf-8').read())"
+            | "importsys;print(''.join(open(sys.argv[1]).readlines()))"
+            | "frompathlibimportPath;importsys;print(Path(sys.argv[1]).read_text())"
             | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
             | "importsys;frompathlibimportPath;sys.stdout.write(Path(sys.argv[1]).read_text())"
             | "importsys;frompathlibimportPath;sys.stdout.write(Path(sys.argv[1]).read_text(encoding='utf-8'))"
+            | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text(encoding='utf-8'))"
             | "importsys;frompathlibimportPath;sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
@@ -12192,6 +12213,9 @@ fn node_reads_argv1(script: &str) -> bool {
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf-8\"))"
             | "process.stdout.write(require('fs').readFileSync(process.argv[1]))"
             | "process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))"
+            | "const{readFileSync}=require('fs');process.stdout.write(readFileSync(process.argv[1],'utf8'))"
+            | "fs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1]))"
+            | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1],{encoding:'utf8'}))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1]))"
             | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "process.stdout.write(Buffer.from(require(\"fs\").readFileSync(process.argv[1]).toString(),\"base64\"))"
@@ -12493,9 +12517,12 @@ fn php_reads_argv1(script: &str) -> bool {
             | "echoreadfile($argv[1]);"
             | "system(file_get_contents($argv[1]));"
             | "echoimplode(\"\",file($argv[1]));"
+            | "printimplode(\"\",file($argv[1]));"
             | "echofread(fopen($argv[1],\"r\"),4096);"
             | "echostream_get_contents(fopen($argv[1],\"r\"));"
             | "echofgets(fopen($argv[1],\"r\"));"
+            | "foreach(file($argv[1])as$line){echo$line;}"
+            | "echofile_get_contents($argv[1],false);"
             | "echobase64_decode(file_get_contents($argv[1]));"
     )
 }
@@ -18147,6 +18174,37 @@ mod tests {
             ),
             format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {push_s})""#),
             format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {beta_last_s})""#),
+            format!(r#"eval "$(perl -e 'print while <>;' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1], encoding='utf-8').read())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; print(''.join(open(sys.argv[1]).readlines()))" {push_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'File.read(ARGV[0]).each_line {{|l| print l}}' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.read(ARGV[0], encoding: "UTF-8")' {push_s})""#),
+            format!(
+                r#"eval "$(node -e "const {{readFileSync}}=require('fs'); process.stdout.write(readFileSync(process.argv[1],'utf8'))" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(php -r 'foreach (file($argv[1]) as $line) {{ echo $line; }}' {push_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo file_get_contents($argv[1], false);' {push_s})""#),
+            format!(r#"eval "$(perl -e 'while (<>) {{ print; }}' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.readlines(ARGV[0]).join("\n")' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; print(Path(sys.argv[1]).read_text(encoding='utf-8'))" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],{{encoding:'utf8'}}))" {push_s})""#
+            ),
+            format!(r#"eval "$(php -r 'print implode("", file($argv[1]));' {push_s})""#),
         ];
         for command in &positives {
             assert_eq!(
@@ -18751,6 +18809,37 @@ mod tests {
             ),
             format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {echo_s})""#),
             format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {multi_s})""#),
+            format!(r#"eval "$(perl -e 'print while <>;' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1], encoding='utf-8').read())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; print(''.join(open(sys.argv[1]).readlines()))" {echo_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'File.read(ARGV[0]).each_line {{|l| print l}}' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.read(ARGV[0], encoding: "UTF-8")' {echo_s})""#),
+            format!(
+                r#"eval "$(node -e "const {{readFileSync}}=require('fs'); process.stdout.write(readFileSync(process.argv[1],'utf8'))" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(php -r 'foreach (file($argv[1]) as $line) {{ echo $line; }}' {echo_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo file_get_contents($argv[1], false);' {echo_s})""#),
+            format!(r#"eval "$(perl -e 'while (<>) {{ print; }}' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.readlines(ARGV[0]).join("\n")' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; print(Path(sys.argv[1]).read_text(encoding='utf-8'))" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],{{encoding:'utf8'}}))" {echo_s})""#
+            ),
+            format!(r#"eval "$(php -r 'print implode("", file($argv[1]));' {echo_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {echo_s})""#
             ),
