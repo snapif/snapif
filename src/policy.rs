@@ -475,6 +475,8 @@ fn check_action(
 /// echoes `base64_decode` of `file_get_contents` prints it. Node
 /// `Buffer.from` of that file with `"base64"` prints it. `perl
 /// -MMIME::Base64` that prints `decode_base64` prints it too.
+/// `basenc --base64 -d` prints that text. `python3 -m base64 -d`
+/// prints it too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
@@ -6414,6 +6416,7 @@ fn run_builtin(
         "uniq" => uniq_run(args, input, depth, substitutions),
         "tac" => tac_run(args, input, depth, substitutions),
         "base64" => base64_run(args, input, depth, substitutions),
+        "basenc" => basenc_run(args, input, depth, substitutions),
         "openssl" => openssl_b64_run(args, input, depth, substitutions),
         "base32" => base32_run(args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
@@ -10141,12 +10144,64 @@ fn decode_produced(produced: Run) -> Run {
     }
 }
 
+struct PyModuleB64 {
+    file: Option<String>,
+}
+
+fn python_module_b64(args: &[String]) -> Option<PyModuleB64> {
+    let mut index = 0usize;
+    while index < args.len() && matches!(args[index].as_str(), "-u" | "-E" | "-B" | "-s" | "-I") {
+        index += 1;
+    }
+    if args.get(index).map(String::as_str) != Some("-m") {
+        return None;
+    }
+    index += 1;
+    if args.get(index).map(String::as_str) != Some("base64") {
+        return None;
+    }
+    index += 1;
+    let mut decode = false;
+    let mut file = None;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-d" {
+            decode = true;
+            index += 1;
+            continue;
+        }
+        if arg == "-" || !arg.starts_with('-') {
+            if file.is_some() {
+                return None;
+            }
+            if arg != "-" {
+                file = Some(args[index].clone());
+            }
+            index += 1;
+            continue;
+        }
+        return None;
+    }
+    if !decode {
+        return None;
+    }
+    Some(PyModuleB64 { file })
+}
+
 fn python_cat_run(
     args: &[String],
     input: Option<&str>,
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
+    if let Some(query) = python_module_b64(args) {
+        return decode_produced(source_text(
+            query.file.as_deref(),
+            input,
+            depth,
+            substitutions,
+        ));
+    }
     let Some(file) = python_cat_query(args) else {
         return Run::Unknown;
     };
@@ -10356,6 +10411,72 @@ fn php_b64_script(args: &[String]) -> bool {
         index += 1;
     }
     false
+}
+
+fn basenc_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = basenc_query(args) else {
+        return Run::Unknown;
+    };
+    let raw = match source_text(query.file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        Run::Produced { text, ok: true } => text,
+        other => return other,
+    };
+    let Some(text) = b64_decode(&raw) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn basenc_query(args: &[String]) -> Option<Base64Query> {
+    let mut index = 0usize;
+    let mut decode = false;
+    let mut base64 = false;
+    let mut file = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(arg.as_str(), "-d" | "--decode") {
+            decode = true;
+            index += 1;
+            continue;
+        }
+        if arg == "--base64" {
+            base64 = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        if file.is_some() {
+            return None;
+        }
+        file = Some(arg.clone());
+        index += 1;
+    }
+    if !decode || !base64 || args.len() - index > 1 {
+        return None;
+    }
+    if file.is_none() {
+        file = args.get(index).cloned();
+    } else if index < args.len() {
+        return None;
+    }
+    Some(Base64Query { file })
 }
 
 fn base64_run(
@@ -10607,7 +10728,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
         "dd" => dd_query(args).is_none_or(|query| query.is_none()),
         "perl" | "ruby" => line_print_query(&words[0], args).is_none_or(|query| query.is_none()),
-        "python" | "python3" => python_cat_query(args).is_none_or(|query| query.is_none()),
+        "python" | "python3" => match python_module_b64(args) {
+            Some(query) => query.file.is_none(),
+            None => python_cat_query(args).is_none_or(|query| query.is_none()),
+        },
         "node" => node_cat_query(args).is_none_or(|query| query.is_none()),
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
         "iconv" => iconv_query(args).is_none_or(|query| query.is_none()),
@@ -10632,6 +10756,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             query.files.is_empty() || query.files.iter().any(|file| file == "-")
         }),
         "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
+        "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
         "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
@@ -14285,6 +14410,12 @@ mod tests {
                 r#"eval "$(node -e 'process.stdout.write(Buffer.from(require("fs").readFileSync(process.argv[1]).toString(),"base64"))' {coded_s})""#
             ),
             format!("eval \"$(perl -MMIME::Base64 -0777 -e 'print decode_base64(<>)' {coded_s})\""),
+            format!("eval \"$(basenc --base64 -d {coded_s})\""),
+            format!("eval \"$(basenc --base64 --decode {coded_s})\""),
+            format!("eval \"$(basenc -d --base64 {coded_s})\""),
+            format!("eval \"$(basenc --base64 -d < {coded_s})\""),
+            format!("eval \"$(python3 -m base64 -d {coded_s})\""),
+            format!("eval \"$(python3 -m base64 -d < {coded_s})\""),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
@@ -14670,6 +14801,9 @@ mod tests {
             format!(
                 "eval \"$(perl -MMIME::Base64 -0777 -e 'print decode_base64(<>)' {echo_b64_s})\""
             ),
+            format!("eval \"$(basenc --base64 -d {echo_b64_s})\""),
+            format!("eval \"$(python3 -m base64 -d {echo_b64_s})\""),
+            format!("eval \"$(python3 -m base64 -d < {echo_b64_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
