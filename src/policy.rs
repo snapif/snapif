@@ -457,7 +457,7 @@ fn check_action(
 /// too. `gsplit --filter` runs that command. `while read -r`
 /// then `printf` of that name prints the file. `mapfile -t` then
 /// `printf` of the first element prints that line. `read -r line < path`
-/// then `printf` of that name prints that line. Without `-n`,
+/// then `printf` or `echo` of that name prints that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
 /// every line. `sort -s` and `sort -z` still print every line. `sort -c`
 /// and `sort -o` do not. `uniq -d` prints a repeated line. `tac -s`
@@ -5764,6 +5764,12 @@ fn loose_words(body: &str) -> Option<Vec<String>> {
                     if index >= chars.len() {
                         return None;
                     }
+                    let next = chars[index];
+                    // Bash keeps the backslash unless the next character is
+                    // `$`, `` ` ``, `"`, `\`, or a newline.
+                    if !matches!(next, '$' | '`' | '"' | '\\' | '\n') {
+                        word.push('\\');
+                    }
                 }
                 word.push(chars[index]);
                 index += 1;
@@ -5813,18 +5819,28 @@ fn scalar_read_path(words: &[String]) -> Option<&str> {
     }
     index += 1;
     let (path, next) = split_redirect(words, index)?;
-    if words.get(next).map(String::as_str) != Some("printf") {
-        return None;
-    }
-    if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
-        return None;
-    }
     let expect = format!("${name}");
-    if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
-        return None;
-    }
-    if words.len() != next + 3 {
-        return None;
+    match words.get(next).map(String::as_str) {
+        Some("printf") => {
+            if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
+                return None;
+            }
+            if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
+                return None;
+            }
+            if words.len() != next + 3 {
+                return None;
+            }
+        }
+        Some("echo") => {
+            if words.get(next + 1).map(String::as_str) != Some(expect.as_str()) {
+                return None;
+            }
+            if words.len() != next + 2 {
+                return None;
+            }
+        }
+        _ => return None,
     }
     Some(path)
 }
@@ -14049,6 +14065,8 @@ mod tests {
             format!(r#"eval "$(mapfile -t x < {push_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(read -r line < {push_s}; printf '%s\n' "$line")""#),
             format!(r#"eval "$(read line < {push_s}; printf '%s\n' "$line")""#),
+            format!(r#"eval "$(read -r line < {push_s}; printf "%s\n" "$line")""#),
+            format!(r#"eval "$(read -r line < {push_s}; echo "$line")""#),
             format!("eval \"$(printf '%s\\n' {push_s} | gxargs cat)\""),
             format!("eval \"$(printf '%s\\n' {push_s} | xargs cat)\""),
             format!("eval \"$(gxargs cat {push_s})\""),
@@ -14317,6 +14335,7 @@ mod tests {
             format!(r#"eval "$(mapfile -t x < {echo_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(mapfile -t x < {multi_s}; printf '%s\n' "${{x[0]}}")""#),
             format!(r#"eval "$(read -r line < {echo_s}; printf '%s\n' "$line")""#),
+            format!(r#"eval "$(read -r line < {echo_s}; echo "$line")""#),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
             format!("eval \"$(ruby -e 'print ARGF.read' {echo_s})\""),
