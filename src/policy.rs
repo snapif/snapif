@@ -497,6 +497,8 @@ fn check_action(
 /// archive prints the member. `bsdtar -xOf` prints it too.
 /// `gtar -I lz4` and `gtar -I brotli` print that member.
 /// `gtar -xOf` of an lzma archive prints it too.
+/// `python3` tarfile and zipfile reads print the member.
+/// `perl -MArchive::Tar` prints that member.
 /// `7z e -so` prints the archive.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
@@ -10979,6 +10981,56 @@ fn dd_query(args: &[String]) -> Option<Option<String>> {
     Some(file)
 }
 
+struct PerlTarQuery {
+    archive: String,
+    member: Option<String>,
+}
+
+fn perl_tar_query(name: &str, args: &[String]) -> Option<PerlTarQuery> {
+    if command_basename(name) != "perl" {
+        return None;
+    }
+    let mut index = 0usize;
+    let mut script = None;
+    let mut module = false;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-e" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg == "-MArchive::Tar" {
+            module = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    let compact = compact_ws(&script);
+    if !module
+        || files.len() != 2
+        || (compact != "printArchive::Tar->new($ARGV[0])->get_content($ARGV[1])"
+            && compact != "printArchive::Tar->new($ARGV[0])->get_content($ARGV[1]);")
+    {
+        return None;
+    }
+    Some(PerlTarQuery {
+        archive: files[0].clone(),
+        member: Some(files[1].clone()),
+    })
+}
+
 fn line_print_run(
     name: &str,
     args: &[String],
@@ -10986,6 +11038,11 @@ fn line_print_run(
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
+    if let Some(query) = perl_tar_query(name, args) {
+        return produced_archive(&query.archive, |bytes| {
+            tar_text(bytes, query.member.as_deref(), TarCompress::Auto)
+        });
+    }
     let Some(file) = line_print_query(name, args) else {
         return Run::Unknown;
     };
@@ -11291,6 +11348,12 @@ fn python_cat_run(
             substitutions,
         ));
     }
+    if let Some(query) = python_archive_query(args) {
+        return produced_archive(&query.archive, |bytes| match query.kind {
+            PyArchive::Tar => tar_text(bytes, query.member.as_deref(), TarCompress::Auto),
+            PyArchive::Zip => unzip_text(bytes, query.member.as_deref()),
+        });
+    }
     let Some(file) = python_cat_query(args) else {
         return Run::Unknown;
     };
@@ -11300,6 +11363,83 @@ fn python_cat_run(
     } else {
         produced
     }
+}
+
+enum PyArchive {
+    Tar,
+    Zip,
+}
+
+struct PyArchiveQuery {
+    kind: PyArchive,
+    archive: String,
+    member: Option<String>,
+}
+
+fn compact_ws(script: &str) -> String {
+    script.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+fn script_file_text(path: &str) -> Option<String> {
+    match load_script_bytes(path)? {
+        ScriptBytes::Bytes(bytes) => String::from_utf8(bytes).ok(),
+        ScriptBytes::Unscanned => None,
+    }
+}
+
+fn python_archive_query(args: &[String]) -> Option<PyArchiveQuery> {
+    let mut index = 0usize;
+    let mut inline = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-c" {
+            index += 1;
+            if inline.is_some() {
+                return None;
+            }
+            inline = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "-u" | "-E" | "-B" | "-s" | "-I") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = if let Some(script) = inline {
+        script
+    } else {
+        let path = files.first()?.clone();
+        files.remove(0);
+        script_file_text(&path)?
+    };
+    let compact = compact_ws(&script);
+    let (kind, archive_at, member_at) = match compact.as_str() {
+        "importsys,tarfile;sys.stdout.buffer.write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())" => {
+            (PyArchive::Tar, 0usize, 1usize)
+        }
+        "importsysimporttarfilemode=sys.argv[1]path=sys.argv[2]member=sys.argv[3]withtarfile.open(path,mode)asarchive:extracted=archive.extractfile(member)sys.stdout.buffer.write(extracted.read())" => {
+            (PyArchive::Tar, 1, 2)
+        }
+        "importsysimportzipfilewithzipfile.ZipFile(sys.argv[1])asarchive:sys.stdout.buffer.write(archive.read(sys.argv[2]))" => {
+            (PyArchive::Zip, 0, 1)
+        }
+        _ => return None,
+    };
+    if files.len() != member_at + 1 {
+        return None;
+    }
+    Some(PyArchiveQuery {
+        kind,
+        archive: files.get(archive_at)?.clone(),
+        member: Some(files.get(member_at)?.clone()),
+    })
 }
 
 fn python_cat_query(args: &[String]) -> Option<Option<String>> {
@@ -12213,10 +12353,22 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "tee" | "tr" => true,
         "base32" => base32_query(args).is_none_or(|query| query.file.is_none()),
         "dd" => dd_query(args).is_none_or(|query| query.is_none()),
-        "perl" | "ruby" => line_print_query(&words[0], args).is_none_or(|query| query.is_none()),
+        "perl" | "ruby" => {
+            if perl_tar_query(&words[0], args).is_some() {
+                false
+            } else {
+                line_print_query(&words[0], args).is_none_or(|query| query.is_none())
+            }
+        }
         "python" | "python3" => match python_module_b64(args) {
             Some(query) => query.file.is_none(),
-            None => python_cat_query(args).is_none_or(|query| query.is_none()),
+            None => {
+                if python_archive_query(args).is_some() {
+                    false
+                } else {
+                    python_cat_query(args).is_none_or(|query| query.is_none())
+                }
+            }
         },
         "node" => node_cat_query(args).is_none_or(|query| query.is_none()),
         "php" => php_cat_query(args).is_none_or(|query| query.is_none()),
@@ -16167,6 +16319,20 @@ mod tests {
         let tbr_hello_s = plain_script_path(&tbr_hello);
         let tlzma_s = plain_script_path(&tlzma);
         let tlzma_hello_s = plain_script_path(&tlzma_hello);
+        let pytar = dir.join(format!("snapif-c40-pytar-{pid}.py"));
+        let pyzip = dir.join(format!("snapif-c40-pyzip-{pid}.py"));
+        std::fs::write(
+            &pytar,
+            "import sys\nimport tarfile\nmode = sys.argv[1]\npath = sys.argv[2]\nmember = sys.argv[3]\nwith tarfile.open(path, mode) as archive:\n    extracted = archive.extractfile(member)\n    sys.stdout.buffer.write(extracted.read())\n",
+        )
+        .expect("pytar");
+        std::fs::write(
+            &pyzip,
+            "import sys\nimport zipfile\nwith zipfile.ZipFile(sys.argv[1]) as archive:\n    sys.stdout.buffer.write(archive.read(sys.argv[2]))\n",
+        )
+        .expect("pyzip");
+        let pytar_s = plain_script_path(&pytar);
+        let pyzip_s = plain_script_path(&pyzip);
         let zip_s = plain_script_path(&zip_file);
         let zip_hello_s = plain_script_path(&zip_hello);
         let seven_s = plain_script_path(&seven_file);
@@ -16428,6 +16594,14 @@ mod tests {
             format!("eval \"$(gtar -xOf {tlzma_s} git.txt)\""),
             format!("eval \"$(tar -xOf {tlzma_s} git.txt)\""),
             format!("eval \"$(gtar -I lzma -xOf {tlzma_s} git.txt)\""),
+            format!(
+                "eval \"$(python3 -c 'import sys,tarfile; sys.stdout.buffer.write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())' {tar_s} git.txt)\""
+            ),
+            format!("eval \"$(python3 {pytar_s} r {tar_s} git.txt)\""),
+            format!("eval \"$(python3 {pyzip_s} {zip_s} git.txt)\""),
+            format!(
+                "eval \"$(perl -MArchive::Tar -e 'print Archive::Tar->new($ARGV[0])->get_content($ARGV[1])' {tar_s} git.txt)\""
+            ),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s})\""),
             format!("eval \"$(7z e -so {seven_s})\""),
@@ -16880,6 +17054,13 @@ mod tests {
             format!("eval \"$(gtar -I lz4 -xOf {tlz4_hello_s} echo.txt)\""),
             format!("eval \"$(gtar -I brotli -xOf {tbr_hello_s} echo.txt)\""),
             format!("eval \"$(gtar -xOf {tlzma_hello_s} echo.txt)\""),
+            format!(
+                "eval \"$(python3 -c 'import sys,tarfile; sys.stdout.buffer.write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())' {tar_hello_s} echo.txt)\""
+            ),
+            format!("eval \"$(python3 {pyzip_s} {zip_hello_s} echo.txt)\""),
+            format!(
+                "eval \"$(perl -MArchive::Tar -e 'print Archive::Tar->new($ARGV[0])->get_content($ARGV[1])' {tar_hello_s} echo.txt)\""
+            ),
             format!("eval \"$(tar -xOf {tlzma_hello_s} echo.txt)\""),
             format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
             format!("eval \"$(7z e -so {seven_hello_s})\""),
