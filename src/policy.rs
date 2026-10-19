@@ -510,7 +510,8 @@ fn check_action(
 /// `bz2.open` and `lzma.open` in text mode print those payloads.
 /// `gzread` of `gzopen` and `stream_get_contents` of `gzopen` print
 /// a gzip payload. `gzgets`, `gzpassthru`, and `fread` of `gzopen`
-/// print it too. `gzip.open`
+/// print it too. `readgzfile` prints it. `GzipReader.wrap` prints it.
+/// `gzip.open`
 /// with `encoding` prints it. A `GzipReader` block prints it.
 /// `perl` `AnyInflate` prints gzip, zlib, or raw deflate.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
@@ -11720,6 +11721,7 @@ fn ruby_gzip_query(name: &str, args: &[String]) -> Option<(RubyInflate, String)>
         "printZlib::GzipReader.open(ARGV[0]).read"
         | "printZlib::GzipReader.open(ARGV[0]).readlines.join"
         | "Zlib::GzipReader.open(ARGV[0]){|f|printf.read}"
+        | "printZlib::GzipReader.wrap(File.open(ARGV[0])){|f|f.read}"
         | "printZlib.gunzip(File.binread(ARGV[0]))" => RubyInflate::Gzip,
         "printZlib::Inflate.new.inflate(File.binread(ARGV[0]))"
         | "printZlib.inflate(File.binread(ARGV[0]))" => RubyInflate::Zlib,
@@ -12095,7 +12097,8 @@ fn php_gzip_query(args: &[String]) -> Option<String> {
             && compact != "echogzread(gzopen($argv[1],\"r\"),4096);"
             && compact != "echogzgets(gzopen($argv[1],\"r\"));"
             && compact != "echogzpassthru(gzopen($argv[1],\"r\"));"
-            && compact != "echofread(gzopen($argv[1],\"r\"),4096);")
+            && compact != "echofread(gzopen($argv[1],\"r\"),4096);"
+            && compact != "echoreadgzfile($argv[1]);")
     {
         return None;
     }
@@ -17359,6 +17362,13 @@ mod tests {
             format!(r#"eval "$(php -r 'echo gzgets(gzopen($argv[1],"r"));' {gz_s})""#),
             format!(r#"eval "$(php -r 'echo gzpassthru(gzopen($argv[1],"r"));' {gz_s})""#),
             format!(r#"eval "$(php -r 'echo fread(gzopen($argv[1],"r"), 4096);' {gz_s})""#),
+            format!(r#"eval "$(php -r 'echo readgzfile($argv[1]);' {gz_s})""#),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.wrap(File.open(ARGV[0])) {{ |f| f.read }}' {gz_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -r zlib -e 'print Zlib::GzipReader.wrap(File.open(ARGV[0])) {{ |f| f.read }}' {gz_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" {gz_s})""#
             ),
@@ -18070,6 +18080,13 @@ mod tests {
             format!(r#"eval "$(php -r 'echo gzgets(gzopen($argv[1],"r"));' {gz_hello_s})""#),
             format!(r#"eval "$(php -r 'echo gzpassthru(gzopen($argv[1],"r"));' {gz_hello_s})""#),
             format!(r#"eval "$(php -r 'echo fread(gzopen($argv[1],"r"), 4096);' {gz_hello_s})""#),
+            format!(r#"eval "$(php -r 'echo readgzfile($argv[1]);' {gz_hello_s})""#),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.wrap(File.open(ARGV[0])) {{ |f| f.read }}' {gz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -r zlib -e 'print Zlib::GzipReader.wrap(File.open(ARGV[0])) {{ |f| f.read }}' {gz_hello_s})""#
+            ),
             format!(
                 r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" {gz_hello_s})""#
             ),
