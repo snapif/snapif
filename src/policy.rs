@@ -492,7 +492,8 @@ fn check_action(
 /// `brotli -dc` prints a brotli stream. `pzstd -dc` prints a zstd
 /// frame. `tar -xOf` prints the named member. `unzip -p` prints that
 /// member. `tar -xzOf` prints a member from a gzip archive. `-xJOf`
-/// and `-xjOf` do too. `7z e -so` prints the archive.
+/// and `-xjOf` do too. `tar --zstd -xOf` prints a zstd member.
+/// `uncompress -c` prints a compress payload. `7z e -so` prints the archive.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -6425,11 +6426,119 @@ struct GzipQuery {
     file: Option<String>,
 }
 
-fn gzip_decode(bytes: &[u8]) -> Option<String> {
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
+struct LsbBits<'a> {
+    rest: &'a [u8],
+    acc: u32,
+    acc_bits: usize,
+}
+
+impl<'a> LsbBits<'a> {
+    fn code(&mut self, n_bits: usize) -> Option<usize> {
+        while self.acc_bits < n_bits {
+            let byte = *self.rest.first()?;
+            self.rest = &self.rest[1..];
+            self.acc |= u32::from(byte) << self.acc_bits;
+            self.acc_bits += 8;
+        }
+        let code = (self.acc & ((1u32 << n_bits) - 1)) as usize;
+        self.acc >>= n_bits;
+        self.acc_bits -= n_bits;
+        Some(code)
+    }
+}
+
+fn unix_compress_decode(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 3 || bytes[0] != 0x1f || bytes[1] != 0x9d {
+        return None;
+    }
+    let maxbits = (bytes[2] & 0x1f) as usize;
+    if !(9..=16).contains(&maxbits) {
+        return None;
+    }
+    let block_mode = bytes[2] & 0x80 != 0;
+    let limit = 1usize << maxbits;
+    let mut prefix = vec![0u16; limit];
+    let mut suffix = vec![0u8; limit];
+    for (index, slot) in suffix.iter_mut().enumerate().take(256) {
+        *slot = index as u8;
+    }
+    let mut bits = LsbBits {
+        rest: &bytes[3..],
+        acc: 0,
+        acc_bits: 0,
+    };
+    let mut n_bits = 9usize;
+    let mut maxcode = (1usize << n_bits) - 1;
+    let mut free_ent = if block_mode { 257 } else { 256 };
     let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
-    String::from_utf8(out).ok()
+    let mut stack = Vec::new();
+    let Some(first) = bits.code(n_bits) else {
+        return Some(out);
+    };
+    if first > 255 {
+        return None;
+    }
+    out.push(first as u8);
+    let mut finchar = first;
+    let mut oldcode = first;
+    while let Some(incode) = bits.code(n_bits) {
+        if block_mode && incode == 256 {
+            free_ent = 257;
+            n_bits = 9;
+            maxcode = (1usize << n_bits) - 1;
+            bits.acc = 0;
+            bits.acc_bits = 0;
+            let Some(reset) = bits.code(n_bits) else {
+                break;
+            };
+            if reset > 255 {
+                return None;
+            }
+            out.push(reset as u8);
+            finchar = reset;
+            oldcode = reset;
+            continue;
+        }
+        let mut code = incode;
+        if code == free_ent {
+            stack.push(finchar as u8);
+            code = oldcode;
+        } else if code > free_ent {
+            return None;
+        }
+        while code >= 256 {
+            stack.push(suffix[code]);
+            code = prefix[code] as usize;
+        }
+        finchar = code;
+        stack.push(finchar as u8);
+        while let Some(byte) = stack.pop() {
+            out.push(byte);
+        }
+        if free_ent < limit {
+            prefix[free_ent] = oldcode as u16;
+            suffix[free_ent] = finchar as u8;
+            free_ent += 1;
+            if free_ent > maxcode && n_bits < maxbits {
+                n_bits += 1;
+                maxcode = (1usize << n_bits) - 1;
+            }
+        }
+        oldcode = incode;
+    }
+    Some(out)
+}
+
+fn gzip_decode(bytes: &[u8]) -> Option<String> {
+    let raw = if bytes.starts_with(&[0x1f, 0x9d]) {
+        unix_compress_decode(bytes)?
+    } else {
+        let mut decoder = flate2::read::GzDecoder::new(bytes);
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+        out
+    };
+    String::from_utf8(raw).ok()
 }
 
 fn bzip2_decode(bytes: &[u8]) -> Option<String> {
@@ -6573,6 +6682,10 @@ fn lz4_query(name: &str, args: &[String]) -> Option<GzipQuery> {
     } else {
         None
     }
+}
+
+fn uncompress_query(args: &[String]) -> Option<GzipQuery> {
+    decompress_stdout_query(args, true, false)
 }
 
 fn brotli_query(name: &str, args: &[String]) -> Option<GzipQuery> {
@@ -6824,7 +6937,10 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
             index += 1;
             continue;
         }
-        if matches!(arg.as_str(), "--gzip" | "--gunzip" | "--bzip2" | "--xz") {
+        if matches!(
+            arg.as_str(),
+            "--gzip" | "--gunzip" | "--bzip2" | "--xz" | "--zstd"
+        ) {
             index += 1;
             continue;
         }
@@ -7194,6 +7310,13 @@ fn run_builtin(
         "7z" | "7za" | "7zz" => sevenz_run(args, input, depth, substitutions),
         "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, substitutions),
         "brotli" => brotli_run(&name, args, input, depth, substitutions),
+        "uncompress" => decoded_bytes_run(
+            uncompress_query(args),
+            input,
+            depth,
+            substitutions,
+            gzip_decode,
+        ),
         "dd" => dd_run(args, input, depth, substitutions),
         "perl" | "ruby" => line_print_run(&words[0], args, input, depth, substitutions),
         "python" | "python3" => python_cat_run(args, input, depth, substitutions),
@@ -12043,6 +12166,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             lz4_query(&name, args).is_some_and(|query| query.file.is_none())
         }
         "brotli" => brotli_query(&name, args).is_some_and(|query| query.file.is_none()),
+        "uncompress" => uncompress_query(args).is_some_and(|query| query.file.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
         }
@@ -15530,6 +15654,21 @@ mod tests {
             encoder.write_all(bytes).expect("bzip raw");
             encoder.finish().expect("bzip raw finish")
         }
+        fn zstd_bytes_raw(bytes: &[u8]) -> Vec<u8> {
+            ruzstd::encoding::compress_to_vec(bytes, ruzstd::encoding::CompressionLevel::Fastest)
+        }
+        fn compress_bytes(kind: &str) -> &'static [u8] {
+            match kind {
+                "git" => &[
+                    31, 157, 144, 103, 210, 208, 1, 1, 167, 206, 28, 52, 32, 222, 200, 73, 19, 208,
+                    13, 136, 54, 97, 210, 184, 81, 0,
+                ],
+                "echo" => &[
+                    31, 157, 144, 101, 198, 160, 121, 3, 2, 77, 25, 54, 108, 222, 40, 0,
+                ],
+                _ => &[],
+            }
+        }
         fn xz_bytes_raw(bytes: &[u8]) -> Vec<u8> {
             let mut input = std::io::Cursor::new(bytes);
             let mut out = Vec::new();
@@ -15709,6 +15848,16 @@ mod tests {
             bzip_bytes_raw(&tar_bytes("git.txt", "git push origin main\n")),
         )
         .expect("tbz");
+        let tzst = dir.join(format!("snapif-c39-tzst-{pid}.tar.zst"));
+        std::fs::write(
+            &tzst,
+            zstd_bytes_raw(&tar_bytes("git.txt", "git push origin main\n")),
+        )
+        .expect("tzst");
+        let zed = dir.join(format!("snapif-c39-Z-{pid}.Z"));
+        std::fs::write(&zed, compress_bytes("git")).expect("Z");
+        let zed_hello = dir.join(format!("snapif-c39-Z-hello-{pid}.Z"));
+        std::fs::write(&zed_hello, compress_bytes("echo")).expect("Z hello");
         let zip_file = dir.join(format!("snapif-c39-zip-{pid}.zip"));
         std::fs::write(&zip_file, zip_bytes("git.txt", "git push origin main\n")).expect("zip");
         let zip_hello = dir.join(format!("snapif-c39-zip-hello-{pid}.zip"));
@@ -15802,6 +15951,9 @@ mod tests {
         let tgz_hello_s = plain_script_path(&tgz_hello);
         let txz_s = plain_script_path(&txz);
         let tbz_s = plain_script_path(&tbz);
+        let tzst_s = plain_script_path(&tzst);
+        let zed_s = plain_script_path(&zed);
+        let zed_hello_s = plain_script_path(&zed_hello);
         let zip_s = plain_script_path(&zip_file);
         let zip_hello_s = plain_script_path(&zip_hello);
         let seven_s = plain_script_path(&seven_file);
@@ -16046,6 +16198,10 @@ mod tests {
             format!("eval \"$(gtar -xzOf {tgz_s} git.txt)\""),
             format!("eval \"$(tar -xJOf {txz_s} git.txt)\""),
             format!("eval \"$(tar -xjOf {tbz_s} git.txt)\""),
+            format!("eval \"$(tar --zstd -xOf {tzst_s} git.txt)\""),
+            format!("eval \"$(uncompress -c {zed_s})\""),
+            format!("eval \"$(gzip -dc {zed_s})\""),
+            format!("eval \"$(gzcat {zed_s})\""),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s})\""),
             format!("eval \"$(7z e -so {seven_s})\""),
@@ -16491,6 +16647,8 @@ mod tests {
             format!("eval \"$(pzstd -dc {zst_hello_s})\""),
             format!("eval \"$(tar -xOf {tar_hello_s} echo.txt)\""),
             format!("eval \"$(tar -xzOf {tgz_hello_s} echo.txt)\""),
+            format!("eval \"$(uncompress -c {zed_hello_s})\""),
+            format!("eval \"$(gzip -dc {zed_hello_s})\""),
             format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
             format!("eval \"$(7z e -so {seven_hello_s})\""),
             format!("eval \"$(7z e {seven_s})\""),
