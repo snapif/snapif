@@ -499,7 +499,9 @@ fn check_action(
 /// `gzip -dc` and `uncompress -c` still do.
 /// `gzip.GzipFile` prints a gzip payload. `Zlib::Inflate` prints a
 /// zlib payload. Node `inflateRawSync` and `php` `gzinflate` print a
-/// raw deflate payload.
+/// raw deflate payload. `bz2.BZ2File` and `lzma.LZMAFile` print
+/// those payloads. `Zlib.inflate` and `php` `gzuncompress` print a
+/// zlib payload. `perl` `RawInflate` prints a raw deflate payload.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -11145,6 +11147,43 @@ fn perl_bzip_query(name: &str, args: &[String]) -> Option<String> {
     Some(files.remove(0))
 }
 
+fn perl_raw_query(name: &str, args: &[String]) -> Option<String> {
+    if command_basename(name) != "perl" {
+        return None;
+    }
+    let mut index = 0usize;
+    let mut script = None;
+    let mut module = false;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-e" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg == "-MIO::Uncompress::RawInflate=rawinflate" {
+            module = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    if !module || files.len() != 1 || compact_ws(&script) != "rawinflate$ARGV[0]=>\\*STDOUT" {
+        return None;
+    }
+    Some(files.remove(0))
+}
+
 fn line_print_run(
     name: &str,
     args: &[String],
@@ -11186,6 +11225,15 @@ fn line_print_run(
             depth,
             substitutions,
             bzip2_decode,
+        );
+    }
+    if let Some(path) = perl_raw_query(name, args) {
+        return decoded_bytes_run(
+            Some(GzipQuery { file: Some(path) }),
+            input,
+            depth,
+            substitutions,
+            deflate_decode,
         );
     }
     let Some(file) = line_print_query(name, args) else {
@@ -11526,13 +11574,19 @@ fn python_codec_query(args: &[String]) -> Option<(PyCodec, String)> {
         "importsys,bz2;sys.stdout.buffer.write(bz2.open(sys.argv[1],\"rb\").read())"
         | "importsys,bz2;sys.stdout.buffer.write(bz2.open(sys.argv[1],'rb').read())"
         | "importbz2,sys;sys.stdout.buffer.write(bz2.decompress(open(sys.argv[1],\"rb\").read()))"
-        | "importbz2,sys;sys.stdout.buffer.write(bz2.decompress(open(sys.argv[1],'rb').read()))" => {
+        | "importbz2,sys;sys.stdout.buffer.write(bz2.decompress(open(sys.argv[1],'rb').read()))"
+        | "importsys,bz2;sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())"
+        | "importsys,bz2;sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],\"rb\").read())"
+        | "importsys,bz2;sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],'rb').read())" => {
             PyCodec::Bzip2
         }
         "importsys,lzma;sys.stdout.buffer.write(lzma.open(sys.argv[1],\"rb\").read())"
         | "importsys,lzma;sys.stdout.buffer.write(lzma.open(sys.argv[1],'rb').read())"
         | "importlzma,sys;sys.stdout.buffer.write(lzma.decompress(open(sys.argv[1],\"rb\").read()))"
-        | "importlzma,sys;sys.stdout.buffer.write(lzma.decompress(open(sys.argv[1],'rb').read()))" => {
+        | "importlzma,sys;sys.stdout.buffer.write(lzma.decompress(open(sys.argv[1],'rb').read()))"
+        | "importsys,lzma;sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1]).read())"
+        | "importsys,lzma;sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],\"rb\").read())"
+        | "importsys,lzma;sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],'rb').read())" => {
             PyCodec::Lzma
         }
         "importsys,zlib;sys.stdout.buffer.write(zlib.decompress(open(sys.argv[1],\"rb\").read()))"
@@ -11595,7 +11649,8 @@ fn ruby_gzip_query(name: &str, args: &[String]) -> Option<(RubyInflate, String)>
         "printZlib::GzipReader.open(ARGV[0]).read" | "printZlib.gunzip(File.binread(ARGV[0]))" => {
             RubyInflate::Gzip
         }
-        "printZlib::Inflate.new.inflate(File.binread(ARGV[0]))" => RubyInflate::Zlib,
+        "printZlib::Inflate.new.inflate(File.binread(ARGV[0]))"
+        | "printZlib.inflate(File.binread(ARGV[0]))" => RubyInflate::Zlib,
         _ => return None,
     };
     Some((kind, files.remove(0)))
@@ -12021,6 +12076,34 @@ fn php_raw_query(args: &[String]) -> Option<String> {
     Some(files.remove(0))
 }
 
+fn php_unc_query(args: &[String]) -> Option<String> {
+    let mut index = 0usize;
+    let mut script = None;
+    let mut files = Vec::new();
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-r" {
+            index += 1;
+            if script.is_some() {
+                return None;
+            }
+            script = Some(args.get(index)?.clone());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        files.push(args[index].clone());
+        index += 1;
+    }
+    let script = script?;
+    if files.len() != 1 || compact_ws(&script) != "echogzuncompress(file_get_contents($argv[1]));" {
+        return None;
+    }
+    Some(files.remove(0))
+}
+
 fn php_cat_run(
     args: &[String],
     input: Option<&str>,
@@ -12052,6 +12135,15 @@ fn php_cat_run(
             depth,
             substitutions,
             deflate_decode,
+        );
+    }
+    if let Some(path) = php_unc_query(args) {
+        return decoded_bytes_run(
+            Some(GzipQuery { file: Some(path) }),
+            input,
+            depth,
+            substitutions,
+            zlib_decode,
         );
     }
     let Some(file) = php_cat_query(args) else {
@@ -12832,6 +12924,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             if perl_tar_query(&words[0], args).is_some()
                 || perl_gzip_query(&words[0], args).is_some()
                 || perl_bzip_query(&words[0], args).is_some()
+                || perl_raw_query(&words[0], args).is_some()
                 || ruby_gzip_query(&words[0], args).is_some()
             {
                 false
@@ -12860,6 +12953,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
             if php_gzip_query(args).is_some()
                 || php_bz_query(args).is_some()
                 || php_raw_query(args).is_some()
+                || php_unc_query(args).is_some()
             {
                 false
             } else {
@@ -17176,6 +17270,37 @@ mod tests {
                 r#"eval "$(node -e "const fs=require('fs'); const z=require('zlib'); process.stdout.write(z.inflateRawSync(fs.readFileSync(process.argv[1])))" {df_s})""#
             ),
             format!(r#"eval "$(php -r 'echo gzinflate(file_get_contents($argv[1]));' {df_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())" {bz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],"rb").read())' {bz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],'rb').read())" {bz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1]).read())" {xz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],"rb").read())' {xz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],'rb').read())" {xz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1]).read())" {lzma_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib.inflate(File.binread(ARGV[0]))' {zl_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -r zlib -e 'print Zlib.inflate(File.binread(ARGV[0]))' {zl_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo gzuncompress(file_get_contents($argv[1]));' {zl_s})""#),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::RawInflate=rawinflate -e 'rawinflate $ARGV[0] => \*STDOUT' {df_s})""#
+            ),
             format!("eval \"$(gzip -d -c {gz_s})\""),
             format!("eval \"$(gzip -cd {gz_s})\""),
             format!("eval \"$(gunzip -c {gz_s})\""),
@@ -17787,6 +17912,39 @@ mod tests {
             ),
             format!(
                 r#"eval "$(php -r 'echo gzinflate(file_get_contents($argv[1]));' {df_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())" {bz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],"rb").read())' {bz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],'rb').read())" {bz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1]).read())" {xz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],"rb").read())' {xz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],'rb').read())" {xz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1]).read())" {lzma_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib.inflate(File.binread(ARGV[0]))' {zl_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -r zlib -e 'print Zlib.inflate(File.binread(ARGV[0]))' {zl_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(php -r 'echo gzuncompress(file_get_contents($argv[1]));' {zl_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::RawInflate=rawinflate -e 'rawinflate $ARGV[0] => \*STDOUT' {df_hello_s})""#
             ),
             format!("eval \"$(zcat {gz_hello_s})\""),
             format!(
