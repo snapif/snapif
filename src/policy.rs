@@ -564,7 +564,9 @@ fn check_action(
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
 /// `readFileSync`, `File.binread`, `IO.binread`, `Path.read_bytes`,
 /// `open(..., "rb")`, `open(...).read().decode()`, `File.open(...).read`,
-/// and `perl -e 'print <>'`,
+/// and `perl -e 'print <>'`, `File.readlines(...).join`,
+/// `Path.read_bytes` after `from pathlib import Path`, and
+/// `readFileSync` with `'utf8'`,
 /// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
@@ -11556,6 +11558,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
         "printFile.read(ARGV[0])"
             | "printFile.binread(ARGV[0])"
             | "printFile.open(ARGV[0]).read"
+            | "printFile.readlines(ARGV[0]).join"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "printIO.binread(ARGV[0])"
@@ -12066,6 +12069,7 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
             | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
+            | "importsys;frompathlibimportPath;sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
             | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],\"rb\").read()))"
@@ -12158,6 +12162,7 @@ fn node_reads_argv1(script: &str) -> bool {
             | "console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))"
             | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1]))"
+            | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1]))"
             | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "process.stdout.write(Buffer.from(require(\"fs\").readFileSync(process.argv[1]).toString(),\"base64\"))"
@@ -17311,6 +17316,13 @@ mod tests {
             format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {push_s})""#),
             format!(r#"eval "$(ruby -e 'print IO.binread(ARGV[0])' {push_s})""#),
             format!(r#"eval "$(ruby -e 'print File.open(ARGV[0]).read' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.readlines(ARGV[0]).join' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))" {push_s})""#
+            ),
             format!(r#"eval "$(perl -e 'print <>' {push_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {push_s})""#
@@ -18586,6 +18598,13 @@ mod tests {
             format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {echo_s})""#),
             format!(r#"eval "$(ruby -e 'print IO.binread(ARGV[0])' {echo_s})""#),
             format!(r#"eval "$(ruby -e 'print File.open(ARGV[0]).read' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.readlines(ARGV[0]).join' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))" {echo_s})""#
+            ),
             format!(r#"eval "$(perl -e 'print <>' {echo_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {echo_s})""#
