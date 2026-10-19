@@ -476,7 +476,8 @@ fn check_action(
 /// `Buffer.from` of that file with `"base64"` prints it. `perl
 /// -MMIME::Base64` that prints `decode_base64` prints it too.
 /// `basenc --base64 -d` prints that text. `basenc --base16 -d` prints
-/// the decoded hex. `xxd -r -p` prints the
+/// the decoded hex. `basenc --base32 -d` prints the decoded text.
+/// `xxd -r -p` prints the
 /// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
 /// `basenc`. `python3 -m base64 -d` prints it too. `ruby -rbase64`
@@ -10440,6 +10441,7 @@ fn php_b64_script(args: &[String]) -> bool {
 enum BasencKind {
     Base64,
     Base16,
+    Base32,
 }
 
 struct BasencQuery {
@@ -10469,6 +10471,7 @@ fn basenc_run(
     let text = match query.kind {
         BasencKind::Base64 => b64_decode(&raw),
         BasencKind::Base16 => hex_decode(&raw),
+        BasencKind::Base32 => b32_decode(&raw),
     };
     let Some(text) = text else {
         return Run::Unknown;
@@ -10492,15 +10495,17 @@ fn basenc_query(args: &[String]) -> Option<BasencQuery> {
             index += 1;
             continue;
         }
-        if arg == "--base64" || arg == "--base16" {
+        let next_kind = match arg.as_str() {
+            "--base64" => Some(BasencKind::Base64),
+            "--base16" => Some(BasencKind::Base16),
+            "--base32" => Some(BasencKind::Base32),
+            _ => None,
+        };
+        if let Some(next) = next_kind {
             if kind.is_some() {
                 return None;
             }
-            kind = Some(if arg == "--base64" {
-                BasencKind::Base64
-            } else {
-                BasencKind::Base16
-            });
+            kind = Some(next);
             index += 1;
             continue;
         }
@@ -14485,6 +14490,8 @@ mod tests {
         std::fs::write(&hex_hello, "6563686f2068656c6c6f0a\n").expect("hex hello");
         let b32 = dir.join(format!("snapif-c31-b32-{pid}.txt"));
         std::fs::write(&b32, "M5UXIIDQOVZWQIDPOJUWO2LOEBWWC2LOBI======\n").expect("b32");
+        let b32_hello = dir.join(format!("snapif-c38-b32-hello-{pid}.txt"));
+        std::fs::write(&b32_hello, "MVRWQ3ZANBSWY3DPBI======\n").expect("b32 hello");
         let dup = dir.join(format!("snapif-c30-dup-{pid}.txt"));
         std::fs::write(&dup, "git push origin main\ngit push origin main\n").expect("dup");
         let mut big_body = b"git push origin main\n".to_vec();
@@ -14502,6 +14509,7 @@ mod tests {
         let hex_push_s = plain_script_path(&hex_push);
         let hex_hello_s = plain_script_path(&hex_hello);
         let b32_s = plain_script_path(&b32);
+        let b32_hello_s = plain_script_path(&b32_hello);
         let dup_s = plain_script_path(&dup);
         let big_s = plain_script_path(&big);
         let names = dir.join(format!("snapif-c30-names-{pid}.txt"));
@@ -14667,6 +14675,11 @@ mod tests {
             format!("eval \"$(basenc --base16 --decode {hex_push_s})\""),
             format!("eval \"$(basenc --base16 -d < {hex_push_s})\""),
             format!("eval \"$(gbasenc --base16 -d {hex_push_s})\""),
+            format!("eval \"$(basenc --base32 -d {b32_s})\""),
+            format!("eval \"$(basenc -d --base32 {b32_s})\""),
+            format!("eval \"$(basenc --base32 --decode {b32_s})\""),
+            format!("eval \"$(basenc --base32 -d < {b32_s})\""),
+            format!("eval \"$(gbasenc --base32 -d {b32_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {coded_s})\""
             ),
@@ -15070,6 +15083,8 @@ mod tests {
             format!("eval \"$(xxd -r -p < {hex_hello_s})\""),
             format!("eval \"$(basenc --base16 -d {hex_hello_s})\""),
             format!("eval \"$(gbasenc --base16 -d {hex_hello_s})\""),
+            format!("eval \"$(basenc --base32 -d {b32_hello_s})\""),
+            format!("eval \"$(gbasenc --base32 -d {b32_hello_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {echo_b64_s})\""
             ),
