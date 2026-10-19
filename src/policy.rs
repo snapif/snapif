@@ -471,7 +471,10 @@ fn check_action(
 /// `openssl enc -a -d -in` print that text too. A redirect into
 /// `openssl base64 -d` does too. `python3 -c` that writes
 /// `base64.b64decode` of that file prints the decoded text. `ruby -e`
-/// `unpack1("m")` of `File.binread` prints it too.
+/// `unpack1("m")` of `File.binread` prints it too. `php -r` that
+/// echoes `base64_decode` of `file_get_contents` prints it. Node
+/// `Buffer.from` of that file with `"base64"` prints it. `perl
+/// -MMIME::Base64` that prints `decode_base64` prints it too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
@@ -9907,7 +9910,7 @@ fn line_print_run(
         return Run::Unknown;
     };
     let produced = source_text(file.as_deref(), input, depth, substitutions);
-    if ruby_b64_script(name, args) {
+    if ruby_b64_script(name, args) || perl_b64_script(name, args) {
         decode_produced(produced)
     } else {
         produced
@@ -10017,6 +10020,15 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
+        if let Some(rest) = arg.strip_prefix("-M")
+            && !rest.is_empty()
+            && rest
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_'))
+        {
+            index += 1;
+            continue;
+        }
         if arg.starts_with('-') && arg != "-" {
             return None;
         }
@@ -10031,6 +10043,11 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
         Some(text) if loop_lines && line_prints_current(&text) => Some(files.first().cloned()),
         Some(text)
             if command_basename(name) == "ruby" && ruby_reads_argv0(&text) && files.len() == 1 =>
+        {
+            Some(files.first().cloned())
+        }
+        Some(text)
+            if command_basename(name) == "perl" && perl_b64_text(&text) && files.len() == 1 =>
         {
             Some(files.first().cloned())
         }
@@ -10070,6 +10087,21 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "printFile.binread(ARGV[0]).unpack1(\"m\")"
             | "printFile.binread(ARGV[0]).unpack1('m')"
     )
+}
+
+fn perl_b64_text(script: &str) -> bool {
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    matches!(
+        compact.as_str(),
+        "printdecode_base64(<>)" | "printdecode_base64(<>);"
+    )
+}
+
+fn perl_b64_script(name: &str, args: &[String]) -> bool {
+    if command_basename(name) != "perl" {
+        return false;
+    }
+    flag_script(args).is_some_and(perl_b64_text)
 }
 
 fn ruby_b64_script(name: &str, args: &[String]) -> bool {
@@ -10196,7 +10228,12 @@ fn node_cat_run(
     let Some(file) = node_cat_query(args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    let produced = source_text(file.as_deref(), input, depth, substitutions);
+    if node_b64_script(args) {
+        decode_produced(produced)
+    } else {
+        produced
+    }
 }
 
 fn node_cat_query(args: &[String]) -> Option<Option<String>> {
@@ -10235,7 +10272,17 @@ fn node_reads_argv1(script: &str) -> bool {
             | "console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))"
             | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
+            | "process.stdout.write(Buffer.from(require(\"fs\").readFileSync(process.argv[1]).toString(),\"base64\"))"
     )
+}
+
+fn node_b64_script(args: &[String]) -> bool {
+    let Some(script) = flag_script(args) else {
+        return false;
+    };
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    compact
+        == "process.stdout.write(Buffer.from(require(\"fs\").readFileSync(process.argv[1]).toString(),\"base64\"))"
 }
 
 fn php_cat_run(
@@ -10247,7 +10294,12 @@ fn php_cat_run(
     let Some(file) = php_cat_query(args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    let produced = source_text(file.as_deref(), input, depth, substitutions);
+    if php_b64_script(args) {
+        decode_produced(produced)
+    } else {
+        produced
+    }
 }
 
 fn php_cat_query(args: &[String]) -> Option<Option<String>> {
@@ -10287,7 +10339,23 @@ fn php_reads_argv1(script: &str) -> bool {
             | "readfile($argv[1]);"
             | "echoreadfile($argv[1]);"
             | "system(file_get_contents($argv[1]));"
+            | "echobase64_decode(file_get_contents($argv[1]));"
     )
+}
+
+fn php_b64_script(args: &[String]) -> bool {
+    let mut index = 0usize;
+    while index < args.len() {
+        if args[index] == "-r" {
+            let Some(script) = args.get(index + 1) else {
+                return false;
+            };
+            let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+            return compact == "echobase64_decode(file_get_contents($argv[1]));";
+        }
+        index += 1;
+    }
+    false
 }
 
 fn base64_run(
@@ -14210,6 +14278,13 @@ mod tests {
             format!(
                 r#"eval "$(python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],"rb").read()))' {coded_s})""#
             ),
+            format!(
+                "eval \"$(php -r 'echo base64_decode(file_get_contents($argv[1]));' {coded_s})\""
+            ),
+            format!(
+                r#"eval "$(node -e 'process.stdout.write(Buffer.from(require("fs").readFileSync(process.argv[1]).toString(),"base64"))' {coded_s})""#
+            ),
+            format!("eval \"$(perl -MMIME::Base64 -0777 -e 'print decode_base64(<>)' {coded_s})\""),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
@@ -14585,6 +14660,15 @@ mod tests {
             ),
             format!(
                 r#"eval "$(python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],"rb").read()))' {echo_b64_s})""#
+            ),
+            format!(
+                "eval \"$(php -r 'echo base64_decode(file_get_contents($argv[1]));' {echo_b64_s})\""
+            ),
+            format!(
+                r#"eval "$(node -e 'process.stdout.write(Buffer.from(require("fs").readFileSync(process.argv[1]).toString(),"base64"))' {echo_b64_s})""#
+            ),
+            format!(
+                "eval \"$(perl -MMIME::Base64 -0777 -e 'print decode_base64(<>)' {echo_b64_s})\""
             ),
             format!("eval \"$(gbase32 -d {echo_s})\""),
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
