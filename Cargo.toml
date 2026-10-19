@@ -40,6 +40,7 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 tokio = { version = "1", optional = true, features = ["rt", "macros", "time"] }
 url = { version = "2", optional = true }
 clap = { version = "4", optional = true, features = ["derive"] }
+flate2 = "1.1.10"
 
 [dev-dependencies]
 pollster = "1.0"

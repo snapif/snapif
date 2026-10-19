@@ -484,7 +484,9 @@ fn check_action(
 /// `xxd -r -p` prints the
 /// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
-/// `basenc`. `python3 -m base64 -d` and `-u` print it too. `ruby -rbase64`
+/// `basenc`. `python3 -m base64 -d` and `-u` print it too.
+/// `gzip -dc`, `gunzip -c`, and `gzcat` print the decompressed text.
+/// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
@@ -6382,6 +6384,142 @@ fn peel_stage_wrappers(words: &mut Vec<String>) {
     }
 }
 
+enum ScriptBytes {
+    Bytes(Vec<u8>),
+    Unscanned,
+}
+
+fn load_script_bytes(path: &str) -> Option<ScriptBytes> {
+    let mut file = open_script_candidate(path)?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if meta.len() > SCRIPT_FILE_CAP {
+        return Some(ScriptBytes::Unscanned);
+    }
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut chunk).ok()?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() as u64 > SCRIPT_FILE_CAP {
+            return Some(ScriptBytes::Unscanned);
+        }
+    }
+    Some(ScriptBytes::Bytes(buf))
+}
+
+struct GzipQuery {
+    file: Option<String>,
+}
+
+fn gzip_decode(bytes: &[u8]) -> Option<String> {
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    String::from_utf8(out).ok()
+}
+
+fn gzip_query(name: &str, args: &[String]) -> Option<GzipQuery> {
+    let mut decode = matches!(name, "gunzip" | "gzcat" | "zcat");
+    let mut stdout = matches!(name, "gzcat" | "zcat");
+    let mut index = 0usize;
+    let mut file = None;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if matches!(arg.as_str(), "-d" | "--decompress" | "--uncompress") {
+            decode = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-c" | "--stdout" | "--to-stdout") {
+            stdout = true;
+            index += 1;
+            continue;
+        }
+        if matches!(
+            arg.as_str(),
+            "-f" | "--force"
+                | "-k"
+                | "--keep"
+                | "-q"
+                | "--quiet"
+                | "-n"
+                | "--no-name"
+                | "-N"
+                | "--name"
+        ) {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-')
+            && !rest.is_empty()
+            && !rest.starts_with('-')
+        {
+            for byte in rest.bytes() {
+                match byte {
+                    b'd' => decode = true,
+                    b'c' => stdout = true,
+                    b'f' | b'k' | b'q' | b'n' | b'N' => {}
+                    _ => return None,
+                }
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') || file.is_some() {
+            return None;
+        }
+        file = Some(arg.clone());
+        index += 1;
+    }
+    if index < args.len() {
+        if file.is_some() || args.len() - index != 1 {
+            return None;
+        }
+        file = Some(args[index].clone());
+    }
+    if !decode || !stdout {
+        return None;
+    }
+    Some(GzipQuery { file })
+}
+
+fn gzip_run(
+    name: &str,
+    args: &[String],
+    input: Option<&str>,
+    _depth: u32,
+    _substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = gzip_query(name, args) else {
+        return Run::Unknown;
+    };
+    let bytes = if let Some(path) = query.file.as_deref() {
+        match load_script_bytes(path) {
+            Some(ScriptBytes::Bytes(bytes)) => bytes,
+            Some(ScriptBytes::Unscanned) => return Run::Unscanned,
+            None => return Run::Unknown,
+        }
+    } else if let Some(text) = input {
+        text.as_bytes().to_vec()
+    } else {
+        return Run::Unknown;
+    };
+    let Some(text) = gzip_decode(&bytes) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
 fn run_builtin(
     words: &[String],
     input: Option<&str>,
@@ -6432,6 +6570,7 @@ fn run_builtin(
         "xxd" => xxd_run(args, input, depth, substitutions),
         "openssl" => openssl_b64_run(args, input, depth, substitutions),
         "base32" => base32_run(args, input, depth, substitutions),
+        "gzip" | "gunzip" | "gzcat" | "zcat" => gzip_run(&name, args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
         "perl" | "ruby" => line_print_run(&words[0], args, input, depth, substitutions),
         "python" | "python3" => python_cat_run(args, input, depth, substitutions),
@@ -11262,6 +11401,9 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "uudecode" => uudecode_query(args).is_some_and(|file| file.is_none()),
         "xxd" => xxd_query(args).is_some_and(|file| file.is_none()),
         "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
+        "gzip" | "gunzip" | "gzcat" | "zcat" => {
+            gzip_query(&name, args).is_some_and(|query| query.file.is_none())
+        }
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
         }
@@ -14728,6 +14870,13 @@ mod tests {
     /// and `bash -s` do not read a later path.
     #[test]
     fn script_file_matches_the_command_bash_runs() {
+        fn gzip_bytes(text: &str) -> Vec<u8> {
+            use std::io::Write;
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            encoder.write_all(text.as_bytes()).expect("gzip write");
+            encoder.finish().expect("gzip finish")
+        }
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
         let dir = std::env::temp_dir();
         let pid = std::process::id();
@@ -14778,6 +14927,10 @@ mod tests {
         std::fs::write(&b58, "7MpYVGLu1NHfckZT9eDc9bocU71gu\n").expect("b58");
         let b58_hello = dir.join(format!("snapif-c38-b58-hello-{pid}.txt"));
         std::fs::write(&b58_hello, "S9DsdjxTzkNw3uT\n").expect("b58 hello");
+        let gz = dir.join(format!("snapif-c39-gz-{pid}.gz"));
+        std::fs::write(&gz, gzip_bytes("git push origin main\n")).expect("gz");
+        let gz_hello = dir.join(format!("snapif-c39-gz-hello-{pid}.gz"));
+        std::fs::write(&gz_hello, gzip_bytes("echo hello\n")).expect("gz hello");
         let b2m = dir.join(format!("snapif-c38-b2m-{pid}.txt"));
         std::fs::write(
             &b2m,
@@ -14825,6 +14978,8 @@ mod tests {
         let z85_s = plain_script_path(&z85);
         let z85_hello_s = plain_script_path(&z85_hello);
         let b58_s = plain_script_path(&b58);
+        let gz_s = plain_script_path(&gz);
+        let gz_hello_s = plain_script_path(&gz_hello);
         let b58_hello_s = plain_script_path(&b58_hello);
         let b2m_s = plain_script_path(&b2m);
         let b2l_s = plain_script_path(&b2l);
@@ -15028,6 +15183,12 @@ mod tests {
             format!("eval \"$(python3 -m base64 -d {coded_s})\""),
             format!("eval \"$(python3 -m base64 -d < {coded_s})\""),
             format!("eval \"$(python3 -m base64 -u {coded_s})\""),
+            format!("eval \"$(gzip -dc {gz_s})\""),
+            format!("eval \"$(gzip -d -c {gz_s})\""),
+            format!("eval \"$(gzip -cd {gz_s})\""),
+            format!("eval \"$(gunzip -c {gz_s})\""),
+            format!("eval \"$(gzcat {gz_s})\""),
+            format!("eval \"$(zcat {gz_s})\""),
             format!("eval \"$(python3 -m base64 -u < {coded_s})\""),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
@@ -15450,6 +15611,10 @@ mod tests {
             format!("eval \"$(python3 -m base64 -d {echo_b64_s})\""),
             format!("eval \"$(python3 -m base64 -d < {echo_b64_s})\""),
             format!("eval \"$(python3 -m base64 -u {echo_b64_s})\""),
+            format!("eval \"$(gzip -dc {gz_hello_s})\""),
+            format!("eval \"$(zcat {gz_hello_s})\""),
+            format!("eval \"$(gzip -d {gz_s})\""),
+            format!("eval \"$(gzip -c {push_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
