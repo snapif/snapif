@@ -507,6 +507,9 @@ fn check_action(
 /// `stream_get_contents` of `bzopen` prints a bzip2 payload.
 /// `gzip.open` in text mode, `gzfile`, and `compress.zlib://` print
 /// a gzip payload. `GzipReader` `readlines` prints it too.
+/// `bz2.open` and `lzma.open` in text mode print those payloads.
+/// `gzread` of `gzopen` and `stream_get_contents` of `gzopen` print
+/// a gzip payload.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -11584,9 +11587,9 @@ fn python_codec_query(args: &[String]) -> Option<(PyCodec, String)> {
         | "importsys,bz2;sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],\"rb\").read())"
         | "importsys,bz2;sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],'rb').read())"
         | "importbz2,sys;sys.stdout.buffer.write(bz2.BZ2Decompressor().decompress(open(sys.argv[1],\"rb\").read()))"
-        | "importbz2,sys;sys.stdout.buffer.write(bz2.BZ2Decompressor().decompress(open(sys.argv[1],'rb').read()))" => {
-            PyCodec::Bzip2
-        }
+        | "importbz2,sys;sys.stdout.buffer.write(bz2.BZ2Decompressor().decompress(open(sys.argv[1],'rb').read()))"
+        | "importsys,bz2;sys.stdout.write(bz2.open(sys.argv[1],\"rt\").read())"
+        | "importsys,bz2;sys.stdout.write(bz2.open(sys.argv[1],'rt').read())" => PyCodec::Bzip2,
         "importsys,lzma;sys.stdout.buffer.write(lzma.open(sys.argv[1],\"rb\").read())"
         | "importsys,lzma;sys.stdout.buffer.write(lzma.open(sys.argv[1],'rb').read())"
         | "importlzma,sys;sys.stdout.buffer.write(lzma.decompress(open(sys.argv[1],\"rb\").read()))"
@@ -11595,9 +11598,9 @@ fn python_codec_query(args: &[String]) -> Option<(PyCodec, String)> {
         | "importsys,lzma;sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],\"rb\").read())"
         | "importsys,lzma;sys.stdout.buffer.write(lzma.LZMAFile(sys.argv[1],'rb').read())"
         | "importlzma,sys;sys.stdout.buffer.write(lzma.LZMADecompressor().decompress(open(sys.argv[1],\"rb\").read()))"
-        | "importlzma,sys;sys.stdout.buffer.write(lzma.LZMADecompressor().decompress(open(sys.argv[1],'rb').read()))" => {
-            PyCodec::Lzma
-        }
+        | "importlzma,sys;sys.stdout.buffer.write(lzma.LZMADecompressor().decompress(open(sys.argv[1],'rb').read()))"
+        | "importsys,lzma;sys.stdout.write(lzma.open(sys.argv[1],\"rt\").read())"
+        | "importsys,lzma;sys.stdout.write(lzma.open(sys.argv[1],'rt').read())" => PyCodec::Lzma,
         "importsys,zlib;sys.stdout.buffer.write(zlib.decompress(open(sys.argv[1],\"rb\").read()))"
         | "importsys,zlib;sys.stdout.buffer.write(zlib.decompress(open(sys.argv[1],'rb').read()))" => {
             PyCodec::Zlib
@@ -12027,7 +12030,9 @@ fn php_gzip_query(args: &[String]) -> Option<String> {
     if files.len() != 1
         || (compact != "echogzdecode(file_get_contents($argv[1]));"
             && compact != "echoimplode(\"\",gzfile($argv[1]));"
-            && compact != "echofile_get_contents(\"compress.zlib://\".$argv[1]);")
+            && compact != "echofile_get_contents(\"compress.zlib://\".$argv[1]);"
+            && compact != "echostream_get_contents(gzopen($argv[1],\"r\"));"
+            && compact != "echogzread(gzopen($argv[1],\"r\"),4096);")
     {
         return None;
     }
@@ -17274,6 +17279,20 @@ mod tests {
                 r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt').read())" {gz_s})""#
             ),
             format!(
+                r#"eval "$(python3 -c "import sys,bz2; sys.stdout.write(bz2.open(sys.argv[1],'rt').read())" {bz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,bz2; sys.stdout.write(bz2.open(sys.argv[1],"rt").read())' {bz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.write(lzma.open(sys.argv[1],'rt').read())" {xz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,lzma; sys.stdout.write(lzma.open(sys.argv[1],"rt").read())' {xz_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo stream_get_contents(gzopen($argv[1],"r"));' {gz_s})""#),
+            format!(r#"eval "$(php -r 'echo gzread(gzopen($argv[1],"r"), 4096);' {gz_s})""#),
+            format!(
                 r#"eval "$(python3 -c 'import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],"rt").read())' {gz_s})""#
             ),
             format!(
@@ -17947,6 +17966,22 @@ mod tests {
             format!(
                 r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt').read())" {gz_hello_s})""#
             ),
+            format!(
+                r#"eval "$(python3 -c "import sys,bz2; sys.stdout.write(bz2.open(sys.argv[1],'rt').read())" {bz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,bz2; sys.stdout.write(bz2.open(sys.argv[1],"rt").read())' {bz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys,lzma; sys.stdout.write(lzma.open(sys.argv[1],'rt').read())" {xz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,lzma; sys.stdout.write(lzma.open(sys.argv[1],"rt").read())' {xz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(php -r 'echo stream_get_contents(gzopen($argv[1],"r"));' {gz_hello_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo gzread(gzopen($argv[1],"r"), 4096);' {gz_hello_s})""#),
             format!(
                 r#"eval "$(python3 -c 'import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],"rt").read())' {gz_hello_s})""#
             ),
