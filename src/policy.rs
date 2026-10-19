@@ -480,7 +480,7 @@ fn check_action(
 /// the decoded hex. `basenc --base32 -d` prints the decoded text.
 /// `basenc --base64url`, `--base32hex`, `--base2msbf`, `--base2lsbf`,
 /// and `--z85` do too. `--base58` does too. `-i` and `-w0` do not
-/// change that decode.
+/// change that decode. A separate `--wrap 0` does too.
 /// `xxd -r -p` prints the
 /// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
@@ -10721,6 +10721,14 @@ fn basenc_query(args: &[String]) -> Option<BasencQuery> {
             index += 1;
             continue;
         }
+        if arg == "--wrap" {
+            let next = args.get(index + 1)?;
+            if next.is_empty() || !next.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
         if let Some(cols) = arg.strip_prefix("--wrap=") {
             if cols.is_empty() || !cols.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
@@ -15005,6 +15013,7 @@ mod tests {
             format!("eval \"$(basenc --base64 -d -i {coded_s})\""),
             format!("eval \"$(basenc --base64 -d -w0 {coded_s})\""),
             format!("eval \"$(basenc --base64 -d --wrap=0 {coded_s})\""),
+            format!("eval \"$(basenc --base64 -d --wrap 0 {coded_s})\""),
             format!("eval \"$(basenc --base58 -d {b58_s})\""),
             format!("eval \"$(gbasenc --base58 -d {b58_s})\""),
             format!(
@@ -15426,6 +15435,7 @@ mod tests {
             format!("eval \"$(basenc --base2lsbf -d {b2l_hello_s})\""),
             format!("eval \"$(basenc --z85 -d {z85_hello_s})\""),
             format!("eval \"$(basenc --base64 -d -i {echo_b64_s})\""),
+            format!("eval \"$(basenc --base64 -d --wrap 0 {echo_b64_s})\""),
             format!("eval \"$(basenc --base58 -d {b58_hello_s})\""),
             format!("eval \"$(base64 -d -w0 {echo_b64_s})\""),
             format!("eval \"$(base32 -d -i {b32_hello_s})\""),
