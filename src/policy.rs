@@ -478,7 +478,8 @@ fn check_action(
 /// `basenc --base64 -d` prints that text. `basenc --base16 -d` prints
 /// the decoded hex. `basenc --base32 -d` prints the decoded text.
 /// `basenc --base64url`, `--base32hex`, `--base2msbf`, `--base2lsbf`,
-/// and `--z85` do too.
+/// and `--z85` do too. `--base58` does too. `-i` and `-w0` do not
+/// change that decode.
 /// `xxd -r -p` prints the
 /// decoded text. `uudecode -p` prints the
 /// decoded text. `gbasenc` is that same
@@ -10449,6 +10450,7 @@ enum BasencKind {
     Base2Msb,
     Base2Lsb,
     Z85,
+    Base58,
 }
 
 struct BasencQuery {
@@ -10575,11 +10577,47 @@ fn basenc_run(
         BasencKind::Base2Msb => base2_decode(&raw, true),
         BasencKind::Base2Lsb => base2_decode(&raw, false),
         BasencKind::Z85 => z85_decode(&raw),
+        BasencKind::Base58 => base58_decode(&raw),
     };
     let Some(text) = text else {
         return Run::Unknown;
     };
     Run::Produced { text, ok: true }
+}
+
+fn base58_decode(text: &str) -> Option<String> {
+    const ALPHA: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut zeros = 0usize;
+    let mut digits = Vec::new();
+    let mut number = false;
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if !number && byte == b'1' {
+            zeros += 1;
+            continue;
+        }
+        number = true;
+        let pos = ALPHA.iter().position(|ch| *ch == byte)?;
+        digits.push(pos as u32);
+    }
+    let mut acc = Vec::new();
+    for digit in digits {
+        let mut carry = digit;
+        for byte in acc.iter_mut().rev() {
+            let current = u32::from(*byte) * 58 + carry;
+            *byte = (current & 0xff) as u8;
+            carry = current >> 8;
+        }
+        while carry > 0 {
+            acc.insert(0, (carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    let mut out = vec![0u8; zeros];
+    out.extend(acc);
+    String::from_utf8(out).ok()
 }
 
 fn basenc_query(args: &[String]) -> Option<BasencQuery> {
@@ -10598,6 +10636,31 @@ fn basenc_query(args: &[String]) -> Option<BasencQuery> {
             index += 1;
             continue;
         }
+        if arg == "-i" || arg == "--ignore-garbage" {
+            index += 1;
+            continue;
+        }
+        if let Some(cols) = arg.strip_prefix("--wrap=") {
+            if cols.is_empty() || !cols.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(cols) = arg.strip_prefix("-w") {
+            if cols.is_empty() {
+                let next = args.get(index + 1)?;
+                if next.is_empty() || !next.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return None;
+                }
+                index += 2;
+            } else if !cols.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            } else {
+                index += 1;
+            }
+            continue;
+        }
         let next_kind = match arg.as_str() {
             "--base64" => Some(BasencKind::Base64),
             "--base64url" => Some(BasencKind::Base64Url),
@@ -10607,6 +10670,7 @@ fn basenc_query(args: &[String]) -> Option<BasencQuery> {
             "--base2msbf" => Some(BasencKind::Base2Msb),
             "--base2lsbf" => Some(BasencKind::Base2Lsb),
             "--z85" => Some(BasencKind::Z85),
+            "--base58" => Some(BasencKind::Base58),
             _ => None,
         };
         if let Some(next) = next_kind {
@@ -14608,6 +14672,10 @@ mod tests {
         std::fs::write(&z85, "xk8DgAclknaA8pmxk8lazddc@\n").expect("z85");
         let z85_hello = dir.join(format!("snapif-c38-z85-hello-{pid}.txt"));
         std::fs::write(&z85_hello, "wN/y(aztt5y&oT/\n").expect("z85 hello");
+        let b58 = dir.join(format!("snapif-c38-b58-{pid}.txt"));
+        std::fs::write(&b58, "7MpYVGLu1NHfckZT9eDc9bocU71gu\n").expect("b58");
+        let b58_hello = dir.join(format!("snapif-c38-b58-hello-{pid}.txt"));
+        std::fs::write(&b58_hello, "S9DsdjxTzkNw3uT\n").expect("b58 hello");
         let b2m = dir.join(format!("snapif-c38-b2m-{pid}.txt"));
         std::fs::write(
             &b2m,
@@ -14654,6 +14722,8 @@ mod tests {
         let b32hex_hello_s = plain_script_path(&b32hex_hello);
         let z85_s = plain_script_path(&z85);
         let z85_hello_s = plain_script_path(&z85_hello);
+        let b58_s = plain_script_path(&b58);
+        let b58_hello_s = plain_script_path(&b58_hello);
         let b2m_s = plain_script_path(&b2m);
         let b2l_s = plain_script_path(&b2l);
         let b2m_hello_s = plain_script_path(&b2m_hello);
@@ -14834,6 +14904,11 @@ mod tests {
             format!("eval \"$(basenc --base2lsbf -d {b2l_s})\""),
             format!("eval \"$(basenc --z85 -d {z85_s})\""),
             format!("eval \"$(gbasenc --base64url -d {coded_s})\""),
+            format!("eval \"$(basenc --base64 -d -i {coded_s})\""),
+            format!("eval \"$(basenc --base64 -d -w0 {coded_s})\""),
+            format!("eval \"$(basenc --base64 -d --wrap=0 {coded_s})\""),
+            format!("eval \"$(basenc --base58 -d {b58_s})\""),
+            format!("eval \"$(gbasenc --base58 -d {b58_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {coded_s})\""
             ),
@@ -15244,6 +15319,8 @@ mod tests {
             format!("eval \"$(basenc --base2msbf -d {b2m_hello_s})\""),
             format!("eval \"$(basenc --base2lsbf -d {b2l_hello_s})\""),
             format!("eval \"$(basenc --z85 -d {z85_hello_s})\""),
+            format!("eval \"$(basenc --base64 -d -i {echo_b64_s})\""),
+            format!("eval \"$(basenc --base58 -d {b58_hello_s})\""),
             format!(
                 "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {echo_b64_s})\""
             ),
