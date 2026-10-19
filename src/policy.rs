@@ -562,7 +562,8 @@ fn check_action(
 /// or prints `file_get_contents` print the file. A node one-liner that
 /// `console.log`s `readFileSync` prints it too.
 /// `os.system(open(sys.argv[1]).read())`, node `execSync` of
-/// `readFileSync`, `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
+/// `readFileSync`, `File.binread`, `Path.read_bytes`,
+/// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
 /// the printed text. `mapfile` and `read < path` set a value for a later
@@ -11544,6 +11545,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
     matches!(
         compact.as_str(),
         "printFile.read(ARGV[0])"
+            | "printFile.binread(ARGV[0])"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "printARGF.read"
@@ -12043,6 +12045,7 @@ fn python_reads_argv1(script: &str) -> bool {
     matches!(
         compact.as_str(),
         "importpathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())"
+            | "importpathlib,sys;sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())"
             | "importsys;sys.stdout.write(open(sys.argv[1]).read())"
             | "importsys;print(open(sys.argv[1]).read())"
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
@@ -12139,6 +12142,8 @@ fn node_reads_argv1(script: &str) -> bool {
         "process.stdout.write(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))"
+            | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1]))"
+            | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1]))"
             | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "process.stdout.write(Buffer.from(require(\"fs\").readFileSync(process.argv[1]).toString(),\"base64\"))"
     )
@@ -17285,6 +17290,16 @@ mod tests {
             format!(
                 "eval \"$(python3 -c 'import pathlib,sys; sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())' {push_s})\""
             ),
+            format!(
+                r#"eval "$(python3 -c "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())" {push_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {push_s})""#),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e 'const fs=require("fs"); process.stdout.write(fs.readFileSync(process.argv[1]))' {push_s})""#
+            ),
             format!("eval \"$(base32 -d {b32_s})\""),
             format!("eval \"$(base32 -d -i {b32_s})\""),
             format!("eval \"$(base32 -d --ignore-garbage {b32_s})\""),
@@ -18534,6 +18549,16 @@ mod tests {
             format!("eval \"$(ruby -e 'puts IO.read(ARGV[0])' {echo_s})\""),
             format!(
                 "eval \"$(python3 -c 'import sys; from pathlib import Path; print(Path(sys.argv[1]).read_text())' {echo_s})\""
+            ),
+            format!(
+                r#"eval "$(python3 -c "import pathlib,sys; sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())" {echo_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'print File.binread(ARGV[0])' {echo_s})""#),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e 'const fs=require("fs"); process.stdout.write(fs.readFileSync(process.argv[1]))' {echo_s})""#
             ),
             format!(
                 "eval \"$(node -e 'console.log(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {echo_s})\""
