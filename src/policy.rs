@@ -489,7 +489,9 @@ fn check_action(
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
-/// `brotli -dc` prints a brotli stream.
+/// `brotli -dc` prints a brotli stream. `pzstd -dc` prints a zstd
+/// frame. `tar -xOf` prints the named member. `unzip -p` prints that
+/// member.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -2977,6 +2979,7 @@ fn stage_command_name(token: &str) -> String {
         "gpr" => "pr".to_string(),
         "gtr" => "tr".to_string(),
         "gtee" => "tee".to_string(),
+        "gtar" => "tar".to_string(),
         "gbase64" => "base64".to_string(),
         "gbasenc" => "basenc".to_string(),
         "gbase32" => "base32".to_string(),
@@ -6449,7 +6452,25 @@ fn lzma_decode(bytes: &[u8]) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn zstd_frame(bytes: &[u8]) -> &[u8] {
+    let mut rest = bytes;
+    while rest.len() >= 8 {
+        let magic = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]);
+        if !(0x184D_2A50..=0x184D_2A5F).contains(&magic) {
+            break;
+        }
+        let size = u32::from_le_bytes([rest[4], rest[5], rest[6], rest[7]]) as usize;
+        let next = 8 + size;
+        if rest.len() < next {
+            break;
+        }
+        rest = &rest[next..];
+    }
+    rest
+}
+
 fn zstd_decode(bytes: &[u8]) -> Option<String> {
+    let bytes = zstd_frame(bytes);
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(bytes).ok()?;
     let mut out = Vec::new();
     std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
@@ -6758,6 +6779,238 @@ fn decoded_bytes_run(
     Run::Produced { text, ok: true }
 }
 
+struct ArchiveQuery {
+    archive: String,
+    member: Option<String>,
+}
+
+fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
+    let mut extract = false;
+    let mut stdout = false;
+    let mut archive = None;
+    let mut index = 0usize;
+    let mut members = Vec::new();
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-f" || arg == "--file" {
+            archive = Some(args.get(index + 1)?.clone());
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix("--file=") {
+            if rest.is_empty() {
+                return None;
+            }
+            archive = Some(rest.to_string());
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-x" | "--extract" | "--get") {
+            extract = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-O" | "--to-stdout") {
+            stdout = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-v" | "--verbose") {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-')
+            && !rest.is_empty()
+            && !rest.starts_with('-')
+        {
+            let bytes = rest.as_bytes();
+            let mut cursor = 0usize;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'x' => extract = true,
+                    b'O' => stdout = true,
+                    b'v' => {}
+                    b'f' => {
+                        let glued = &rest[cursor + 1..];
+                        if glued.is_empty() {
+                            archive = Some(args.get(index + 1)?.clone());
+                            index += 1;
+                        } else {
+                            archive = Some(glued.to_string());
+                        }
+                        break;
+                    }
+                    _ => return None,
+                }
+                cursor += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        members.push(arg.clone());
+        index += 1;
+    }
+    members.extend(args[index..].iter().cloned());
+    if !extract || !stdout || members.len() > 1 {
+        return None;
+    }
+    let archive = archive?;
+    Some(ArchiveQuery {
+        archive,
+        member: members.into_iter().next(),
+    })
+}
+
+fn member_matches(path: &str, member: &str) -> bool {
+    path == member || path.rsplit('/').next() == Some(member)
+}
+
+fn tar_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
+    let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+    let mut out = Vec::new();
+    let mut found = false;
+    for entry in archive.entries().ok()? {
+        let Ok(mut entry) = entry else {
+            break;
+        };
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path().ok()?;
+        let path = path.to_string_lossy();
+        if path.rsplit('/').next().unwrap_or(&path).starts_with("._") {
+            continue;
+        }
+        if let Some(member) = member
+            && !member_matches(&path, member)
+        {
+            continue;
+        }
+        std::io::Read::read_to_end(&mut entry, &mut out).ok()?;
+        found = true;
+        if member.is_some() {
+            break;
+        }
+    }
+    if !found {
+        return None;
+    }
+    String::from_utf8(out).ok()
+}
+
+fn unzip_query(args: &[String]) -> Option<ArchiveQuery> {
+    let mut stdout = false;
+    let mut index = 0usize;
+    let mut positionals = Vec::new();
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            index += 1;
+            break;
+        }
+        if arg == "-p" {
+            stdout = true;
+            index += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "-q" | "-qq" | "-o") {
+            index += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-')
+            && !rest.is_empty()
+            && !rest.starts_with('-')
+            && rest.bytes().all(|byte| matches!(byte, b'p' | b'q' | b'o'))
+            && rest.as_bytes().contains(&b'p')
+        {
+            stdout = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        positionals.push(arg.clone());
+        index += 1;
+    }
+    positionals.extend(args[index..].iter().cloned());
+    if !stdout || positionals.is_empty() || positionals.len() > 2 {
+        return None;
+    }
+    Some(ArchiveQuery {
+        archive: positionals.remove(0),
+        member: positionals.into_iter().next(),
+    })
+}
+
+fn unzip_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut out = Vec::new();
+    if let Some(member) = member {
+        let mut file = archive.by_name(member).ok()?;
+        std::io::Read::read_to_end(&mut file, &mut out).ok()?;
+    } else {
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).ok()?;
+            if file.is_dir() {
+                continue;
+            }
+            std::io::Read::read_to_end(&mut file, &mut out).ok()?;
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    String::from_utf8(out).ok()
+}
+
+fn produced_archive(path: &str, text: impl FnOnce(&[u8]) -> Option<String>) -> Run {
+    let bytes = match load_script_bytes(path) {
+        Some(ScriptBytes::Bytes(bytes)) => bytes,
+        Some(ScriptBytes::Unscanned) => return Run::Unscanned,
+        None => return Run::Unknown,
+    };
+    let Some(text) = text(&bytes) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn tar_run(
+    args: &[String],
+    _input: Option<&str>,
+    _depth: u32,
+    _substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = tar_query(args) else {
+        return Run::Unknown;
+    };
+    produced_archive(&query.archive, |bytes| {
+        tar_text(bytes, query.member.as_deref())
+    })
+}
+
+fn unzip_run(
+    args: &[String],
+    _input: Option<&str>,
+    _depth: u32,
+    _substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(query) = unzip_query(args) else {
+        return Run::Unknown;
+    };
+    produced_archive(&query.archive, |bytes| {
+        unzip_text(bytes, query.member.as_deref())
+    })
+}
+
 fn run_builtin(
     words: &[String],
     input: Option<&str>,
@@ -6813,7 +7066,11 @@ fn run_builtin(
         "xz" | "unxz" | "xzcat" | "lzma" | "unlzma" | "lzcat" => {
             xz_run(&name, args, input, depth, substitutions)
         }
-        "zstd" | "unzstd" | "zstdcat" => zstd_run(&name, args, input, depth, substitutions),
+        "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
+            zstd_run(&name, args, input, depth, substitutions)
+        }
+        "tar" => tar_run(args, input, depth, substitutions),
+        "unzip" => unzip_run(args, input, depth, substitutions),
         "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, substitutions),
         "brotli" => brotli_run(&name, args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
@@ -11655,9 +11912,11 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "xz" | "unxz" | "xzcat" | "lzma" | "unlzma" | "lzcat" => {
             xz_query(&name, args).is_some_and(|query| query.file.is_none())
         }
-        "zstd" | "unzstd" | "zstdcat" => {
+        "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
             zstd_query(&name, args).is_some_and(|query| query.file.is_none())
         }
+        "tar" => tar_query(args).is_some_and(|query| query.archive == "-"),
+        "unzip" => unzip_query(args).is_some_and(|query| query.archive == "-"),
         "lz4" | "unlz4" | "lz4cat" => {
             lz4_query(&name, args).is_some_and(|query| query.file.is_none())
         }
@@ -15154,6 +15413,11 @@ mod tests {
             lzma_rs::lzma_compress(&mut input, &mut out).expect("lzma");
             out
         }
+        fn pzstd_bytes(text: &str) -> Vec<u8> {
+            let mut out = vec![0x50, 0x2a, 0x4d, 0x18, 4, 0, 0, 0, 0x22, 0, 0, 0];
+            out.extend(zstd_bytes(text));
+            out
+        }
         fn zstd_bytes(text: &str) -> Vec<u8> {
             ruzstd::encoding::compress_to_vec(
                 text.as_bytes(),
@@ -15165,6 +15429,31 @@ mod tests {
             let mut encoder = lz4_flex::frame::FrameEncoder::new(Vec::new());
             encoder.write_all(text.as_bytes()).expect("lz4 write");
             encoder.finish().expect("lz4 finish")
+        }
+        fn tar_bytes(name: &str, text: &str) -> Vec<u8> {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(name).expect("tar path");
+            header.set_size(text.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let mut builder = tar::Builder::new(Vec::new());
+            builder
+                .append(&header, text.as_bytes())
+                .expect("tar append");
+            builder.into_inner().expect("tar finish")
+        }
+        fn zip_bytes(name: &str, text: &str) -> Vec<u8> {
+            use std::io::Write;
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            {
+                let mut writer = zip::ZipWriter::new(&mut cursor);
+                let options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+                writer.start_file(name, options).expect("zip start");
+                writer.write_all(text.as_bytes()).expect("zip write");
+                writer.finish().expect("zip finish");
+            }
+            cursor.into_inner()
         }
         fn brotli_bytes(text: &str) -> &'static [u8] {
             match text {
@@ -15248,6 +15537,16 @@ mod tests {
         std::fs::write(&zst, zstd_bytes("git push origin main\n")).expect("zst");
         let zst_hello = dir.join(format!("snapif-c39-zst-hello-{pid}.zst"));
         std::fs::write(&zst_hello, zstd_bytes("echo hello\n")).expect("zst hello");
+        let pz = dir.join(format!("snapif-c39-pz-{pid}.zst"));
+        std::fs::write(&pz, pzstd_bytes("git push origin main\n")).expect("pz");
+        let tar_file = dir.join(format!("snapif-c39-tar-{pid}.tar"));
+        std::fs::write(&tar_file, tar_bytes("git.txt", "git push origin main\n")).expect("tar");
+        let tar_hello = dir.join(format!("snapif-c39-tar-hello-{pid}.tar"));
+        std::fs::write(&tar_hello, tar_bytes("echo.txt", "echo hello\n")).expect("tar hello");
+        let zip_file = dir.join(format!("snapif-c39-zip-{pid}.zip"));
+        std::fs::write(&zip_file, zip_bytes("git.txt", "git push origin main\n")).expect("zip");
+        let zip_hello = dir.join(format!("snapif-c39-zip-hello-{pid}.zip"));
+        std::fs::write(&zip_hello, zip_bytes("echo.txt", "echo hello\n")).expect("zip hello");
         let lz4_file = dir.join(format!("snapif-c39-lz4-{pid}.lz4"));
         std::fs::write(&lz4_file, lz4_bytes("git push origin main\n")).expect("lz4");
         let lz4_hello = dir.join(format!("snapif-c39-lz4-hello-{pid}.lz4"));
@@ -15313,6 +15612,11 @@ mod tests {
         let lzma_hello_s = plain_script_path(&lzma_hello);
         let zst_s = plain_script_path(&zst);
         let zst_hello_s = plain_script_path(&zst_hello);
+        let pz_s = plain_script_path(&pz);
+        let tar_s = plain_script_path(&tar_file);
+        let tar_hello_s = plain_script_path(&tar_hello);
+        let zip_s = plain_script_path(&zip_file);
+        let zip_hello_s = plain_script_path(&zip_hello);
         let lz4_s = plain_script_path(&lz4_file);
         let lz4_hello_s = plain_script_path(&lz4_hello);
         let br_s = plain_script_path(&br);
@@ -15541,6 +15845,14 @@ mod tests {
             format!("eval \"$(zstd -d -c {zst_s})\""),
             format!("eval \"$(zstdcat {zst_s})\""),
             format!("eval \"$(unzstd -c {zst_s})\""),
+            format!("eval \"$(pzstd -dc {zst_s})\""),
+            format!("eval \"$(pzstd -dc {pz_s})\""),
+            format!("eval \"$(tar -xOf {tar_s})\""),
+            format!("eval \"$(tar -xOf {tar_s} git.txt)\""),
+            format!("eval \"$(tar -xO -f {tar_s} git.txt)\""),
+            format!("eval \"$(gtar -xOf {tar_s} git.txt)\""),
+            format!("eval \"$(unzip -p {zip_s} git.txt)\""),
+            format!("eval \"$(unzip -p {zip_s})\""),
             format!("eval \"$(lz4 -dc {lz4_s})\""),
             format!("eval \"$(lz4 -d -c {lz4_s})\""),
             format!("eval \"$(lz4 -c {lz4_s})\""),
@@ -15979,6 +16291,10 @@ mod tests {
             format!("eval \"$(unlzma -c {lzma_hello_s})\""),
             format!("eval \"$(xz -d {xz_s})\""),
             format!("eval \"$(zstd -dc {zst_hello_s})\""),
+            format!("eval \"$(pzstd -dc {zst_hello_s})\""),
+            format!("eval \"$(tar -xOf {tar_hello_s} echo.txt)\""),
+            format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
+            format!("eval \"$(tar -xOf {tar_s} missing.txt)\""),
             format!("eval \"$(zstd -d {zst_s})\""),
             format!("eval \"$(lz4 -dc {lz4_hello_s})\""),
             format!("eval \"$(lz4 -d {lz4_s})\""),

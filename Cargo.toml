@@ -46,6 +46,8 @@ lzma-rs = "0.3.0"
 ruzstd = "0.9.1"
 lz4_flex = "0.14.0"
 brotli-decompressor = "6.1.0"
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 pollster = "1.0"
