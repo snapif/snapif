@@ -495,6 +495,8 @@ fn check_action(
 /// payload. `unzipSync` prints gzip or zlib. `perl` `Bunzip2` and
 /// `php` `bzdecompress` print a bzip2 payload. Node
 /// `brotliDecompressSync` prints a brotli payload.
+/// Those language readers do not read a compress payload.
+/// `gzip -dc` and `uncompress -c` still do.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -6544,16 +6546,20 @@ fn unix_compress_decode(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn gzip_flate_decode(bytes: &[u8]) -> Option<String> {
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    String::from_utf8(out).ok()
+}
+
 fn gzip_decode(bytes: &[u8]) -> Option<String> {
-    let raw = if bytes.starts_with(&[0x1f, 0x9d]) {
-        unix_compress_decode(bytes)?
+    if bytes.starts_with(&[0x1f, 0x9d]) {
+        let raw = unix_compress_decode(bytes)?;
+        String::from_utf8(raw).ok()
     } else {
-        let mut decoder = flate2::read::GzDecoder::new(bytes);
-        let mut out = Vec::new();
-        std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
-        out
-    };
-    String::from_utf8(raw).ok()
+        gzip_flate_decode(bytes)
+    }
 }
 
 fn zlib_decode(bytes: &[u8]) -> Option<String> {
@@ -6564,7 +6570,7 @@ fn zlib_decode(bytes: &[u8]) -> Option<String> {
 }
 
 fn gzip_or_zlib_decode(bytes: &[u8]) -> Option<String> {
-    gzip_decode(bytes).or_else(|| zlib_decode(bytes))
+    gzip_flate_decode(bytes).or_else(|| zlib_decode(bytes))
 }
 
 fn bzip2_decode(bytes: &[u8]) -> Option<String> {
@@ -11147,7 +11153,7 @@ fn line_print_run(
             input,
             depth,
             substitutions,
-            gzip_decode,
+            gzip_flate_decode,
         );
     }
     if let Some(path) = perl_bzip_query(name, args) {
@@ -11629,7 +11635,7 @@ fn python_cat_run(
 ) -> Run {
     if let Some((codec, path)) = python_codec_query(args) {
         let decode = match codec {
-            PyCodec::Gzip => gzip_decode,
+            PyCodec::Gzip => gzip_flate_decode,
             PyCodec::Bzip2 => bzip2_decode,
             PyCodec::Lzma => xz_or_lzma_decode,
             PyCodec::Zlib => zlib_decode,
@@ -11820,7 +11826,7 @@ fn node_cat_run(
 ) -> Run {
     if let Some((kind, path)) = node_gzip_query(args) {
         let decode = match kind {
-            NodeInflate::Gzip => gzip_decode,
+            NodeInflate::Gzip => gzip_flate_decode,
             NodeInflate::Zlib => zlib_decode,
             NodeInflate::GzipOrZlib => gzip_or_zlib_decode,
             NodeInflate::Brotli => brotli_decode,
@@ -11961,7 +11967,7 @@ fn php_cat_run(
             input,
             depth,
             substitutions,
-            gzip_decode,
+            gzip_flate_decode,
         );
     }
     if let Some(path) = php_bz_query(args) {
@@ -17646,6 +17652,28 @@ mod tests {
                 r#"eval "$(node -e "const fs=require('fs'); const z=require('zlib'); process.stdout.write(z.brotliDecompressSync(fs.readFileSync(process.argv[1])))" {br_hello_s})""#
             ),
             format!("eval \"$(zcat {gz_hello_s})\""),
+            format!(
+                r#"eval "$(python3 -c "import sys,gzip; sys.stdout.buffer.write(gzip.open(sys.argv[1],'rb').read())" {zed_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import gzip,sys; sys.stdout.buffer.write(gzip.decompress(open(sys.argv[1],"rb").read()))' {zed_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.open(ARGV[0]).read' {zed_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib.gunzip(File.binread(ARGV[0]))' {zed_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); const z=require('zlib'); process.stdout.write(z.gunzipSync(fs.readFileSync(process.argv[1])))" {zed_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); const z=require('zlib'); process.stdout.write(z.unzipSync(fs.readFileSync(process.argv[1])))" {zed_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo gzdecode(file_get_contents($argv[1]));' {zed_s})""#),
+            format!(
+                r#"eval "$(perl -MIO::Uncompress::Gunzip=gunzip -e 'gunzip $ARGV[0] => \*STDOUT' {zed_s})""#
+            ),
             format!("eval \"$(bzip2 -dc {bz_hello_s})\""),
             format!("eval \"$(bzip2 -d {bz_s})\""),
             format!("eval \"$(xz -dc {xz_hello_s})\""),
