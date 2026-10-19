@@ -493,7 +493,10 @@ fn check_action(
 /// frame. `tar -xOf` prints the named member. `unzip -p` prints that
 /// member. `tar -xzOf` prints a member from a gzip archive. `-xJOf`
 /// and `-xjOf` do too. `tar --zstd -xOf` prints a zstd member.
-/// `uncompress -c` prints a compress payload. `7z e -so` prints the archive.
+/// `uncompress -c` prints a compress payload. `tar -xOf` of a `.Z`
+/// archive prints the member. `bsdtar -xOf` prints it too.
+/// `gtar -I lz4` and `gtar -I brotli` print that member.
+/// `7z e -so` prints the archive.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
 /// `binascii.a2b_base64` of that file prints it too.
@@ -2981,7 +2984,7 @@ fn stage_command_name(token: &str) -> String {
         "gpr" => "pr".to_string(),
         "gtr" => "tr".to_string(),
         "gtee" => "tee".to_string(),
-        "gtar" => "tar".to_string(),
+        "gtar" | "bsdtar" => "tar".to_string(),
         "gbase64" => "base64".to_string(),
         "gbasenc" => "basenc".to_string(),
         "gbase32" => "base32".to_string(),
@@ -6893,9 +6896,39 @@ fn decoded_bytes_run(
     Run::Produced { text, ok: true }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TarCompress {
+    Auto,
+    Lz4,
+    Brotli,
+}
+
+fn tar_program(program: &str) -> TarCompress {
+    let token = program.split_whitespace().next().unwrap_or(program);
+    let base = command_basename(token).to_ascii_lowercase();
+    match base.as_str() {
+        "lz4" | "lz4cat" | "unlz4" => TarCompress::Lz4,
+        "brotli" => TarCompress::Brotli,
+        _ => TarCompress::Auto,
+    }
+}
+
+fn set_tar_program(current: &mut TarCompress, program: &str) -> bool {
+    let next = tar_program(program);
+    if next == TarCompress::Auto {
+        return true;
+    }
+    if *current != TarCompress::Auto && *current != next {
+        return false;
+    }
+    *current = next;
+    true
+}
+
 struct ArchiveQuery {
     archive: String,
     member: Option<String>,
+    compress: TarCompress,
 }
 
 fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
@@ -6904,11 +6937,27 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
     let mut archive = None;
     let mut index = 0usize;
     let mut members = Vec::new();
+    let mut compress = TarCompress::Auto;
     while index < args.len() {
         let arg = &args[index];
         if arg == "--" {
             index += 1;
             break;
+        }
+        if arg == "-I" || arg == "--use-compress-program" {
+            let program = args.get(index + 1)?;
+            if program.is_empty() || !set_tar_program(&mut compress, program) {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(program) = arg.strip_prefix("--use-compress-program=") {
+            if program.is_empty() || !set_tar_program(&mut compress, program) {
+                return None;
+            }
+            index += 1;
+            continue;
         }
         if arg == "-f" || arg == "--file" {
             archive = Some(args.get(index + 1)?.clone());
@@ -6939,7 +6988,7 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
         }
         if matches!(
             arg.as_str(),
-            "--gzip" | "--gunzip" | "--bzip2" | "--xz" | "--zstd"
+            "--gzip" | "--gunzip" | "--bzip2" | "--xz" | "--zstd" | "--compress"
         ) {
             index += 1;
             continue;
@@ -6954,7 +7003,7 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
                 match bytes[cursor] {
                     b'x' => extract = true,
                     b'O' => stdout = true,
-                    b'v' | b'z' | b'j' | b'J' => {}
+                    b'v' | b'z' | b'j' | b'J' | b'Z' => {}
                     b'f' => {
                         let glued = &rest[cursor + 1..];
                         if glued.is_empty() {
@@ -6986,6 +7035,7 @@ fn tar_query(args: &[String]) -> Option<ArchiveQuery> {
     Some(ArchiveQuery {
         archive,
         member: members.into_iter().next(),
+        compress,
     })
 }
 
@@ -6999,7 +7049,32 @@ fn inflate_all(mut decoder: impl std::io::Read) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn tar_payload(bytes: &[u8]) -> Option<Vec<u8>> {
+fn lz4_frame_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut decoder = lz4_flex::frame::FrameDecoder::new(bytes);
+    let mut out = Vec::new();
+    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    Some(out)
+}
+
+fn brotli_raw_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut input = std::io::Cursor::new(bytes);
+    let mut out = Vec::new();
+    brotli_decompressor::BrotliDecompress(&mut input, &mut out).ok()?;
+    Some(out)
+}
+
+fn tar_payload(bytes: &[u8], compress: TarCompress) -> Option<Vec<u8>> {
+    match compress {
+        TarCompress::Lz4 => tar_magic(&lz4_frame_bytes(bytes)?),
+        TarCompress::Brotli => tar_magic(&brotli_raw_bytes(bytes)?),
+        TarCompress::Auto => tar_magic(bytes),
+    }
+}
+
+fn tar_magic(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.starts_with(&[0x1f, 0x9d]) {
+        return unix_compress_decode(bytes);
+    }
     if bytes.starts_with(&[0x1f, 0x8b]) {
         return inflate_all(flate2::read::GzDecoder::new(bytes));
     }
@@ -7020,8 +7095,8 @@ fn tar_payload(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
-fn tar_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
-    let bytes = tar_payload(bytes)?;
+fn tar_text(bytes: &[u8], member: Option<&str>, compress: TarCompress) -> Option<String> {
+    let bytes = tar_payload(bytes, compress)?;
     let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
     let mut out = Vec::new();
     let mut found = false;
@@ -7096,6 +7171,7 @@ fn unzip_query(args: &[String]) -> Option<ArchiveQuery> {
     Some(ArchiveQuery {
         archive: positionals.remove(0),
         member: positionals.into_iter().next(),
+        compress: TarCompress::Auto,
     })
 }
 
@@ -7173,6 +7249,7 @@ fn sevenz_query(args: &[String]) -> Option<ArchiveQuery> {
     Some(ArchiveQuery {
         archive: positionals.remove(0),
         member: positionals.into_iter().next(),
+        compress: TarCompress::Auto,
     })
 }
 
@@ -7229,7 +7306,7 @@ fn tar_run(
         return Run::Unknown;
     };
     produced_archive(&query.archive, |bytes| {
-        tar_text(bytes, query.member.as_deref())
+        tar_text(bytes, query.member.as_deref(), query.compress)
     })
 }
 
@@ -15669,6 +15746,77 @@ mod tests {
                 _ => &[],
             }
         }
+        fn wrapped_tar(kind: &str) -> &'static [u8] {
+            match kind {
+                "git.Z" => &[
+                    31, 157, 144, 103, 210, 208, 113, 65, 7, 15, 29, 0, 8, 19, 42, 92, 200, 176,
+                    161, 195, 135, 16, 35, 74, 156, 136, 16, 134, 69, 24, 54, 104, 208, 0, 112,
+                    177, 35, 199, 142, 22, 63, 130, 180, 40, 163, 134, 200, 145, 33, 45, 222, 144,
+                    33, 195, 6, 0, 16, 48, 40, 202, 156, 73, 179, 166, 77, 0, 117, 230, 208, 9, 35,
+                    7, 4, 136, 155, 64, 131, 10, 29, 74, 180, 168, 209, 163, 72, 19, 6, 164, 3, 2,
+                    78, 78, 52, 32, 222, 200, 73, 19, 208, 13, 136, 54, 97, 210, 184, 81, 144, 180,
+                    171, 215, 175, 96, 195, 138, 29, 75, 182, 172, 217, 179, 104, 211, 170, 93,
+                    203, 182, 173, 219, 183, 112, 227, 202, 157, 75, 183, 174, 221, 187, 120, 243,
+                    234, 221, 203, 183, 175, 223, 191, 128, 3, 11, 30, 76, 184, 176, 225, 195, 136,
+                    19, 43, 94, 204, 184, 177, 227, 199, 144, 35, 75, 158, 76, 185, 178, 229, 203,
+                    152, 51, 107, 222, 204, 185, 179, 231, 207, 160, 67, 139, 30, 77, 186, 180,
+                    233, 211, 168, 83, 171, 94, 205, 186, 181, 235, 215, 176, 99, 203, 158, 77,
+                    187, 182, 237, 219, 184, 115, 235, 222, 205, 187, 183, 239, 223, 192, 131, 11,
+                    31, 78, 188, 184, 241, 227, 200, 147, 43, 95, 30, 28,
+                ],
+                "echo.Z" => &[
+                    31, 157, 144, 101, 198, 160, 121, 227, 130, 14, 30, 58, 0, 18, 42, 92, 200,
+                    176, 161, 195, 135, 16, 35, 74, 156, 72, 17, 0, 140, 139, 48, 108, 208, 160,
+                    97, 17, 35, 198, 142, 30, 97, 128, 12, 9, 35, 198, 140, 145, 36, 69, 94, 188,
+                    49, 163, 134, 13, 0, 32, 68, 86, 156, 73, 179, 166, 205, 155, 117, 230, 208, 9,
+                    35, 7, 4, 136, 155, 64, 131, 10, 29, 74, 180, 168, 209, 163, 72, 41, 6, 28, 8,
+                    2, 77, 25, 54, 108, 222, 40, 72, 74, 181, 170, 213, 171, 88, 179, 106, 221,
+                    202, 181, 171, 215, 175, 96, 195, 138, 29, 75, 182, 172, 217, 179, 104, 211,
+                    170, 93, 203, 182, 173, 219, 183, 112, 227, 202, 157, 75, 183, 174, 221, 187,
+                    120, 243, 234, 221, 203, 183, 175, 223, 191, 128, 3, 11, 30, 76, 184, 176, 225,
+                    195, 136, 19, 43, 94, 204, 184, 177, 227, 199, 144, 35, 75, 158, 76, 185, 178,
+                    229, 203, 152, 51, 107, 222, 204, 185, 179, 231, 207, 160, 67, 139, 30, 77,
+                    186, 180, 233, 211, 168, 83, 171, 94, 205, 186, 181, 235, 215, 176, 99, 203,
+                    158, 77, 187, 182, 237, 219, 184, 115, 235, 222, 205, 187, 183, 239, 223, 192,
+                    131, 11, 31, 110, 26,
+                ],
+                "git.lz4" => &[
+                    4, 34, 77, 24, 100, 64, 167, 142, 0, 0, 0, 143, 103, 105, 116, 46, 116, 120,
+                    116, 0, 1, 0, 73, 113, 48, 48, 48, 48, 54, 52, 52, 8, 0, 60, 48, 48, 48, 8, 0,
+                    68, 48, 48, 50, 53, 20, 0, 0, 2, 0, 175, 0, 48, 48, 55, 50, 50, 54, 0, 32, 48,
+                    149, 0, 73, 4, 2, 0, 116, 117, 115, 116, 97, 114, 32, 32, 15, 0, 15, 2, 0, 221,
+                    255, 6, 103, 105, 116, 32, 112, 117, 115, 104, 32, 111, 114, 105, 103, 105,
+                    110, 32, 109, 97, 105, 110, 10, 5, 1, 221, 15, 2, 0, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    8, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 66, 37, 89, 243,
+                ],
+                "echo.lz4" => &[
+                    4, 34, 77, 24, 100, 64, 167, 131, 0, 0, 0, 159, 101, 99, 104, 111, 46, 116,
+                    120, 116, 0, 1, 0, 72, 113, 48, 48, 48, 48, 54, 52, 52, 8, 0, 60, 48, 48, 48,
+                    8, 0, 68, 48, 48, 49, 51, 20, 0, 0, 2, 0, 175, 0, 48, 48, 55, 51, 53, 54, 0,
+                    32, 48, 148, 0, 72, 5, 2, 0, 117, 117, 115, 116, 97, 114, 32, 32, 16, 0, 15, 2,
+                    0, 220, 0, 0, 2, 127, 32, 104, 101, 108, 108, 111, 10, 250, 0, 220, 15, 2, 0,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                    255, 255, 255, 255, 255, 19, 80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 219, 52, 204, 225,
+                ],
+                "git.br" => &[
+                    225, 248, 63, 1, 255, 76, 224, 77, 152, 87, 71, 64, 92, 120, 99, 164, 134, 57,
+                    3, 169, 139, 108, 178, 199, 204, 16, 155, 14, 192, 5, 100, 165, 225, 233, 228,
+                    248, 254, 37, 148, 66, 196, 45, 104, 1, 70, 42, 65, 38, 135, 29, 176, 122, 222,
+                    100, 17, 27, 87, 1, 95, 11, 49, 66, 142, 166, 244, 79, 102, 56, 47, 133, 143,
+                    13, 27, 147, 189, 6, 107, 62, 73, 31, 105, 7, 0, 0,
+                ],
+                "echo.br" => &[
+                    225, 248, 63, 1, 63, 32, 115, 123, 138, 132, 120, 6, 98, 46, 184, 169, 147,
+                    227, 251, 151, 80, 10, 17, 63, 105, 145, 75, 16, 72, 130, 193, 14, 88, 61, 111,
+                    178, 232, 167, 242, 234, 254, 37, 208, 167, 27, 137, 134, 33, 11, 11, 95, 191,
+                    117, 134, 16, 251, 149, 194, 198, 2, 180, 83, 242, 201, 124, 92, 59, 0, 0,
+                ],
+                _ => &[],
+            }
+        }
         fn xz_bytes_raw(bytes: &[u8]) -> Vec<u8> {
             let mut input = std::io::Cursor::new(bytes);
             let mut out = Vec::new();
@@ -15858,6 +16006,18 @@ mod tests {
         std::fs::write(&zed, compress_bytes("git")).expect("Z");
         let zed_hello = dir.join(format!("snapif-c39-Z-hello-{pid}.Z"));
         std::fs::write(&zed_hello, compress_bytes("echo")).expect("Z hello");
+        let tarz = dir.join(format!("snapif-c39-tarz-{pid}.tar.Z"));
+        std::fs::write(&tarz, wrapped_tar("git.Z")).expect("tarz");
+        let tarz_hello = dir.join(format!("snapif-c39-tarz-hello-{pid}.tar.Z"));
+        std::fs::write(&tarz_hello, wrapped_tar("echo.Z")).expect("tarz hello");
+        let tlz4 = dir.join(format!("snapif-c39-tlz4-{pid}.tar.lz4"));
+        std::fs::write(&tlz4, wrapped_tar("git.lz4")).expect("tlz4");
+        let tlz4_hello = dir.join(format!("snapif-c39-tlz4-hello-{pid}.tar.lz4"));
+        std::fs::write(&tlz4_hello, wrapped_tar("echo.lz4")).expect("tlz4 hello");
+        let tbr = dir.join(format!("snapif-c39-tbr-{pid}.tar.br"));
+        std::fs::write(&tbr, wrapped_tar("git.br")).expect("tbr");
+        let tbr_hello = dir.join(format!("snapif-c39-tbr-hello-{pid}.tar.br"));
+        std::fs::write(&tbr_hello, wrapped_tar("echo.br")).expect("tbr hello");
         let zip_file = dir.join(format!("snapif-c39-zip-{pid}.zip"));
         std::fs::write(&zip_file, zip_bytes("git.txt", "git push origin main\n")).expect("zip");
         let zip_hello = dir.join(format!("snapif-c39-zip-hello-{pid}.zip"));
@@ -15954,6 +16114,12 @@ mod tests {
         let tzst_s = plain_script_path(&tzst);
         let zed_s = plain_script_path(&zed);
         let zed_hello_s = plain_script_path(&zed_hello);
+        let tarz_s = plain_script_path(&tarz);
+        let tarz_hello_s = plain_script_path(&tarz_hello);
+        let tlz4_s = plain_script_path(&tlz4);
+        let tlz4_hello_s = plain_script_path(&tlz4_hello);
+        let tbr_s = plain_script_path(&tbr);
+        let tbr_hello_s = plain_script_path(&tbr_hello);
         let zip_s = plain_script_path(&zip_file);
         let zip_hello_s = plain_script_path(&zip_hello);
         let seven_s = plain_script_path(&seven_file);
@@ -16202,6 +16368,16 @@ mod tests {
             format!("eval \"$(uncompress -c {zed_s})\""),
             format!("eval \"$(gzip -dc {zed_s})\""),
             format!("eval \"$(gzcat {zed_s})\""),
+            format!("eval \"$(tar -xOf {tarz_s} git.txt)\""),
+            format!("eval \"$(tar -ZxOf {tarz_s} git.txt)\""),
+            format!("eval \"$(gtar --compress -xOf {tarz_s} git.txt)\""),
+            format!("eval \"$(gtar --use-compress-program=uncompress -xOf {tarz_s} git.txt)\""),
+            format!("eval \"$(gtar --use-compress-program uncompress -xOf {tarz_s} git.txt)\""),
+            format!("eval \"$(gtar -I uncompress -xOf {tarz_s} git.txt)\""),
+            format!("eval \"$(bsdtar -xOf {tar_s} git.txt)\""),
+            format!("eval \"$(gtar -I lz4 -xOf {tlz4_s} git.txt)\""),
+            format!("eval \"$(gtar -I 'lz4 -d' -xOf {tlz4_s} git.txt)\""),
+            format!("eval \"$(gtar -I brotli -xOf {tbr_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s})\""),
             format!("eval \"$(7z e -so {seven_s})\""),
@@ -16649,6 +16825,10 @@ mod tests {
             format!("eval \"$(tar -xzOf {tgz_hello_s} echo.txt)\""),
             format!("eval \"$(uncompress -c {zed_hello_s})\""),
             format!("eval \"$(gzip -dc {zed_hello_s})\""),
+            format!("eval \"$(tar -xOf {tarz_hello_s} echo.txt)\""),
+            format!("eval \"$(bsdtar -xOf {tar_hello_s} echo.txt)\""),
+            format!("eval \"$(gtar -I lz4 -xOf {tlz4_hello_s} echo.txt)\""),
+            format!("eval \"$(gtar -I brotli -xOf {tbr_hello_s} echo.txt)\""),
             format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
             format!("eval \"$(7z e -so {seven_hello_s})\""),
             format!("eval \"$(7z e {seven_s})\""),
