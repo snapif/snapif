@@ -502,6 +502,7 @@ fn check_action(
 /// raw deflate payload. `bz2.BZ2File` and `lzma.LZMAFile` print
 /// those payloads. `Zlib.inflate` and `php` `gzuncompress` print a
 /// zlib payload. `perl` `RawInflate` prints a raw deflate payload.
+/// `php` `bzread` of `bzopen` prints a bzip2 payload.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
 /// `unlzma -c` prints an lzma payload.
 /// `zstd -dc` does too. `lz4 -dc` and `lz4cat` print an lz4 frame.
@@ -12042,7 +12043,11 @@ fn php_bz_query(args: &[String]) -> Option<String> {
         index += 1;
     }
     let script = script?;
-    if files.len() != 1 || compact_ws(&script) != "echobzdecompress(file_get_contents($argv[1]));" {
+    let compact = compact_ws(&script);
+    if files.len() != 1
+        || (compact != "echobzdecompress(file_get_contents($argv[1]));"
+            && compact != "echobzread(bzopen($argv[1],\"r\"));")
+    {
         return None;
     }
     Some(files.remove(0))
@@ -17273,6 +17278,7 @@ mod tests {
             format!(
                 r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())" {bz_s})""#
             ),
+            format!(r#"eval "$(php -r 'echo bzread(bzopen($argv[1],"r"));' {bz_s})""#),
             format!(
                 r#"eval "$(python3 -c 'import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],"rb").read())' {bz_s})""#
             ),
@@ -17916,6 +17922,7 @@ mod tests {
             format!(
                 r#"eval "$(python3 -c "import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1]).read())" {bz_hello_s})""#
             ),
+            format!(r#"eval "$(php -r 'echo bzread(bzopen($argv[1],"r"));' {bz_hello_s})""#),
             format!(
                 r#"eval "$(python3 -c 'import sys,bz2; sys.stdout.buffer.write(bz2.BZ2File(sys.argv[1],"rb").read())' {bz_hello_s})""#
             ),
