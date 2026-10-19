@@ -475,8 +475,11 @@ fn check_action(
 /// echoes `base64_decode` of `file_get_contents` prints it. Node
 /// `Buffer.from` of that file with `"base64"` prints it. `perl
 /// -MMIME::Base64` that prints `decode_base64` prints it too.
-/// `basenc --base64 -d` prints that text. `python3 -m base64 -d`
-/// prints it too.
+/// `basenc --base64 -d` prints that text. `uudecode -p` prints the
+/// decoded text. `gbasenc` is that same
+/// `basenc`. `python3 -m base64 -d` prints it too. `ruby -rbase64`
+/// that prints `Base64.decode64` of `File.binread` prints it.
+/// `binascii.a2b_base64` of that file prints it too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
@@ -2962,6 +2965,7 @@ fn stage_command_name(token: &str) -> String {
         "gtr" => "tr".to_string(),
         "gtee" => "tee".to_string(),
         "gbase64" => "base64".to_string(),
+        "gbasenc" => "basenc".to_string(),
         "gbase32" => "base32".to_string(),
         "gjoin" => "join".to_string(),
         "gcomm" => "comm".to_string(),
@@ -6417,6 +6421,7 @@ fn run_builtin(
         "tac" => tac_run(args, input, depth, substitutions),
         "base64" => base64_run(args, input, depth, substitutions),
         "basenc" => basenc_run(args, input, depth, substitutions),
+        "uudecode" => uudecode_run(args, input, depth, substitutions),
         "openssl" => openssl_b64_run(args, input, depth, substitutions),
         "base32" => base32_run(args, input, depth, substitutions),
         "dd" => dd_run(args, input, depth, substitutions),
@@ -10023,6 +10028,15 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
             index += 1;
             continue;
         }
+        if let Some(rest) = arg.strip_prefix("-r")
+            && !rest.is_empty()
+            && rest
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, ':' | '_' | '/'))
+        {
+            index += 1;
+            continue;
+        }
         if let Some(rest) = arg.strip_prefix("-M")
             && !rest.is_empty()
             && rest
@@ -10089,6 +10103,7 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "system(File.read(ARGV[0]))"
             | "printFile.binread(ARGV[0]).unpack1(\"m\")"
             | "printFile.binread(ARGV[0]).unpack1('m')"
+            | "printBase64.decode64(File.binread(ARGV[0]))"
     )
 }
 
@@ -10117,7 +10132,9 @@ fn ruby_b64_script(name: &str, args: &[String]) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
     matches!(
         compact.as_str(),
-        "printFile.binread(ARGV[0]).unpack1(\"m\")" | "printFile.binread(ARGV[0]).unpack1('m')"
+        "printFile.binread(ARGV[0]).unpack1(\"m\")"
+            | "printFile.binread(ARGV[0]).unpack1('m')"
+            | "printBase64.decode64(File.binread(ARGV[0]))"
     )
 }
 
@@ -10259,6 +10276,8 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importos,sys;os.system(open(sys.argv[1]).read())"
             | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],\"rb\").read()))"
             | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],'rb').read()))"
+            | "importbinascii,sys;sys.stdout.buffer.write(binascii.a2b_base64(open(sys.argv[1],\"rb\").read()))"
+            | "importbinascii,sys;sys.stdout.buffer.write(binascii.a2b_base64(open(sys.argv[1],'rb').read()))"
     )
 }
 
@@ -10271,6 +10290,8 @@ fn python_b64_script(args: &[String]) -> bool {
         compact.as_str(),
         "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],\"rb\").read()))"
             | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],'rb').read()))"
+            | "importbinascii,sys;sys.stdout.buffer.write(binascii.a2b_base64(open(sys.argv[1],\"rb\").read()))"
+            | "importbinascii,sys;sys.stdout.buffer.write(binascii.a2b_base64(open(sys.argv[1],'rb').read()))"
     )
 }
 
@@ -10502,6 +10523,102 @@ fn base64_run(
         return Run::Unknown;
     };
     Run::Produced { text, ok: true }
+}
+
+fn uudecode_run(
+    args: &[String],
+    input: Option<&str>,
+    depth: u32,
+    substitutions: &mut Vec<String>,
+) -> Run {
+    let Some(file) = uudecode_query(args) else {
+        return Run::Unknown;
+    };
+    let raw = match source_text(file.as_deref(), input, depth, substitutions) {
+        Run::Produced { ok: false, .. } => {
+            return Run::Produced {
+                text: String::new(),
+                ok: false,
+            };
+        }
+        Run::Produced { text, ok: true } => text,
+        other => return other,
+    };
+    let Some(text) = uu_decode(&raw) else {
+        return Run::Unknown;
+    };
+    Run::Produced { text, ok: true }
+}
+
+fn uudecode_query(args: &[String]) -> Option<Option<String>> {
+    let mut index = 0usize;
+    let mut to_stdout = false;
+    let mut file = None;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "-p" {
+            to_stdout = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            return None;
+        }
+        if file.is_some() {
+            return None;
+        }
+        file = Some(args[index].clone());
+        index += 1;
+    }
+    if !to_stdout {
+        return None;
+    }
+    Some(file)
+}
+
+fn uu_value(byte: u8) -> u8 {
+    byte.wrapping_sub(32) & 0x3f
+}
+
+fn uu_decode(text: &str) -> Option<String> {
+    let mut lines = text.lines();
+    let header = lines.next()?;
+    if !header.starts_with("begin ") {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lines {
+        if line == "end" || line.starts_with("end") {
+            break;
+        }
+        let bytes = line.as_bytes();
+        if bytes.is_empty() {
+            continue;
+        }
+        let len = uu_value(bytes[0]) as usize;
+        if len == 0 {
+            continue;
+        }
+        let mut data = bytes[1..].to_vec();
+        while data.len() % 4 != 0 {
+            data.push(b' ');
+        }
+        let mut decoded = Vec::new();
+        for chunk in data.chunks_exact(4) {
+            let a = uu_value(chunk[0]);
+            let b = uu_value(chunk[1]);
+            let c = uu_value(chunk[2]);
+            let d = uu_value(chunk[3]);
+            decoded.push((a << 2) | (b >> 4));
+            decoded.push((b << 4) | (c >> 2));
+            decoded.push((c << 6) | d);
+        }
+        if decoded.len() < len {
+            return None;
+        }
+        out.extend_from_slice(&decoded[..len]);
+    }
+    String::from_utf8(out).ok()
 }
 
 fn base64_query(args: &[String]) -> Option<Base64Query> {
@@ -10757,6 +10874,7 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         }),
         "base64" => base64_query(args).is_none_or(|query| query.file.is_none()),
         "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
+        "uudecode" => uudecode_query(args).is_some_and(|file| file.is_none()),
         "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(&words[0], args).is_none_or(|query| query.is_none())
@@ -14242,6 +14360,18 @@ mod tests {
         std::fs::write(&coded, "Z2l0IHB1c2ggb3JpZ2luIG1haW4K\n").expect("b64");
         let echo_b64 = dir.join(format!("snapif-c36-echo-b64-{pid}.txt"));
         std::fs::write(&echo_b64, "ZWNobyBoZWxsbwo=\n").expect("echo b64");
+        let uu_push = dir.join(format!("snapif-c37-uu-{pid}.txt"));
+        std::fs::write(
+            &uu_push,
+            "begin 644 git.txt\n59VET('!U<V@@;W)I9VEN(&UA:6X*\n`\nend\n",
+        )
+        .expect("uu");
+        let uu_hello = dir.join(format!("snapif-c37-uu-hello-{pid}.txt"));
+        std::fs::write(
+            &uu_hello,
+            "begin 644 hello.txt\n+96-H;R!H96QL;PH`\n`\nend\n",
+        )
+        .expect("uu hello");
         let b32 = dir.join(format!("snapif-c31-b32-{pid}.txt"));
         std::fs::write(&b32, "M5UXIIDQOVZWQIDPOJUWO2LOEBWWC2LOBI======\n").expect("b32");
         let dup = dir.join(format!("snapif-c30-dup-{pid}.txt"));
@@ -14256,6 +14386,8 @@ mod tests {
         let beta_last_s = plain_script_path(&beta_last);
         let coded_s = plain_script_path(&coded);
         let echo_b64_s = plain_script_path(&echo_b64);
+        let uu_push_s = plain_script_path(&uu_push);
+        let uu_hello_s = plain_script_path(&uu_hello);
         let b32_s = plain_script_path(&b32);
         let dup_s = plain_script_path(&dup);
         let big_s = plain_script_path(&big);
@@ -14411,6 +14543,14 @@ mod tests {
             ),
             format!("eval \"$(perl -MMIME::Base64 -0777 -e 'print decode_base64(<>)' {coded_s})\""),
             format!("eval \"$(basenc --base64 -d {coded_s})\""),
+            format!("eval \"$(gbasenc --base64 -d {coded_s})\""),
+            format!("eval \"$(uudecode -p {uu_push_s})\""),
+            format!(
+                "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {coded_s})\""
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import binascii,sys; sys.stdout.buffer.write(binascii.a2b_base64(open(sys.argv[1],"rb").read()))' {coded_s})""#
+            ),
             format!("eval \"$(basenc --base64 --decode {coded_s})\""),
             format!("eval \"$(basenc -d --base64 {coded_s})\""),
             format!("eval \"$(basenc --base64 -d < {coded_s})\""),
@@ -14802,6 +14942,14 @@ mod tests {
                 "eval \"$(perl -MMIME::Base64 -0777 -e 'print decode_base64(<>)' {echo_b64_s})\""
             ),
             format!("eval \"$(basenc --base64 -d {echo_b64_s})\""),
+            format!("eval \"$(gbasenc --base64 -d {echo_b64_s})\""),
+            format!("eval \"$(uudecode -p {uu_hello_s})\""),
+            format!(
+                "eval \"$(ruby -rbase64 -e 'print Base64.decode64(File.binread(ARGV[0]))' {echo_b64_s})\""
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import binascii,sys; sys.stdout.buffer.write(binascii.a2b_base64(open(sys.argv[1],"rb").read()))' {echo_b64_s})""#
+            ),
             format!("eval \"$(python3 -m base64 -d {echo_b64_s})\""),
             format!("eval \"$(python3 -m base64 -d < {echo_b64_s})\""),
             format!("eval \"$(gbase32 -d {echo_s})\""),
