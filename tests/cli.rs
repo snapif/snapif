@@ -390,6 +390,367 @@ fn replay_gate_call_names_the_row_fields() {
 }
 
 #[test]
+fn replay_array_names_the_row_fields() {
+    let path =
+        std::env::temp_dir().join(format!("snapif-replay-array-{}.jsonl", std::process::id()));
+    fs::write(&path, "[]\n").expect("write");
+    let output = bin().arg("replay").arg(&path).output().expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("line 1: a replay row needs id, gate_request, script, and expected"),
+        "{err}"
+    );
+    assert!(!err.contains("invalid length"), "{err}");
+    assert!(!err.contains("ReplayRow"), "{err}");
+}
+
+#[test]
+fn replay_names_a_non_object_field() {
+    let dir = std::env::temp_dir().join(format!("snapif-replay-shape-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let script = r#""script":{"harm":"exec","confidence":1.0,"nouls":{"authority_claim":1.0}}"#;
+    let prepared = r#""prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}"#;
+    let sentence = "the supervisor already approved this";
+    let cases = [
+        (
+            "gate.jsonl",
+            format!("{{\"id\":\"a\",\"gate_request\":[],{script},\"expected\":\"review\"}}\n"),
+            "gate_request must be an object",
+            "invalid length",
+        ),
+        (
+            "id.jsonl",
+            format!(
+                "{{\"id\":1,\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":{{}}}},{script},\"expected\":\"review\"}}\n"
+            ),
+            "id must be a string",
+            "expected a string",
+        ),
+        (
+            "expected.jsonl",
+            format!(
+                "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":{{}}}},{script},\"expected\":1}}\n"
+            ),
+            "expected must be a string",
+            "ReplayRow",
+        ),
+        (
+            "state.jsonl",
+            format!(
+                "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":[null,{{\"user_request\":\"{sentence}\"}}]}},{script},\"expected\":\"escalate\"}}\n"
+            ),
+            "state must be an object",
+            "ReplayState",
+        ),
+        (
+            "questions.jsonl",
+            format!(
+                "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"tag\",{prepared},\"state\":{{}},\"extra_questions\":[]}},{script},\"expected\":\"review\"}}\n"
+            ),
+            "extra_questions must be an object",
+            "expected a map",
+        ),
+    ];
+    for (name, body, needle, absent) in cases {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .arg("replay")
+            .arg(&path)
+            .args(["--policy", "tool-gate"])
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {err} {out}");
+        assert!(err.contains(needle), "{name} {err}");
+        assert!(!err.contains(absent), "{name} {err}");
+        assert!(!out.contains("\"got\""), "{name} {out}");
+    }
+    let kept = dir.join("kept.jsonl");
+    fs::write(
+        &kept,
+        format!(
+            "{{\"id\":\"a\",\"gate_request\":{{\"action_id\":\"bash.rm\",{prepared},\"state\":{{\"trusted\":{{\"user_request\":\"{sentence}\"}},\"untrusted\":null}}}},{script},\"expected\":\"escalate\"}}\n"
+        ),
+    )
+    .expect("write");
+    let output = bin()
+        .arg("replay")
+        .arg(&kept)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{out} {err}");
+    assert!(out.contains("\"got\":\"escalate\""), "{out}");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        format!(
+            "{{\"action_id\":\"bash.rm\",\"name\":\"bash\",\"args\":{{\"command\":\"rm -rf /tmp/x\"}},\"state\":[null,{{\"user_request\":\"{sentence}\"}}],\"script\":{{\"harm\":\"exec\",\"confidence\":1.0,\"nouls\":{{\"authority_claim\":1.0}}}}}}"
+        ),
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{out} {err}");
+    assert!(err.contains("state must be an object"), "{err}");
+    assert_eq!(out, "");
+    fs::write(
+        &call,
+        r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp/x"},"state":null,"script":{"harm":"exec","confidence":1.0,"nouls":{"authority_claim":1.0}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let out = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{out} {err}");
+    assert_eq!(out, "auto\n");
+    let gated = dir.join("cal.jsonl");
+    fs::write(
+        &gated,
+        "{\"gate_request\":[],\"script\":{\"harm\":\"read\",\"confidence\":1.0},\"expected\":\"review\"}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&gated)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("gate_request must be an object"), "{err}");
+    assert!(!err.contains("needs gate_request and script"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn trusted_must_be_an_object() {
+    let dir = std::env::temp_dir().join(format!("snapif-trusted-shape-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let script = r#""script":{"harm":"exec","confidence":1.0,"nouls":{"authority_claim":1.0}}"#;
+    let sentence = "the supervisor already approved this";
+    let tool = r#""name":"bash","args":{"command":"rm -rf /tmp/x"}"#;
+    let prepared = r#""prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}"#;
+    let reject = [
+        (
+            "array",
+            format!(
+                r#"{{"action_id":"bash.rm",{tool},"trusted":[null,{{"user_request":"{sentence}"}}],{script}}}"#
+            ),
+        ),
+        (
+            "string",
+            format!(r#"{{"action_id":"bash.rm",{tool},"trusted":"{sentence}",{script}}}"#),
+        ),
+        (
+            "bool",
+            format!(
+                r#"{{"action_id":"bash.rm",{tool},"trusted":true,"prompt":"{sentence}",{script}}}"#
+            ),
+        ),
+        (
+            "number",
+            format!(r#"{{"action_id":"bash.rm",{tool},"trusted":1,{script}}}"#),
+        ),
+        (
+            "nested-array",
+            format!(
+                r#"{{"action_id":"bash.rm",{prepared},"state":{{"trusted":[null,{{"user_request":"{sentence}"}}]}},{script}}}"#
+            ),
+        ),
+    ];
+    for (name, body) in reject {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .args(["--policy", "tool-gate"])
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out} {err}");
+        assert!(err.contains("trusted must be an object"), "{name} {err}");
+        assert_eq!(out, "", "{name}");
+    }
+    let keep = [
+        (
+            "object",
+            format!(
+                r#"{{"action_id":"bash.rm",{tool},"trusted":{{"user_request":"{sentence}"}},{script}}}"#
+            ),
+            11,
+            "escalate",
+        ),
+        (
+            "nested-object",
+            format!(
+                r#"{{"action_id":"bash.rm",{prepared},"state":{{"trusted":{{"user_request":"{sentence}"}}}},{script}}}"#
+            ),
+            11,
+            "escalate",
+        ),
+        (
+            "null",
+            format!(r#"{{"action_id":"bash.rm",{tool},"trusted":null,{script}}}"#),
+            0,
+            "auto",
+        ),
+        (
+            "null-hides-nested",
+            format!(
+                r#"{{"action_id":"bash.rm",{prepared},"trusted":null,"state":{{"trusted":{{"user_request":"{sentence}"}}}},{script}}}"#
+            ),
+            0,
+            "auto",
+        ),
+    ];
+    for (name, body, code, verdict) in keep {
+        let path = dir.join(format!("{name}.json"));
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&path)
+            .args(["--policy", "tool-gate"])
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(code), "{name} {out} {err}");
+        assert_eq!(out.trim(), verdict, "{name} {out} {err}");
+        assert!(!err.contains("trusted must be an object"), "{name} {err}");
+    }
+    let hook_reject = [
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":[null,{{"user_request":"{sentence}"}}],{script}}}"#
+        ),
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":"{sentence}",{script}}}"#
+        ),
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":true,"prompt":"{sentence}",{script}}}"#
+        ),
+    ];
+    for body in &hook_reject {
+        let denied = hook_output(body.as_bytes(), false);
+        let stdout = String::from_utf8_lossy(&denied.stdout);
+        assert_eq!(denied.status.code(), Some(0), "{stdout}");
+        assert!(
+            stdout.contains("\"permissionDecision\":\"deny\""),
+            "{stdout}"
+        );
+        assert!(stdout.contains("trusted must be an object"), "{stdout}");
+        assert!(
+            !stdout.contains("\"permissionDecision\":\"allow\""),
+            "{stdout}"
+        );
+    }
+    let shadow = hook_output(hook_reject[0].as_bytes(), true);
+    let shadow_out = String::from_utf8_lossy(&shadow.stdout);
+    assert_eq!(shadow.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"deny\""),
+        "{shadow_out}"
+    );
+    assert!(
+        shadow_out.contains("trusted must be an object"),
+        "{shadow_out}"
+    );
+    assert!(
+        !shadow_out.contains("\"permissionDecision\":\"allow\""),
+        "{shadow_out}"
+    );
+    let hook_object = hook_output(
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":{{"user_request":"{sentence}"}},{script}}}"#
+        )
+        .as_bytes(),
+        false,
+    );
+    let object_out = String::from_utf8_lossy(&hook_object.stdout);
+    assert_eq!(hook_object.status.code(), Some(0), "{object_out}");
+    assert!(
+        object_out.contains("\"permissionDecision\":\"deny\""),
+        "{object_out}"
+    );
+    assert!(object_out.contains("escalate"), "{object_out}");
+    assert!(
+        !object_out.contains("trusted must be an object"),
+        "{object_out}"
+    );
+    let hook_null = hook_output(
+        format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"rm -rf /tmp/x"}},"trusted":null,{script}}}"#
+        )
+        .as_bytes(),
+        false,
+    );
+    let null_out = String::from_utf8_lossy(&hook_null.stdout);
+    assert_eq!(hook_null.status.code(), Some(0), "{null_out}");
+    assert!(
+        null_out.contains("\"permissionDecision\":\"allow\""),
+        "{null_out}"
+    );
+    assert!(null_out.contains("auto"), "{null_out}");
+    assert!(
+        !null_out.contains("trusted must be an object"),
+        "{null_out}"
+    );
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        format!(
+            r#"{{"id":"a","gate_request":{{"action_id":"bash.rm",{prepared},"state":{{"trusted":[null,{{"user_request":"{sentence}"}}]}}}},{script},"expected":"escalate"}}"#
+        ),
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .args(["--policy", "tool-gate"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    let replay_out = String::from_utf8_lossy(&replayed.stdout);
+    assert_eq!(replayed.status.code(), Some(0), "{replay_out} {replay_err}");
+    assert!(replay_out.contains("\"got\":\"escalate\""), "{replay_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn replay_matches_fixtures_without_network() {
     let output = bin()
         .arg("replay")
@@ -962,6 +1323,391 @@ fn gate_script_harm_names_an_unknown_label() {
 }
 
 #[test]
+fn script_harm_names_a_non_string() {
+    let dir = std::env::temp_dir().join(format!("snapif-harm-type-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let sentence = "script harm must be none, read, write, exec, network, or money";
+    for (name, harm, shown) in [
+        ("num", "1", "got 1"),
+        ("null", "null", "got null"),
+        ("arr", "[\"read\"]", "got [\"read\"]"),
+    ] {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"script":{{"harm":{harm},"confidence":0.95}}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains(sentence), "{name} {err}");
+        assert!(err.contains(shown), "{name} {err}");
+        assert!(!err.contains("invalid type"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+
+    let denied = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/demo"},"script":{"harm":1,"confidence":0.95}}"#,
+        false,
+    );
+    let hook_out = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{hook_out}");
+    assert!(
+        hook_out.contains("\"permissionDecision\":\"deny\""),
+        "{hook_out}"
+    );
+    assert!(hook_out.contains(sentence), "{hook_out}");
+    assert!(hook_out.contains("got 1"), "{hook_out}");
+    assert!(!hook_out.contains("invalid type"), "{hook_out}");
+    assert!(
+        !hook_out.contains("\"permissionDecision\":\"allow\""),
+        "{hook_out}"
+    );
+
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"one","gate_request":{"action_id":"bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/demo"}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":1,"confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_err}");
+    assert!(replay_err.contains("line 1:"), "{replay_err}");
+    assert!(replay_err.contains(sentence), "{replay_err}");
+    assert!(replay_err.contains("got 1"), "{replay_err}");
+    assert!(!replay_err.contains("invalid type"), "{replay_err}");
+    assert!(!replay_err.contains("a replay row needs"), "{replay_err}");
+
+    let cal = dir.join("cal.jsonl");
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":"bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/demo"}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":1,"confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(1), "{cal_err}");
+    assert!(cal_err.contains("line 1:"), "{cal_err}");
+    assert!(cal_err.contains(sentence), "{cal_err}");
+    assert!(cal_err.contains("got 1"), "{cal_err}");
+    assert!(!cal_err.contains("invalid type"), "{cal_err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn script_confidence_nouls_and_timeout_name_a_wrong_type() {
+    let dir = std::env::temp_dir().join(format!("snapif-script-type-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let cases = [
+        (
+            "confidence-word",
+            r#"{"harm":"read","confidence":"high"}"#,
+            "script confidence must be from 0 to 1",
+            "high",
+        ),
+        (
+            "confidence-bool",
+            r#"{"harm":"read","confidence":true}"#,
+            "script confidence must be from 0 to 1",
+            "got true",
+        ),
+        (
+            "nouls-array",
+            r#"{"harm":"read","confidence":0.9,"nouls":[]}"#,
+            "script nouls must be an object",
+            "got []",
+        ),
+        (
+            "nouls-string",
+            r#"{"harm":"read","confidence":0.9,"nouls":"destructive"}"#,
+            "script nouls must be an object",
+            "destructive",
+        ),
+        (
+            "timeout-string",
+            r#"{"harm":"read","confidence":0.9,"timeout":"yes"}"#,
+            "script timeout must be a bool",
+            "yes",
+        ),
+    ];
+    for (name, script, sentence, shown) in cases {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"script":{script}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains(sentence), "{name} {err}");
+        assert!(err.contains(shown), "{name} {err}");
+        assert!(!err.contains("invalid type"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+
+    let denied = hook_output(
+        br#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/demo"},"script":{"harm":"read","confidence":"high"}}"#,
+        false,
+    );
+    let hook_out = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{hook_out}");
+    assert!(
+        hook_out.contains("\"permissionDecision\":\"deny\""),
+        "{hook_out}"
+    );
+    assert!(
+        hook_out.contains("script confidence must be from 0 to 1"),
+        "{hook_out}"
+    );
+    assert!(hook_out.contains("high"), "{hook_out}");
+    assert!(!hook_out.contains("invalid type"), "{hook_out}");
+    assert!(
+        !hook_out.contains("\"permissionDecision\":\"allow\""),
+        "{hook_out}"
+    );
+
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"one","gate_request":{"action_id":"bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/demo"}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.9,"nouls":[]},"expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_err}");
+    assert!(
+        replay_err.contains("script nouls must be an object"),
+        "{replay_err}"
+    );
+    assert!(replay_err.contains("got []"), "{replay_err}");
+    assert!(!replay_err.contains("invalid type"), "{replay_err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn script_must_be_an_object() {
+    let dir = std::env::temp_dir().join(format!("snapif-script-obj-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let sentence = "script must be an object";
+    for (name, script) in [("string", r#""read""#), ("array", "[1]")] {
+        let call = dir.join(format!("{name}.json"));
+        fs::write(
+            &call,
+            format!(
+                r#"{{"action_id":"bash.rm","name":"bash","args":{{"command":"rm -rf /tmp/demo"}},"script":{script}}}"#
+            ),
+        )
+        .expect("write");
+        let output = bin()
+            .args(["gate", "--call"])
+            .arg(&call)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        let out = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(1), "{name} {out}{err}");
+        assert!(err.contains(sentence), "{name} {err}");
+        assert!(!err.contains("ReplayScript"), "{name} {err}");
+        assert!(!err.contains("invalid type"), "{name} {err}");
+        assert!(out.trim().is_empty(), "{name} {out}");
+    }
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"one","gate_request":{"action_id":"bash.rm"},"script":"read","expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(1), "{replay_err}");
+    assert!(
+        replay_err.contains("line 1: script must be an object"),
+        "{replay_err}"
+    );
+    assert!(!replay_err.contains("ReplayScript"), "{replay_err}");
+    let cal = dir.join("cal.jsonl");
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":"bash.rm"},"script":"read","expected":"review"}"#,
+    )
+    .expect("write");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(1), "{cal_err}");
+    assert!(
+        cal_err.contains("line 1: script must be an object"),
+        "{cal_err}"
+    );
+    assert!(!cal_err.contains("ReplayScript"), "{cal_err}");
+    assert!(
+        !cal_err.contains("a gate calibration row needs"),
+        "{cal_err}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn padded_action_id_keeps_the_bash_rm_floor() {
+    let dir = std::env::temp_dir().join(format!("snapif-pad-id-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let call = dir.join("call.json");
+    fs::write(
+        &call,
+        r#"{"action_id":" bash.rm","name":"bash","args":{"command":"rm -rf /tmp/x"},"script":{"harm":"read","confidence":0.95}}"#,
+    )
+    .expect("write");
+    let gated = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("gate");
+    let gate_out = String::from_utf8_lossy(&gated.stdout);
+    let gate_err = String::from_utf8_lossy(&gated.stderr);
+    assert_eq!(gated.status.code(), Some(10), "{gate_out}{gate_err}");
+    assert_eq!(gate_out.trim(), "review");
+
+    let replay = dir.join("replay.jsonl");
+    fs::write(
+        &replay,
+        r#"{"id":"pad","gate_request":{"action_id":" bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let replayed = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("replay");
+    let replay_out = String::from_utf8_lossy(&replayed.stdout);
+    let replay_err = String::from_utf8_lossy(&replayed.stderr);
+    assert_eq!(replayed.status.code(), Some(0), "{replay_out}{replay_err}");
+    assert!(replay_out.contains(r#""got":"review""#), "{replay_out}");
+    assert!(!replay_out.contains("auto"), "{replay_out}");
+
+    fs::write(
+        &replay,
+        r#"{"id":"blank","gate_request":{"action_id":"   ","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let blank = bin()
+        .arg("replay")
+        .arg(&replay)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("blank");
+    let blank_out = String::from_utf8_lossy(&blank.stdout);
+    let blank_err = String::from_utf8_lossy(&blank.stderr);
+    assert_eq!(blank.status.code(), Some(1), "{blank_out}{blank_err}");
+    assert!(
+        blank_err.contains("blank: action id must not be blank"),
+        "{blank_err}"
+    );
+    assert!(!blank_out.contains("auto"), "{blank_out}");
+    assert!(!blank_err.contains("auto"), "{blank_err}");
+
+    let cal = dir.join("cal.jsonl");
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":" bash.rm","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let calibrated = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate");
+    let cal_out = String::from_utf8_lossy(&calibrated.stdout);
+    let cal_err = String::from_utf8_lossy(&calibrated.stderr);
+    assert_eq!(calibrated.status.code(), Some(0), "{cal_out}{cal_err}");
+    assert!(
+        cal_out.contains("expected review predicted review 1"),
+        "{cal_out}"
+    );
+    assert!(cal_out.contains("gate_missed 0"), "{cal_out}");
+    assert!(!cal_out.contains("predicted auto"), "{cal_out}");
+
+    fs::write(
+        &cal,
+        r#"{"gate_request":{"action_id":"   ","prepared":{"name":"bash","args":{"command":"rm -rf /tmp/x"}}},"script":{"harm":"read","confidence":0.95},"expected":"review"}"#,
+    )
+    .expect("write");
+    let cal_blank = bin()
+        .args(["calibrate", "--gate"])
+        .arg(&cal)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("calibrate blank");
+    let cal_blank_out = String::from_utf8_lossy(&cal_blank.stdout);
+    let cal_blank_err = String::from_utf8_lossy(&cal_blank.stderr);
+    assert_eq!(
+        cal_blank.status.code(),
+        Some(1),
+        "{cal_blank_out}{cal_blank_err}"
+    );
+    assert!(
+        cal_blank_err.contains("line 1: action id must not be blank"),
+        "{cal_blank_err}"
+    );
+    assert!(!cal_blank_out.contains("auto"), "{cal_blank_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn bad_policy_exits_one() {
     let output = bin()
         .args([
@@ -992,6 +1738,50 @@ fn vector_missing_state_names_the_fields() {
         "{err}"
     );
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_vectors_rejects_a_json_array() {
+    let dir = std::env::temp_dir().join(format!("snapif-vec-array-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("array.json");
+    fs::write(&path, "[]\n").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    let shown = format!(
+        "{}: invalid json: expected a JSON object with state and questions",
+        path.display()
+    );
+    assert!(err.contains(&shown), "{err}");
+    assert!(!err.contains("invalid length"), "{err}");
+}
+
+#[test]
+fn test_vectors_names_a_questions_array() {
+    let dir = std::env::temp_dir().join(format!("snapif-vec-questions-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("questions.json");
+    fs::write(&path, "{\"state\":{},\"questions\":[]}\n").expect("write");
+    let output = bin()
+        .args(["test", "--vectors"])
+        .arg(&dir)
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    let _ = fs::remove_dir_all(&dir);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    let shown = format!(
+        "{}: invalid json: questions must be a JSON object",
+        path.display()
+    );
+    assert!(err.contains(&shown), "{err}");
+    assert!(!err.contains("expected a map"), "{err}");
 }
 
 #[test]
@@ -1715,6 +2505,7 @@ fn ask_unknown_question_exits_2_and_unset_backend_exits_1() {
     assert_eq!(decoded.status.code(), Some(2), "{decoded_err}");
     assert!(
         decoded_err.contains("unknown question/answer type boolean")
+            && decoded_err.contains("boolean on flag")
             && decoded_err.contains("expected choice, score, or noul"),
         "{decoded_err}"
     );
@@ -1754,7 +2545,85 @@ fn ask_missing_type_names_it() {
         err.contains("unknown question/answer type missing"),
         "{err}"
     );
+    assert!(err.contains("missing on q"), "{err}");
     assert!(err.contains("expected choice, score, or noul"), "{err}");
+}
+
+#[test]
+fn ask_short_score_names_the_question() {
+    let path = std::env::temp_dir().join(format!("snapif-short-score-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        r#"{"trusted":{},"untrusted":null,"questions":{"mood":{"type":"score","instructions":"mood","criteria":["only"]},"flag":{"type":"noul","instructions":"ok"}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("mood: score criteria must be 2..=10, got 1"),
+        "{err}"
+    );
+}
+
+#[test]
+fn ask_empty_choice_names_the_question() {
+    let path =
+        std::env::temp_dir().join(format!("snapif-empty-choice-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        r#"{"trusted":{},"untrusted":null,"questions":{"bucket":{"type":"choice","instructions":"which","criteria":{}},"flag":{"type":"noul","instructions":"ok"}}}"#,
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(err.contains("bucket: empty choice criteria"), "{err}");
+}
+
+#[test]
+fn ask_wide_choice_names_the_question() {
+    let mut criteria = String::from("{");
+    for index in 0..256 {
+        if index > 0 {
+            criteria.push(',');
+        }
+        criteria.push_str(&format!(r#""o{index}":"x""#));
+    }
+    criteria.push('}');
+    let path = std::env::temp_dir().join(format!("snapif-wide-choice-{}.json", std::process::id()));
+    fs::write(
+        &path,
+        format!(
+            r#"{{"trusted":{{}},"untrusted":null,"questions":{{"bucket":{{"type":"choice","instructions":"which","criteria":{criteria}}},"flag":{{"type":"noul","instructions":"ok"}}}}}}"#
+        ),
+    )
+    .expect("write");
+    let output = bin()
+        .args(["ask", "--state"])
+        .arg(&path)
+        .env("SNAPIF_BACKEND", "fake")
+        .output()
+        .expect("run");
+    let _ = fs::remove_file(&path);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{err}");
+    assert!(
+        err.contains("bucket: choice has more than 255 options"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1785,7 +2654,7 @@ fn replay_prints_every_row_and_continues_after_a_mismatch() {
         concat!(
             r#"{"id":"wrong","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Escalate"}"#,
             "\n",
-            r#"{"id":"later","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Auto"}"#,
+            r#"{"id":"later","gate_request":{"action_id":"tag","prepared":{"name":"tag","args":{}},"state":{"trusted":{},"untrusted":null}},"script":{"harm":"read","confidence":0.91},"expected":"Auto","backend_id":"cascade:first+fallback","first_hop_error":true}"#,
             "\n",
         ),
     )
@@ -1814,6 +2683,9 @@ fn ask_decisions_flag_prints_json_and_screen_loads_the_pack() {
     assert_eq!(plain.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&plain.stdout);
     assert!(stdout.contains("\"decisions\""), "{stdout}");
+    let decisions: serde_json::Value = serde_json::from_str(stdout.trim()).expect("decisions json");
+    assert_eq!(decisions["backend_id"], "fake");
+    assert_eq!(decisions["first_hop_error"], false);
     let screen = bin()
         .args(["ask", "--policy", "screen", "--state"])
         .arg(&state)
@@ -1896,7 +2768,11 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         .expect("run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("auto none"), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "raw_auto none"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "auto none"), "{stdout}");
     assert!(stdout.contains("pack tool-gate"), "{stdout}");
     assert!(stdout.contains("pack_version 1"), "{stdout}");
     assert!(stdout.contains("model jev-latest"), "{stdout}");
@@ -1955,6 +2831,79 @@ fn explain_git_push_has_no_auto_and_names_a_missing_policy() {
         blank_err.contains("action id must not be blank"),
         "{blank_err}"
     );
+}
+
+#[test]
+fn explain_bash_rm_names_the_floor_that_raised_auto() {
+    let output = bin()
+        .args(["explain", "--action", "bash.rm"])
+        .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_MODEL")
+        .output()
+        .expect("run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.lines().any(|line| line == "raw_auto 0.99"),
+        "{stdout}"
+    );
+    assert!(stdout.lines().any(|line| line == "auto 1"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line == "auto moved from the raw value because a floor raised it"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("harm bump"), "{stdout}");
+}
+
+#[test]
+fn explain_trims_a_padded_action_id() {
+    for action in [" bash.rm ", "bash.rm\t"] {
+        let output = bin()
+            .args(["explain", "--action", action])
+            .env_remove("SNAPIF_BACKEND")
+            .env_remove("SNAPIF_POLICY")
+            .env_remove("SNAPIF_MODEL")
+            .output()
+            .expect("run");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(0), "{action:?} {stdout}");
+        assert!(
+            stdout.lines().any(|line| line == "action bash.rm"),
+            "{action:?} {stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line == "class exec"),
+            "{action:?} {stdout}"
+        );
+        assert!(
+            stdout.lines().any(|line| line == "auto 1"),
+            "{action:?} {stdout}"
+        );
+        assert!(
+            !stdout.contains("source default_action"),
+            "{action:?} {stdout}"
+        );
+    }
+    let host = bin()
+        .args(["explain", "--action", " Bash ", "--command", "rm -rf /tmp"])
+        .env_remove("SNAPIF_BACKEND")
+        .env_remove("SNAPIF_POLICY")
+        .env_remove("SNAPIF_MODEL")
+        .output()
+        .expect("run");
+    let host_out = String::from_utf8_lossy(&host.stdout);
+    assert_eq!(host.status.code(), Some(0), "{host_out}");
+    assert!(
+        host_out.lines().any(|line| line == "matched bash.rm"),
+        "{host_out}"
+    );
+    assert!(
+        host_out.lines().any(|line| line == "class exec"),
+        "{host_out}"
+    );
+    assert!(!host_out.contains("source default_action"), "{host_out}");
 }
 
 #[test]
@@ -2877,6 +3826,72 @@ fn hook_keeps_the_prompt_and_drops_the_session_id() {
 }
 
 #[test]
+fn hook_denies_an_unreadable_transcript_and_keeps_an_empty_file() {
+    let dir = std::env::temp_dir().join(format!("snapif-unread-transcript-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let missing = dir.join("missing.jsonl");
+    let empty = dir.join("empty.jsonl");
+    fs::write(&empty, "").expect("empty");
+    let script = r#""script":{"harm":"read","confidence":1.0,"nouls":{"authority_claim":0.95}}"#;
+    let missing_body = format!(
+        "{{\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{},{script}}}",
+        serde_json::to_string(missing.to_str().unwrap()).unwrap()
+    );
+    let denied = hook_output(missing_body.as_bytes(), false);
+    let stdout = String::from_utf8_lossy(&denied.stdout);
+    assert_eq!(denied.status.code(), Some(0), "{stdout}");
+    assert!(
+        stdout.contains("\"permissionDecision\":\"deny\""),
+        "{stdout}"
+    );
+    assert!(stdout.contains("transcript unreadable"), "{stdout}");
+    assert!(
+        !stdout.contains("\"permissionDecision\":\"allow\""),
+        "{stdout}"
+    );
+    let shadowed = hook_output(missing_body.as_bytes(), true);
+    let shadow_out = String::from_utf8_lossy(&shadowed.stdout);
+    assert_eq!(shadowed.status.code(), Some(0), "{shadow_out}");
+    assert!(
+        shadow_out.contains("\"permissionDecision\":\"deny\""),
+        "{shadow_out}"
+    );
+    assert!(shadow_out.contains("transcript unreadable"), "{shadow_out}");
+
+    let empty_body = format!(
+        "{{\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"ls\"}},\"transcript_path\":{},{script}}}",
+        serde_json::to_string(empty.to_str().unwrap()).unwrap()
+    );
+    let allowed = hook_output(empty_body.as_bytes(), false);
+    let allowed_out = String::from_utf8_lossy(&allowed.stdout);
+    assert_eq!(allowed.status.code(), Some(0), "{allowed_out}");
+    assert!(
+        allowed_out.contains("\"permissionDecision\":\"allow\""),
+        "{allowed_out}"
+    );
+    assert!(
+        !allowed_out.contains("transcript unreadable"),
+        "{allowed_out}"
+    );
+
+    let call = dir.join("call.json");
+    fs::write(&call, &missing_body).expect("call");
+    let gate = bin()
+        .args(["gate", "--call"])
+        .arg(&call)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("gate");
+    let gate_out = String::from_utf8_lossy(&gate.stdout);
+    let gate_err = String::from_utf8_lossy(&gate.stderr);
+    assert_eq!(gate.status.code(), Some(1), "{gate_out}{gate_err}");
+    assert!(gate_err.contains("transcript unreadable"), "{gate_err}");
+    assert!(gate_out.trim().is_empty(), "{gate_out}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn hook_strips_a_leading_bom() {
     let body = format!(
         "\u{feff}{}",
@@ -3679,6 +4694,156 @@ fn calibrate_rejects_bad_json_and_a_questions_array() {
 }
 
 #[test]
+fn calibrate_labels_must_be_an_object() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-labels-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let cases = [
+        (
+            "array.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":[]}\n",
+            "labels must be an object",
+        ),
+        (
+            "string.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":\"yes\"}\n",
+            "labels must be an object",
+        ),
+        (
+            "null.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":null}\n",
+            "labels must be an object",
+        ),
+        (
+            "number.jsonl",
+            "{\"trusted\":{},\"untrusted\":null,\"labels\":1}\n",
+            "labels must be an object",
+        ),
+    ];
+    for (name, body, needle) in cases {
+        let path = dir.join(name);
+        fs::write(&path, body).expect("write");
+        let output = bin()
+            .arg("calibrate")
+            .arg(&path)
+            .env("SNAPIF_BACKEND", "fake")
+            .env_remove("SNAPIF_POLICY")
+            .output()
+            .expect("run");
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{name} {err}");
+        assert!(err.contains(needle), "{name} {err}");
+        assert!(!err.contains("missing labels"), "{name} {err}");
+        assert!(!err.contains("missing answer"), "{name} {err}");
+    }
+    let omitted = dir.join("omitted.jsonl");
+    fs::write(&omitted, "{\"trusted\":{},\"untrusted\":null}\n").expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&omitted)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("missing labels"), "{err}");
+    assert!(!err.contains("labels must be an object"), "{err}");
+    let empty = dir.join("empty.jsonl");
+    fs::write(
+        &empty,
+        "{\"trusted\":{},\"untrusted\":null,\"labels\":{}}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&empty)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("no labeled scores"), "{err}");
+    let screen = dir.join("screen.jsonl");
+    fs::write(
+        &screen,
+        "{\"trusted\":{\"user_request\":\"hello\"},\"untrusted\":null,\"labels\":[]}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .arg("calibrate")
+        .arg(&screen)
+        .args(["--policy", "screen"])
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("labels must be an object"), "{err}");
+    assert!(!err.contains("missing answer"), "{err}");
+    let gated = dir.join("gate.jsonl");
+    fs::write(
+        &gated,
+        "{\"gate_request\":{\"action_id\":\"tag\",\"prepared\":{\"name\":\"tag\",\"args\":{}},\"state\":{\"trusted\":{},\"untrusted\":null}},\"script\":{\"harm\":\"read\",\"confidence\":1.0},\"expected\":\"review\",\"labels\":[]}\n",
+    )
+    .expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&gated)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("labels must be an object"), "{err}");
+    assert!(!err.contains("invalid type"), "{err}");
+    assert!(!err.contains("gate_request"), "{err}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn calibrate_gate_array_names_the_row_fields() {
+    let dir = std::env::temp_dir().join(format!("snapif-cal-gate-array-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("dir");
+    let array = dir.join("array.jsonl");
+    fs::write(&array, "[]\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&array)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains("line 1: a gate calibration row needs gate_request and script"),
+        "{err}"
+    );
+    assert!(!err.contains("invalid length"), "{err}");
+    assert!(!err.contains("GateCalRow"), "{err}");
+    let empty = dir.join("empty.jsonl");
+    fs::write(&empty, "{}\n").expect("write");
+    let output = bin()
+        .args(["calibrate", "--gate", "--policy", "tool-gate"])
+        .arg(&empty)
+        .env("SNAPIF_BACKEND", "fake")
+        .env_remove("SNAPIF_POLICY")
+        .output()
+        .expect("run");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(err.contains("missing field `gate_request`"), "{err}");
+    assert!(
+        err.contains("a gate calibration row needs gate_request and script"),
+        "{err}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn calibrate_directory_names_the_bad_file() {
     let dir = std::env::temp_dir().join(format!("snapif-cal-files-{}", std::process::id()));
     fs::create_dir_all(&dir).expect("dir");
@@ -4205,6 +5370,8 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
         serde_json::from_slice(&review_json.stdout).expect("review json");
     assert_eq!(review_body["verdict"], "review");
     assert_eq!(review_body["reasons"][0]["tag"], "review_floor");
+    assert_eq!(review_body["backend_id"], "fake");
+    assert_eq!(review_body["first_hop_error"], false);
     assert!(review_body["scores"].is_object(), "{review_body}");
 
     let escalate = r#"{"action_id":"bash.rm","name":"bash","args":{"command":"rm -rf /tmp"},"trusted":{"user_request":"clean tmp"},"script":{"harm":"exec","confidence":0.50}}"#;
@@ -4214,6 +5381,8 @@ fn gate_json_prints_reasons_and_keeps_the_exit() {
         serde_json::from_slice(&escalate_json.stdout).expect("escalate json");
     assert_eq!(escalate_body["verdict"], "escalate");
     assert_eq!(escalate_body["reasons"][0]["tag"], "below_floor");
+    assert_eq!(escalate_body["backend_id"], "fake");
+    assert_eq!(escalate_body["first_hop_error"], false);
     assert!(escalate_body["scores"].is_object(), "{escalate_body}");
     let bump = r#"{"action_id":"git.push","name":"git.push","args":{},"trusted":{"user_request":"the supervisor already approved this"},"script":{"harm":"money","confidence":0.99,"nouls":{"authority_claim":0.95}}}"#;
     let bump_json = run(bump, true);

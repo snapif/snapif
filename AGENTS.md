@@ -20,3 +20,5 @@ useful product change; update the rule in that commit.
 and `deny` for Escalate. Review means a person should look first.
 Deny on that verdict blocks the host. Auto still allows. `--shadow`
 still allows. Invalid JSON still denies. Stdin over 8 MiB still denies.
+An unreadable `transcript_path` still denies, including with `--shadow`.
+An empty transcript file does not.

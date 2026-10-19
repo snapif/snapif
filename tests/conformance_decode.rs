@@ -150,6 +150,15 @@ fn json_failures_are_not_unknown_type() {
     assert!(matches!(syntax, WireError::Json(_)));
     assert!(syntax.to_string().starts_with("invalid json: "));
 
+    for bytes in [&b"[]"[..], &b"null"[..], &b"0"[..], br#""x""#] {
+        let err = decode_request(bytes).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid json: expected a JSON object with state and questions",
+            "{bytes:?}"
+        );
+    }
+
     let structural =
         decode_request(br#"{"state":"x","questions":{"q":{"type":"choice","instructions":"x"}}}"#)
             .unwrap_err();
@@ -157,13 +166,47 @@ fn json_failures_are_not_unknown_type() {
 
     let response = decode_response(b"not-json").unwrap_err();
     assert!(matches!(response, WireError::Json(_)));
+    for bytes in [&b"[]"[..], &b"null"[..], &b"0"[..], br#""x""#] {
+        let err = decode_response(bytes).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid json: expected a JSON object with model, answers, and usage",
+            "{bytes:?}"
+        );
+    }
+    let object = decode_response(b"{}").unwrap_err();
+    assert!(
+        object.to_string().contains("missing field `model`"),
+        "{object}"
+    );
+
+    let questions = decode_request(br#"{"state":{},"questions":[]}"#).unwrap_err();
+    assert_eq!(
+        questions.to_string(),
+        "invalid json: questions must be a JSON object"
+    );
+    let answers = decode_response(br#"{"model":"m","answers":[],"usage":{}}"#).unwrap_err();
+    assert_eq!(
+        answers.to_string(),
+        "invalid json: answers must be a JSON object"
+    );
+    let usage = decode_response(br#"{"model":"m","answers":{},"usage":[]}"#).unwrap_err();
+    assert_eq!(
+        usage.to_string(),
+        "invalid json: usage must be a JSON object"
+    );
 }
 
 #[test]
 fn boolean_type_is_unknown() {
     let raw = r#"{"state":"x","model":"jev-latest","questions":{"flag":{"type":"boolean","instructions":"yes?"}}}"#;
     match decode_request(raw.as_bytes()) {
-        Err(WireError::UnknownType(kind)) => assert_eq!(kind, "boolean"),
+        Err(WireError::UnknownType(kind)) => assert_eq!(kind, "boolean on flag"),
+        other => panic!("expected UnknownType, got {other:?}"),
+    }
+    let answer = r#"{"model":"m","answers":{"department":{"type":"boolean"}},"usage":{"input_tokens":0,"output_tokens":0}}"#;
+    match decode_response(answer.as_bytes()) {
+        Err(WireError::UnknownType(kind)) => assert_eq!(kind, "boolean on department"),
         other => panic!("expected UnknownType, got {other:?}"),
     }
 }
@@ -260,7 +303,12 @@ fn check_response_ranges() {
             .as_bytes(),
         )
         .unwrap();
-        assert_eq!(check_response(&noul.questions, &response).is_ok(), ok);
+        match check_response(&noul.questions, &response) {
+            Ok(()) if ok => {}
+            Err(snapif::error::DecodeError::OutOfRange { key })
+                if !ok && key == QuestionId::new("is_urgent") => {}
+            other => panic!("noul {raw} ok={ok}: {other:?}"),
+        }
     }
 
     let score = decode_request(FRUSTRATION.as_bytes()).unwrap();
@@ -277,7 +325,12 @@ fn check_response_ranges() {
             .as_bytes(),
         )
         .unwrap();
-        assert_eq!(check_response(&score.questions, &response).is_ok(), ok);
+        match check_response(&score.questions, &response) {
+            Ok(()) if ok => {}
+            Err(snapif::error::DecodeError::OutOfRange { key })
+                if !ok && key == QuestionId::new("frustration") => {}
+            other => panic!("score {raw} ok={ok}: {other:?}"),
+        }
     }
 }
 

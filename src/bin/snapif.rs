@@ -39,7 +39,7 @@ enum Command {
         /// Return the real verdict. The exit code stays the same.
         #[arg(long)]
         shadow: bool,
-        /// Print the verdict, reasons, and scores as JSON. The exit code stays the same.
+        /// Print verdict, reasons, scores, backend_id, and first_hop_error as JSON. The exit code stays the same.
         #[arg(long)]
         json: bool,
     },
@@ -51,7 +51,7 @@ enum Command {
         /// Shipped id or `.toml` path. Unset keeps the policy from `SNAPIF_POLICY`.
         #[arg(long)]
         policy: Option<String>,
-        /// Print each decision as JSON. Without this flag, stdout stays `ok`.
+        /// Print each decision as JSON, plus backend_id and first_hop_error. Without this flag, stdout stays `ok`.
         #[arg(long)]
         decisions: bool,
     },
@@ -177,6 +177,29 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
         eprintln!("call file must be a JSON object");
         return 1;
     }
+    if value
+        .get("script")
+        .is_some_and(|script| !script.is_object())
+    {
+        eprintln!("script must be an object");
+        return 1;
+    }
+    // JSON null is an absent state or prepared value. An array is
+    // positional and can drop a sentence that an object would score.
+    if value
+        .get("state")
+        .is_some_and(|item| !item.is_null() && !item.is_object())
+    {
+        eprintln!("state must be an object");
+        return 1;
+    }
+    if value
+        .get("prepared")
+        .is_some_and(|item| !item.is_null() && !item.is_object())
+    {
+        eprintln!("prepared must be an object");
+        return 1;
+    }
     let file: CallFile = match serde_json::from_value(value.clone()) {
         Ok(file) => file,
         Err(err) => {
@@ -260,14 +283,37 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
     // copies that text. Gate already accepts the same body for the
     // command, so a missing trusted object uses the same copy.
     // An explicit object still wins, including an empty one.
-    let trusted = if has("trusted") {
+    // Nested `state.trusted` is read only when the top-level key is
+    // absent. `hook_trusted` does not look under `state`. A non-object
+    // there is not a missing field: dropping it lets an approval
+    // sentence score as if it were absent. JSON null stays absent.
+    if !has("trusted")
+        && value.get("state").is_some_and(|state| {
+            state
+                .get("trusted")
+                .is_some_and(|trusted| !trusted.is_null() && !trusted.is_object())
+        })
+    {
+        eprintln!("trusted must be an object");
+        return 1;
+    }
+    let trusted_from_state = if has("trusted") {
         file.trusted.filter(|item| item.is_object())
     } else {
         file.state
             .as_ref()
             .and_then(|state| state.trusted.as_object().map(|_| state.trusted.clone()))
-    }
-    .unwrap_or_else(|| hook_trusted(&value));
+    };
+    let trusted = match trusted_from_state {
+        Some(trusted) => trusted,
+        None => match hook_trusted(&value) {
+            Ok(trusted) => trusted,
+            Err(err) => {
+                eprintln!("{err}");
+                return 1;
+            }
+        },
+    };
     let untrusted = if has("untrusted") {
         file.untrusted.unwrap_or(Value::Null)
     } else {
@@ -567,6 +613,33 @@ fn finish_checked(count: usize, what: &str) -> u8 {
     0
 }
 
+/// A JSON array in these fields is positional. `state: [null, sentence]`
+/// then scores as if the sentence were absent.
+fn replay_shape_message(value: &Value) -> Option<String> {
+    if value.get("id").is_some_and(|item| !item.is_string()) {
+        return Some("id must be a string".to_string());
+    }
+    if value.get("expected").is_some_and(|item| !item.is_string()) {
+        return Some("expected must be a string".to_string());
+    }
+    let gate = value.get("gate_request")?;
+    if !gate.is_object() {
+        return Some("gate_request must be an object".to_string());
+    }
+    for key in ["prepared", "state", "extra_questions"] {
+        if gate.get(key).is_some_and(|item| !item.is_object()) {
+            return Some(format!("{key} must be an object"));
+        }
+    }
+    None
+}
+
+/// A padded id misses the policy row. The default row can then auto.
+fn trimmed_action_id(raw: &str) -> Option<&str> {
+    let id = raw.trim();
+    if id.is_empty() { None } else { Some(id) }
+}
+
 fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool) -> u8 {
     let spec = policy;
     let policy = match load_policy(spec) {
@@ -601,7 +674,32 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             continue;
         }
         checked += 1;
-        let row: ReplayRow = match serde_json::from_str(line) {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("line {}: {err}", line_no + 1);
+                return 1;
+            }
+        };
+        if !value.is_object() {
+            eprintln!(
+                "line {}: a replay row needs id, gate_request, script, and expected",
+                line_no + 1
+            );
+            return 1;
+        }
+        if value
+            .get("script")
+            .is_some_and(|script| !script.is_object())
+        {
+            eprintln!("line {}: script must be an object", line_no + 1);
+            return 1;
+        }
+        if let Some(message) = replay_shape_message(&value) {
+            eprintln!("line {}: {message}", line_no + 1);
+            return 1;
+        }
+        let row: ReplayRow = match serde_json::from_value(value) {
             Ok(row) => row,
             Err(err) => {
                 eprintln!("line {}: {err}", line_no + 1);
@@ -618,8 +716,12 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
                 return 1;
             }
         };
+        let Some(action_id) = trimmed_action_id(&row.gate_request.action_id) else {
+            eprintln!("{}: action id must not be blank", row.id);
+            return 1;
+        };
         let name = if row.gate_request.prepared.name.is_empty() {
-            row.gate_request.action_id.clone()
+            action_id.to_string()
         } else {
             row.gate_request.prepared.name.clone()
         };
@@ -641,7 +743,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
             client = client.shadow(true);
         }
         let verdict = match block_on(client.gate(GateRequest {
-            action_id: ActionId::new(&row.gate_request.action_id),
+            action_id: ActionId::new(action_id),
             prepared: PreparedCall {
                 name,
                 args: row.gate_request.prepared.args,
@@ -672,7 +774,7 @@ fn replay_cmd(path: &PathBuf, policy: Option<&str>, shadow: bool, summary: bool)
         }
         if summary {
             let slot = counts
-                .entry((row.gate_request.action_id.clone(), row.policy.clone()))
+                .entry((action_id.to_string(), row.policy.clone()))
                 .or_insert([0, 0, 0]);
             match got {
                 "auto" => slot[0] += 1,
@@ -929,6 +1031,7 @@ fn decisions_json(out: &snapif::AskOut) -> String {
         "decisions": rows,
         "usage": out.usage,
         "backend_id": out.backend_id,
+        "first_hop_error": out.meta.values().any(|row| row.first_hop_error),
         "truncated": out.truncated_untrusted,
     })
     .to_string()
@@ -961,6 +1064,7 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
         eprintln!("action id must not be blank");
         return 1;
     }
+    let action = action.trim();
     let model = match explain_model() {
         Ok(model) => model,
         Err(()) => return 1,
@@ -1010,10 +1114,9 @@ fn explain_cmd(action: &str, command: Option<&str>, policy: Option<&str>) -> u8 
     println!("escalate_below {}", gates.escalate_below);
     println!("review {}", gates.review);
     println!("auto {effective_auto}");
+    // No harm class is passed in, so a bump cannot be why auto moved.
     if row.auto != gates.auto {
-        println!(
-            "auto moved from the raw value because a floor raised it or a harm bump cleared it"
-        );
+        println!("auto moved from the raw value because a floor raised it");
     }
     println!("battery {}", policy.battery.0);
     match &policy.shipped_id {
@@ -1117,7 +1220,13 @@ fn hook_cmd(policy: Option<&str>, shadow: bool, print_settings: bool) -> u8 {
         .get("tool_input")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let trusted = hook_trusted(&value);
+    let trusted = match hook_trusted(&value) {
+        Ok(trusted) => trusted,
+        Err(err) => {
+            hook_decision("deny", &err.to_string());
+            return 0;
+        }
+    };
     let mut client = match open_client(policy, shadow) {
         Ok(client) => client,
         Err(err) => {
@@ -1331,16 +1440,25 @@ fn reason_tag(reason: &snapif::verdict::UnsureReason) -> String {
     }
 }
 
-fn hook_trusted(value: &Value) -> Value {
-    if let Some(trusted) = value.get("trusted").filter(|item| item.is_object()) {
-        return trusted.clone();
+fn hook_trusted(value: &Value) -> Result<Value, std::io::Error> {
+    // A present non-object is not missing. Dropping it lets an approval
+    // sentence score as if the field were absent. JSON null stays absent
+    // so a prompt can still supply the turn.
+    if let Some(trusted) = value.get("trusted").filter(|item| !item.is_null()) {
+        if !trusted.is_object() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "trusted must be an object",
+            ));
+        }
+        return Ok(trusted.clone());
     }
-    let Some(full) = hook_user_turn(value) else {
-        return serde_json::json!({});
+    let Some(full) = hook_user_turn(value)? else {
+        return Ok(serde_json::json!({}));
     };
     let clipped = clip_turn(&full);
     if clipped.is_empty() {
-        return serde_json::json!({});
+        return Ok(serde_json::json!({}));
     }
     let mut trusted = serde_json::Map::new();
     trusted.insert(
@@ -1355,25 +1473,30 @@ fn hook_trusted(value: &Value) -> Value {
             serde_json::Value::String(excerpt),
         );
     }
-    serde_json::Value::Object(trusted)
+    Ok(serde_json::Value::Object(trusted))
 }
 
-fn hook_user_turn(value: &Value) -> Option<String> {
+fn hook_user_turn(value: &Value) -> Result<Option<String>, std::io::Error> {
     for key in ["prompt", "user_prompt"] {
         if let Some(text) = value.get(key).and_then(Value::as_str) {
             let text = text.trim();
             if !text.is_empty() {
-                return Some(text.to_string());
+                return Ok(Some(text.to_string()));
             }
         }
     }
     if let Some(text) = transcript_tail(value.get("transcript")) {
-        return Some(text);
+        return Ok(Some(text));
     }
-    value
+    let Some(path) = value
         .get("transcript_path")
         .and_then(Value::as_str)
-        .and_then(transcript_file_tail)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    transcript_file_tail(path)
 }
 
 fn clip_turn(text: &str) -> String {
@@ -1453,18 +1576,30 @@ fn content_text(content: &Value) -> Option<String> {
     }
 }
 
-fn transcript_file_tail(path: &str) -> Option<String> {
+fn transcript_file_tail(path: &str) -> Result<Option<String>, std::io::Error> {
+    match read_transcript_file_tail(path) {
+        Ok(text) => Ok(text),
+        Err(err) => Err(std::io::Error::new(
+            err.kind(),
+            format!("{path}: transcript unreadable"),
+        )),
+    }
+}
+
+fn read_transcript_file_tail(path: &str) -> Result<Option<String>, std::io::Error> {
     use std::io::{Read, Seek, SeekFrom};
     const TAIL_BYTES: u64 = 1024 * 1024;
     const TAIL_LINES: usize = 4_000;
-    let mut file = std::fs::File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
     let start = len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
+    file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::new();
-    file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
+    file.take(TAIL_BYTES).read_to_end(&mut bytes)?;
     if start > 0 {
-        let pos = bytes.iter().position(|byte| *byte == b'\n')?;
+        let Some(pos) = bytes.iter().position(|byte| *byte == b'\n') else {
+            return Ok(None);
+        };
         bytes.drain(..=pos);
     }
     let raw = String::from_utf8_lossy(&bytes);
@@ -1474,10 +1609,10 @@ fn transcript_file_tail(path: &str) -> Option<String> {
             continue;
         };
         if let Some(turn) = user_row_text(&row) {
-            return Some(turn);
+            return Ok(Some(turn));
         }
     }
-    None
+    Ok(None)
 }
 
 fn hook_decision(decision: &str, reason: &str) {
@@ -1625,7 +1760,46 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
     let mut matched = 0usize;
     let mut missed = 0usize;
     for (path, line_no, line) in &rows {
-        let row: GateCalRow = match serde_json::from_str(line) {
+        let value: Value = match serde_json::from_str(line) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("{}: line {line_no}: {err}", path.display());
+                eprintln!("a gate calibration row needs gate_request and script");
+                return 1;
+            }
+        };
+        if !value.is_object() {
+            eprintln!(
+                "{}: line {line_no}: a gate calibration row needs gate_request and script",
+                path.display()
+            );
+            return 1;
+        }
+        if value
+            .get("script")
+            .is_some_and(|script| !script.is_object())
+        {
+            eprintln!(
+                "{}: line {line_no}: script must be an object",
+                path.display()
+            );
+            return 1;
+        }
+        if value
+            .get("labels")
+            .is_some_and(|labels| !labels.is_object())
+        {
+            eprintln!(
+                "{}: line {line_no}: labels must be an object",
+                path.display()
+            );
+            return 1;
+        }
+        if let Some(message) = replay_shape_message(&value) {
+            eprintln!("{}: line {line_no}: {message}", path.display());
+            return 1;
+        }
+        let row: GateCalRow = match serde_json::from_value(value) {
             Ok(row) => row,
             Err(err) => {
                 eprintln!("{}: line {line_no}: {err}", path.display());
@@ -1647,8 +1821,15 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
                 return 1;
             }
         };
+        let Some(action_id) = trimmed_action_id(&row.gate_request.action_id) else {
+            eprintln!(
+                "{}: line {line_no}: action id must not be blank",
+                path.display()
+            );
+            return 1;
+        };
         let name = if row.gate_request.prepared.name.is_empty() {
-            row.gate_request.action_id.clone()
+            action_id.to_string()
         } else {
             row.gate_request.prepared.name.clone()
         };
@@ -1667,7 +1848,7 @@ fn calibrate_gate_cmd(path: &PathBuf, policy: Option<&str>) -> u8 {
         };
         let client = Client::new(backend).policy(policy.clone());
         let verdict = match block_on(client.gate(GateRequest {
-            action_id: ActionId::new(&row.gate_request.action_id),
+            action_id: ActionId::new(action_id),
             prepared: PreparedCall {
                 name,
                 args: row.gate_request.prepared.args,
@@ -1791,17 +1972,23 @@ fn calibrate_cmd(path: &PathBuf, policy: Option<&str>, gate: bool) -> u8 {
             .iter()
             .map(|question| (question.id().0.clone(), AskedKind::from(question)))
             .collect();
+        let Some(labels_value) = row.get("labels") else {
+            eprintln!("{}: line {line_no}: missing labels", path.display());
+            return 1;
+        };
+        let Some(labels) = labels_value.as_object() else {
+            eprintln!(
+                "{}: line {line_no}: labels must be an object",
+                path.display()
+            );
+            return 1;
+        };
         let out = match block_on(client.ask(state, questions)) {
             Ok(out) => out,
             Err(err) => {
                 eprintln!("{}: line {line_no}: {err}", path.display());
                 return ask_code(&err);
             }
-        };
-        let labels = row.get("labels").and_then(Value::as_object);
-        let Some(labels) = labels else {
-            eprintln!("{}: line {line_no}: missing labels", path.display());
-            return 1;
         };
         for (id, score) in &out.scores {
             let Some(label) = labels.get(id) else {
@@ -1928,12 +2115,52 @@ fn wire_questions(map: &serde_json::Map<String, Value>) -> Result<Vec<Question>,
     });
     let bytes =
         serde_json::to_vec(&body).map_err(|err| Error::Wire(WireError::Json(err.to_string())))?;
-    let request = wire::decode_request(&bytes)?;
+    let request = wire::decode_request(&bytes)
+        .map_err(|err| Error::Wire(question_bound_message(map, err)))?;
     Ok(request
         .questions
         .into_iter()
         .map(|(id, question)| question_from_wire(id, question))
         .collect())
+}
+
+fn question_bound_message(map: &serde_json::Map<String, Value>, err: WireError) -> WireError {
+    let id = match &err {
+        WireError::EmptyChoice => first_question(map, "choice", |criteria| {
+            criteria.as_object().is_some_and(|object| object.is_empty())
+        }),
+        WireError::ChoiceTooWide => first_question(map, "choice", |criteria| {
+            criteria
+                .as_object()
+                .is_some_and(|object| object.len() > 255)
+        }),
+        WireError::ScoreLen(len) => {
+            let len = *len;
+            first_question(map, "score", |criteria| {
+                criteria.as_array().is_some_and(|items| items.len() == len)
+            })
+        }
+        _ => None,
+    };
+    match id {
+        Some(id) => WireError::Json(format!("{id}: {err}")),
+        None => err,
+    }
+}
+
+fn first_question<'a>(
+    map: &'a serde_json::Map<String, Value>,
+    kind: &str,
+    criteria_matches: impl Fn(&Value) -> bool,
+) -> Option<&'a str> {
+    map.iter().find_map(|(id, value)| {
+        let object = value.as_object()?;
+        if object.get("type").and_then(Value::as_str) != Some(kind) {
+            return None;
+        }
+        let criteria = object.get("criteria")?;
+        criteria_matches(criteria).then_some(id.as_str())
+    })
 }
 
 fn question_from_wire(id: String, question: WireQuestion) -> Question {
@@ -2048,6 +2275,8 @@ fn gate_json(verdict: &Verdict) -> String {
         "verdict": verdict_name(verdict),
         "reasons": reasons,
         "scores": hint.facts.scores,
+        "backend_id": hint.backend_id,
+        "first_hop_error": hint.meta.values().any(|row| row.first_hop_error),
     })
     .to_string()
 }
@@ -2139,13 +2368,13 @@ struct ReplayState {
 
 #[derive(Debug, Deserialize)]
 struct ReplayScript {
-    #[serde(default = "default_harm")]
+    #[serde(default = "default_harm", deserialize_with = "script_harm")]
     harm: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "script_confidence")]
     confidence: f64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "script_nouls")]
     nouls: serde_json::Map<String, Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "script_timeout")]
     timeout: bool,
 }
 
@@ -2160,6 +2389,57 @@ fn default_name() -> String {
 
 fn default_harm() -> String {
     "read".to_string()
+}
+
+fn script_harm<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value.as_str() {
+        Some(word) => Ok(word.to_string()),
+        None => Err(serde::de::Error::custom(format!(
+            "script harm must be none, read, write, exec, network, or money, got {value}"
+        ))),
+    }
+}
+
+fn script_confidence<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value.as_f64() {
+        Some(number) => Ok(number),
+        None => Err(serde::de::Error::custom(format!(
+            "script confidence must be from 0 to 1, got {value}"
+        ))),
+    }
+}
+
+fn script_nouls<'de, D>(deserializer: D) -> Result<serde_json::Map<String, Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Object(map) => Ok(map),
+        value => Err(serde::de::Error::custom(format!(
+            "script nouls must be an object, got {value}"
+        ))),
+    }
+}
+
+fn script_timeout<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value.as_bool() {
+        Some(flag) => Ok(flag),
+        None => Err(serde::de::Error::custom(format!(
+            "script timeout must be a bool, got {value}"
+        ))),
+    }
 }
 
 #[cfg(test)]

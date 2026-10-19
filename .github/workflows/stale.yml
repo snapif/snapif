@@ -30,3 +30,32 @@ jobs:
           days-before-close: 14
           stale-issue-message: "This issue has had no activity for 60 days. It will close in 14 days unless someone comments."
           stale-pr-message: "This pull request has had no activity for 60 days. It will close in 14 days unless someone comments."
+
+  report-schedule:
+    name: Report scheduled failure
+    if: always() && github.event_name == 'schedule'
+    needs: [stale]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25 # v2
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Open or close the scheduled failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPORT_WORKFLOW: stale
+          REPORT_PREFIX: "nightly: Stale workflow failed"
+          ASSIGNEE: ${{ vars.NIGHTLY_FAILURE_ASSIGNEE }}
+          REPORT_RESULTS: |
+            Stale=${{ needs.stale.result }}
+        run: python3 scripts/report_scheduled_failure.py

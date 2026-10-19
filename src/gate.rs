@@ -587,6 +587,8 @@ fn append_gate_log(
         "expected": word,
         "reasons": reasons,
         "policy": hint.pack,
+        "backend_id": hint.backend_id,
+        "first_hop_error": hint.meta.values().any(|row| row.first_hop_error),
     });
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -1247,12 +1249,14 @@ mod tests {
         let req = tag_request(json!({}));
         let model = "jev-latest";
         let timeout = std::time::Duration::from_millis(2000);
-        let first = super::gate_cache_key(&client, &req, &policy, model, timeout);
-        let again = super::gate_cache_key(&client, &req, &policy, model, timeout);
+        let first =
+            super::gate_cache_key(&client, &req, &policy, model, timeout).expect("cache key");
+        let again =
+            super::gate_cache_key(&client, &req, &policy, model, timeout).expect("cache key");
         assert_eq!(first, again);
-        assert!(first.is_some());
         let changed = tag_request(json!({"n": 1}));
-        let second = super::gate_cache_key(&client, &changed, &policy, model, timeout);
+        let second =
+            super::gate_cache_key(&client, &changed, &policy, model, timeout).expect("changed key");
         assert_ne!(first, second);
         let uncached = Client::<AnyBackend>::from_config(&crate::ClientConfig {
             backend: "fake".to_string(),
@@ -1467,7 +1471,45 @@ mod tests {
         assert!(matches!(verdict, crate::verdict::Verdict::Escalate(_)));
         let text = std::fs::read_to_string(&path).expect("log");
         assert!(text.contains("\"timeout\":true"), "{text}");
+        assert!(text.contains("\"backend_id\":\"fake\""), "{text}");
+        assert!(text.contains("\"first_hop_error\":false"), "{text}");
         assert!(!text.contains("\"harm\":\"read\""), "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn first_hop_error_is_on_the_log_row() {
+        let path = std::env::temp_dir().join(format!("snapif-hop-log-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let cascade = crate::backends::cascade::Cascaded::new(
+            FakeBackend::new().on_timeout("harm_class"),
+            read_backend(),
+            crate::backends::cascade::CascadeRule::new(0.8),
+        );
+        let mut client = Client::new(cascade).policy(Policy::shipped("tool-gate").expect("policy"));
+        client.log_path = Some(path.clone());
+        let verdict = pollster::block_on(client.gate(tag_request(json!({})))).expect("gate");
+        let hint = match &verdict {
+            crate::verdict::Verdict::Auto(hint)
+            | crate::verdict::Verdict::Review(hint)
+            | crate::verdict::Verdict::Escalate(hint) => hint,
+        };
+        assert!(
+            hint.meta.values().any(|row| row.first_hop_error),
+            "{verdict:?}"
+        );
+        assert!(
+            hint.backend_id.starts_with("cascade:"),
+            "{}",
+            hint.backend_id
+        );
+        let text = std::fs::read_to_string(&path).expect("log");
+        assert!(text.contains("\"first_hop_error\":true"), "{text}");
+        assert!(
+            text.contains("\"backend_id\":\"cascade:fake+fake\""),
+            "{text}"
+        );
+        assert!(text.contains("\"timeout\":false"), "{text}");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1484,6 +1526,8 @@ mod tests {
         assert!(text.contains("\"expected\":\"auto\""));
         assert!(text.contains("\"policy\":\"tool-gate\""), "{text}");
         assert!(text.contains("\"reasons\":"), "{text}");
+        assert!(text.contains("\"backend_id\":\"fake\""), "{text}");
+        assert!(text.contains("\"first_hop_error\":false"), "{text}");
         assert!(!text.contains("secret-value"));
         assert!(!text.contains("hidden"));
         let _ = std::fs::remove_file(&path);
@@ -1565,7 +1609,11 @@ mod tests {
                 },
             ),
         ]));
-        assert!(results[0].is_err(), "{:?}", results[0]);
+        assert!(
+            matches!(results[0], Err(crate::Error::EmptyActionId)),
+            "{:?}",
+            results[0]
+        );
         let first = super::take_hint(results[1].as_ref().expect("second").clone());
         let second = super::take_hint(results[2].as_ref().expect("third").clone());
         assert_eq!(first.model, "model-a");

@@ -91,16 +91,16 @@ fn to_vec(value: &impl Serialize) -> Result<Vec<u8>, WireError> {
     serde_json::to_vec(value).map_err(json_error)
 }
 
-fn known_type(value: &Value) -> Result<(), WireError> {
+fn known_type(id: &str, value: &Value) -> Result<(), WireError> {
     let name = match value.get("type").and_then(Value::as_str) {
-        None => "missing".to_string(),
-        Some("") => "empty".to_string(),
-        Some(name) => name.to_string(),
+        None => "missing",
+        Some("") => "empty",
+        Some(name) => name,
     };
-    if matches!(name.as_str(), "choice" | "score" | "noul") {
+    if matches!(name, "choice" | "score" | "noul") {
         Ok(())
     } else {
-        Err(WireError::UnknownType(name))
+        Err(WireError::UnknownType(format!("{name} on {id}")))
     }
 }
 
@@ -130,9 +130,19 @@ fn validate(request: &WireRequest) -> Result<(), WireError> {
 
 pub fn decode_request(bytes: &[u8]) -> Result<WireRequest, WireError> {
     let value: Value = serde_json::from_slice(bytes).map_err(json_error)?;
-    if let Some(questions) = value.get("questions").and_then(Value::as_object) {
-        for question in questions.values() {
-            known_type(question)?;
+    if !value.is_object() {
+        return Err(WireError::Json(
+            "expected a JSON object with state and questions".to_string(),
+        ));
+    }
+    if let Some(questions) = value.get("questions") {
+        let Some(questions) = questions.as_object() else {
+            return Err(WireError::Json(
+                "questions must be a JSON object".to_string(),
+            ));
+        };
+        for (id, question) in questions {
+            known_type(id, question)?;
         }
     }
     let request: WireRequest = serde_json::from_value(value).map_err(json_error)?;
@@ -163,10 +173,23 @@ where
 
 pub fn decode_response(bytes: &[u8]) -> Result<WireResponse, WireError> {
     let value: Value = serde_json::from_slice(bytes).map_err(json_error)?;
-    if let Some(answers) = value.get("answers").and_then(Value::as_object) {
-        for answer in answers.values() {
-            known_type(answer)?;
+    if !value.is_object() {
+        return Err(WireError::Json(
+            "expected a JSON object with model, answers, and usage".to_string(),
+        ));
+    }
+    if let Some(answers) = value.get("answers") {
+        let Some(answers) = answers.as_object() else {
+            return Err(WireError::Json("answers must be a JSON object".to_string()));
+        };
+        for (id, answer) in answers {
+            known_type(id, answer)?;
         }
+    }
+    if let Some(usage) = value.get("usage")
+        && !usage.is_object()
+    {
+        return Err(WireError::Json("usage must be a JSON object".to_string()));
     }
     serde_json::from_value(value).map_err(json_error)
 }

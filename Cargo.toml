@@ -40,6 +40,15 @@ reqwest = { version = "0.13", optional = true, default-features = false, feature
 tokio = { version = "1", optional = true, features = ["rt", "macros", "time"] }
 url = { version = "2", optional = true }
 clap = { version = "4", optional = true, features = ["derive"] }
+flate2 = "1.1.10"
+bzip2 = "0.6.1"
+lzma-rs = "0.3.0"
+ruzstd = "0.9.1"
+lz4_flex = "0.14.0"
+brotli-decompressor = "6.1.0"
+tar = { version = "0.4.46", default-features = false }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
+sevenz-rust2 = { version = "0.24.1", default-features = false, features = ["util", "compress"] }
 
 [dev-dependencies]
 pollster = "1.0"

@@ -18,6 +18,8 @@ allow = [
     "NCSA",
     # foldhash 0.2, via serde_json 1.0.154. OSI approved.
     "Zlib",
+    # libbz2-rs-sys, the pure Rust bzip2 decoder.
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.8
 

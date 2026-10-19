@@ -80,8 +80,8 @@ fn pack(name: &str, questions: Vec<Question>, again: Vec<Question>) {
     )
     .expect("gate");
     assert!(
-        !matches!(verdict, Verdict::Auto(_)),
-        "{name} gate returned auto"
+        matches!(verdict, Verdict::Review(_)),
+        "{name} gate was {verdict:?}"
     );
 }
 

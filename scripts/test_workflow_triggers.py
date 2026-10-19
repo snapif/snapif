@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import tempfile
@@ -155,10 +156,12 @@ class WorkflowTriggerTests(unittest.TestCase):
         on_block = _on_block(after)
         self.assertIn("workflow_run:", on_block)
         self.assertIn("workflow_dispatch:", on_block)
-        self.assertIn('workflows: ["CI"]', after)
+        self.assertIn('workflows: ["CI", "Auto-approve"]', after)
         self.assertIn('gh workflow run "Release Please"', after)
         self.assertIn("github-actions", after)
         self.assertIn("release-please*)", after)
+        self.assertIn("draft pull request", after)
+        self.assertIn('[ "$TRIGGER" = "Auto-approve" ] && [ "$i" -le 6 ]', after)
 
     def test_composite_action_does_not_interpolate_inputs_in_run(self) -> None:
         text = (ROOT / ".github" / "actions" / "snapif" / "action.yml").read_text(
@@ -385,6 +388,316 @@ class WorkflowTriggerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn("FAIL:", result.stdout)
             self.assertNotIn("README badges match live signals", result.stdout)
+
+
+class ScheduledFailureTests(unittest.TestCase):
+    def test_scheduled_workflows_call_the_planner(self) -> None:
+        for name in ("security.yml", "stale.yml"):
+            text = (WORKFLOWS / name).read_text(encoding="utf-8")
+            self.assertNotIn("--search", text)
+            self.assertNotIn("gh issue comment", text)
+            job = _job(text, "report-schedule")
+            self.assertIn("python3 scripts/report_scheduled_failure.py", job)
+            self.assertIn("persist-credentials: false", job)
+            self.assertIn("issues: write", job)
+            self.assertIn("contents: read", job)
+            self.assertIn("vars.NIGHTLY_FAILURE_ASSIGNEE", job)
+            self.assertIn("always() && github.event_name == 'schedule'", job)
+        security = _job(
+            (WORKFLOWS / "security.yml").read_text(encoding="utf-8"),
+            "report-schedule",
+        )
+        self.assertIn("REPORT_WORKFLOW: security", security)
+        self.assertIn(
+            'REPORT_PREFIX: "nightly: Security scheduled run failed"',
+            security,
+        )
+        stale = _job(
+            (WORKFLOWS / "stale.yml").read_text(encoding="utf-8"),
+            "report-schedule",
+        )
+        self.assertIn("REPORT_WORKFLOW: stale", stale)
+        self.assertIn('REPORT_PREFIX: "nightly: Stale workflow failed"', stale)
+        self.assertIn("needs: [stale]", stale)
+        source = (ROOT / "scripts" / "report_scheduled_failure.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("--search", source)
+        self.assertNotIn("issue comment", source)
+
+    def test_first_red_opens_an_assigned_issue(self) -> None:
+        actions = _plan([], today="2026-10-18", run_id="99")
+        self.assertEqual(len(actions), 1)
+        created = actions[0]
+        self.assertEqual(created["op"], "create")
+        self.assertEqual(
+            created["title"],
+            "nightly: Security scheduled run failed: CodeQL (1 consecutive day)",
+        )
+        self.assertEqual(created["assignee"], "SebTardif")
+        self.assertEqual(created["labels"], ["nightly-failure", "ready"])
+        for needle in (
+            "Failed jobs: CodeQL.",
+            "This is day 1.",
+            "https://github.com/snapif/snapif/actions/runs/99",
+            '"workflow":"security"',
+            '"first_failed_on":"2026-10-18"',
+            '"signature":"CodeQL"',
+            '"run_id":"99"',
+        ):
+            self.assertIn(needle, created["body"])
+        self.assertNotIn("\u2014", created["body"])
+        named = _plan([], today="2026-10-18", run_id="99", assignee="Ada")
+        self.assertEqual(named[0]["assignee"], "Ada")
+
+    def test_same_day_updates_and_later_day_replaces(self) -> None:
+        current = _open(
+            4,
+            "2026-10-18",
+            "2026-10-18",
+            "CodeQL",
+            "1",
+        )
+        updated = _plan([current], today="2026-10-18", run_id="2")
+        self.assertEqual([item["op"] for item in updated], ["update"])
+        self.assertEqual(updated[0]["number"], 4)
+        self.assertNotIn("assignee", updated[0])
+        self.assertEqual(updated[0]["labels"], ["nightly-failure", "ready"])
+        self.assertIn('"run_id":"2"', updated[0]["body"])
+        self.assertIn("(1 consecutive day)", updated[0]["title"])
+
+        older = _open(4, "2026-10-17", "2026-10-17", "CodeQL", "1")
+        replaced = _plan([older], today="2026-10-18", run_id="8")
+        self.assertEqual([item["op"] for item in replaced], ["create", "close"])
+        self.assertIn("(2 consecutive days)", replaced[0]["title"])
+        self.assertIn('"first_failed_on":"2026-10-17"', replaced[0]["body"])
+        self.assertEqual(replaced[1]["number"], 4)
+        self.assertEqual(replaced[1]["comment"], "Superseded by #{created}.")
+
+    def test_new_signature_replaces_even_on_the_same_day(self) -> None:
+        current = _open(4, "2026-10-18", "2026-10-18", "CodeQL", "1")
+        actions = _plan(
+            [current],
+            today="2026-10-18",
+            run_id="8",
+            results=[("CodeQL", "failure"), ("Scorecard", "failure")],
+        )
+        self.assertEqual([item["op"] for item in actions], ["create", "close"])
+        self.assertIn("CodeQL, Scorecard", actions[0]["title"])
+        self.assertIn("(1 consecutive day)", actions[0]["title"])
+        self.assertIn('"first_failed_on":"2026-10-18"', actions[0]["body"])
+
+    def test_same_run_is_a_noop_and_still_closes_a_duplicate(self) -> None:
+        current = _open(8, "2026-10-18", "2026-10-18", "CodeQL", "99")
+        self.assertEqual(
+            _plan([current], today="2026-10-18", run_id="99"),
+            [],
+        )
+        older = _open(3, "2026-10-17", "2026-10-17", "CodeQL", "1")
+        actions = _plan([older, current], today="2026-10-18", run_id="99")
+        self.assertEqual(
+            actions,
+            [
+                {
+                    "op": "close",
+                    "number": 3,
+                    "comment": "Superseded by #8.",
+                }
+            ],
+        )
+
+    def test_green_closes_prefix_matches_and_ignores_other_workflows(self) -> None:
+        security = _open(4, "2026-10-17", "2026-10-17", "CodeQL", "1")
+        legacy = {
+            "number": 2,
+            "title": "nightly: Security scheduled run failed",
+            "body": "old",
+            "created_on": "2026-10-16",
+            "labels": [],
+        }
+        other = {
+            "number": 9,
+            "title": "nightly: Stale workflow failed: Stale (1 consecutive day)",
+            "body": _report().state_comment("stale", "2026-10-18", "Stale", "3"),
+            "created_on": "2026-10-18",
+            "labels": ["nightly-failure"],
+        }
+        actions = _plan(
+            [other, legacy, security],
+            today="2026-10-18",
+            run_id="10",
+            results=[("CodeQL", "success"), ("Dependency Review", "skipped")],
+        )
+        self.assertEqual([item["op"] for item in actions], ["close", "close"])
+        self.assertEqual({item["number"] for item in actions}, {2, 4})
+        self.assertIn(
+            "https://github.com/snapif/snapif/actions/runs/10",
+            actions[0]["comment"],
+        )
+
+    def test_cancelled_and_empty_do_not_close(self) -> None:
+        current = _open(4, "2026-10-17", "2026-10-17", "CodeQL", "1")
+        self.assertEqual(
+            _plan(
+                [current],
+                today="2026-10-18",
+                run_id="10",
+                results=[("CodeQL", "cancelled"), ("Scorecard", "success")],
+            ),
+            [],
+        )
+        self.assertEqual(
+            _plan([current], today="2026-10-18", run_id="10", results=[]),
+            [],
+        )
+        self.assertEqual(
+            _plan(
+                [current],
+                today="2026-10-18",
+                run_id="10",
+                results=[("CodeQL", "unknown")],
+            ),
+            [],
+        )
+
+    def test_legacy_issue_from_an_earlier_day_keeps_its_start(self) -> None:
+        legacy = {
+            "number": 6,
+            "title": "nightly: Security scheduled run failed",
+            "body": "comment stack",
+            "created_on": "2026-10-13",
+            "labels": [],
+        }
+        actions = _plan([legacy], today="2026-10-18", run_id="11")
+        self.assertEqual(actions[0]["op"], "create")
+        self.assertIn('"first_failed_on":"2026-10-13"', actions[0]["body"])
+        self.assertIn("(6 consecutive days)", actions[0]["title"])
+        self.assertNotIn("\u2014", actions[0]["body"])
+
+    def test_cli_creates_without_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            log = Path(tmp) / "gh.log"
+            gh = bin_dir / "gh"
+            gh.write_text(
+                "\n".join(
+                    [
+                        "#!/usr/bin/env python3",
+                        "import json, os, sys",
+                        "from pathlib import Path",
+                        "Path(os.environ['GH_LOG']).open('a', encoding='utf-8').write(",
+                        "    json.dumps(sys.argv[1:]) + '\\n'",
+                        ")",
+                        "cmd = sys.argv[1:3]",
+                        "if cmd == ['issue', 'list']:",
+                        "    print('[]')",
+                        "elif cmd == ['label', 'list']:",
+                        '    print(\'[{"name":"ready"},{"name":"nightly-failure"}]\')',
+                        "elif cmd == ['issue', 'create']:",
+                        "    print('7')",
+                        "else:",
+                        "    raise SystemExit('unexpected ' + ' '.join(sys.argv[1:]))",
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            env["GH_LOG"] = str(log)
+            env["REPO"] = "snapif/snapif"
+            env["RUN_ID"] = "99"
+            env["RUN_URL"] = "https://github.com/snapif/snapif/actions/runs/99"
+            env["REPORT_WORKFLOW"] = "security"
+            env["REPORT_PREFIX"] = "nightly: Security scheduled run failed"
+            env["ASSIGNEE"] = " "
+            env["REPORT_TODAY"] = "2026-10-18"
+            env["REPORT_RESULTS"] = "CodeQL=failure\nDependency Review=skipped\n"
+            result = subprocess.run(
+                ["python3", str(ROOT / "scripts" / "report_scheduled_failure.py")],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            listed = next(call for call in calls if call[:2] == ["issue", "list"])
+            self.assertNotIn("--search", listed)
+            self.assertIn("--state", listed)
+            self.assertIn("open", listed)
+            self.assertIn("number,title,body,labels,createdAt", listed)
+            created = next(call for call in calls if call[:2] == ["issue", "create"])
+            self.assertIn("SebTardif", created)
+            self.assertIn("nightly-failure", created)
+            self.assertIn("ready", created)
+            self.assertFalse(any(call[:2] == ["issue", "comment"] for call in calls))
+
+
+def _job(text: str, job_id: str) -> str:
+    marker = f"\n  {job_id}:"
+    start = text.index(marker) + 1
+    lines = text[start:].splitlines()
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if line.startswith("  ") and not line.startswith("   ") and line.endswith(":"):
+            break
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def _report():
+    import importlib.util
+
+    path = ROOT / "scripts" / "report_scheduled_failure.py"
+    spec = importlib.util.spec_from_file_location("report_scheduled_failure", path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _open(
+    number: int,
+    created_on: str,
+    first_failed_on: str,
+    signature: str,
+    run_id: str,
+) -> dict:
+    module = _report()
+    return {
+        "number": number,
+        "title": "nightly: Security scheduled run failed",
+        "body": module.state_comment("security", first_failed_on, signature, run_id),
+        "created_on": created_on,
+        "labels": ["nightly-failure", "ready"],
+    }
+
+
+def _plan(
+    issues: list,
+    *,
+    today: str,
+    run_id: str,
+    assignee: str = "",
+    results: list | None = None,
+) -> list:
+    module = _report()
+    if results is None:
+        results = [("CodeQL", "failure"), ("Dependency Review", "skipped")]
+    return module.plan(
+        today=today,
+        workflow="security",
+        prefix="nightly: Security scheduled run failed",
+        assignee=assignee,
+        run_id=run_id,
+        run_url=f"https://github.com/snapif/snapif/actions/runs/{run_id}",
+        results=results,
+        issues=issues,
+    )
 
 
 def _automerge():
