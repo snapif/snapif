@@ -456,7 +456,11 @@ fn check_action(
 /// and `split --filter=cat` print the file. `gsplit -n 1/1` prints it
 /// too. `gsplit --filter` runs that command. `while read -r`
 /// then `printf` or `echo` of that name prints the file. `&&` between
-/// the `read` and that print does too. `mapfile -t` then
+/// the `read` and that print does too. `|| true`, `&& false`, and `&& :`
+/// after that print still leave the line. `"${line}"` and `"${line[0]}"`
+/// are that same name. `IFS=`, `builtin`, and `command` before `read`
+/// or `mapfile` still print that line. `mapfile -t` then `echo` of `$x` prints the first
+/// line, and `"${x[@]}"` prints every line. `mapfile -t` then
 /// `printf` or `echo` of the first element prints that line. `read -r line < path`
 /// then `printf` or `echo` of that name prints that line. Without `-n`,
 /// `sed 3p` still prints every line. `sort`, `uniq`, and `tac` print
@@ -5711,10 +5715,11 @@ fn read_back_print(body: &str, depth: u32, substitutions: &mut Vec<String>) -> O
     if let Some(path) = while_read_path(&words) {
         return Some(loaded_print(path, depth, substitutions, false));
     }
-    if let Some(path) = mapfile_first_path(&words) {
-        return Some(loaded_print(path, depth, substitutions, true));
+    let peeled = peel_simple_prefix(&words);
+    if let Some((path, first_only)) = mapfile_path(peeled) {
+        return Some(loaded_print(path, depth, substitutions, first_only));
     }
-    if let Some(path) = scalar_read_path(&words) {
+    if let Some(path) = scalar_read_path(peeled) {
         return Some(loaded_print(path, depth, substitutions, true));
     }
     None
@@ -5808,6 +5813,43 @@ fn loose_words(body: &str) -> Option<Vec<String>> {
     Some(words)
 }
 
+fn no_output_tail(words: &[String]) -> bool {
+    words
+        .iter()
+        .all(|word| matches!(word.as_str(), "true" | "false" | ":"))
+}
+
+enum PrintedSpan {
+    First,
+    All,
+}
+
+fn printed_span(token: &str, name: &str) -> Option<PrintedSpan> {
+    if token == format!("${name}")
+        || token == format!("${{{name}}}")
+        || token == format!("${{{name}[0]}}")
+    {
+        Some(PrintedSpan::First)
+    } else if token == format!("${{{name}[@]}}") {
+        Some(PrintedSpan::All)
+    } else {
+        None
+    }
+}
+
+fn peel_simple_prefix(words: &[String]) -> &[String] {
+    let mut index = 0usize;
+    while index < words.len() {
+        let word = words[index].as_str();
+        if word == "builtin" || word == "command" || plain_assignment(word).is_some() {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    &words[index..]
+}
+
 fn shell_name(token: &str) -> bool {
     let mut chars = token.chars();
     match chars.next() {
@@ -5831,30 +5873,35 @@ fn scalar_read_path(words: &[String]) -> Option<&str> {
     }
     index += 1;
     let (path, next) = split_redirect(words, index)?;
-    let expect = format!("${name}");
-    match words.get(next).map(String::as_str) {
+    let end = match words.get(next).map(String::as_str) {
         Some("printf") => {
             if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
                 return None;
             }
-            if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
+            if words
+                .get(next + 2)
+                .is_none_or(|word| printed_span(word, name).is_none())
+            {
                 return None;
             }
-            if words.len() != next + 3 {
-                return None;
-            }
+            next + 3
         }
         Some("echo") => {
-            if words.get(next + 1).map(String::as_str) != Some(expect.as_str()) {
+            if words
+                .get(next + 1)
+                .is_none_or(|word| printed_span(word, name).is_none())
+            {
                 return None;
             }
-            if words.len() != next + 2 {
-                return None;
-            }
+            next + 2
         }
         _ => return None,
+    };
+    if no_output_tail(&words[end..]) {
+        Some(path)
+    } else {
+        None
     }
-    Some(path)
 }
 
 fn while_read_path(words: &[String]) -> Option<&str> {
@@ -5876,7 +5923,6 @@ fn while_read_path(words: &[String]) -> Option<&str> {
         return None;
     }
     index += 1;
-    let expect = format!("${name}");
     match words.get(index).map(String::as_str) {
         Some("printf") => {
             index += 1;
@@ -5884,14 +5930,20 @@ fn while_read_path(words: &[String]) -> Option<&str> {
                 return None;
             }
             index += 1;
-            if words.get(index).map(String::as_str) != Some(expect.as_str()) {
+            if words
+                .get(index)
+                .is_none_or(|word| printed_span(word, name).is_none())
+            {
                 return None;
             }
             index += 1;
         }
         Some("echo") => {
             index += 1;
-            if words.get(index).map(String::as_str) != Some(expect.as_str()) {
+            if words
+                .get(index)
+                .is_none_or(|word| printed_span(word, name).is_none())
+            {
                 return None;
             }
             index += 1;
@@ -5901,7 +5953,7 @@ fn while_read_path(words: &[String]) -> Option<&str> {
     redirect_path(words, index)
 }
 
-fn mapfile_first_path(words: &[String]) -> Option<&str> {
+fn mapfile_path(words: &[String]) -> Option<(&str, bool)> {
     if words.first().map(String::as_str) != Some("mapfile")
         || words.get(1).map(String::as_str) != Some("-t")
     {
@@ -5912,30 +5964,26 @@ fn mapfile_first_path(words: &[String]) -> Option<&str> {
         return None;
     }
     let (path, next) = split_redirect(words, 3)?;
-    let expect = format!("${{{name}[0]}}");
-    match words.get(next).map(String::as_str) {
+    let (end, span) = match words.get(next).map(String::as_str) {
         Some("printf") => {
             if words.get(next + 1).map(String::as_str) != Some("%s\\n") {
                 return None;
             }
-            if words.get(next + 2).map(String::as_str) != Some(expect.as_str()) {
-                return None;
-            }
-            if words.len() != next + 3 {
-                return None;
-            }
+            let word = words.get(next + 2)?;
+            let span = printed_span(word, name)?;
+            (next + 3, span)
         }
         Some("echo") => {
-            if words.get(next + 1).map(String::as_str) != Some(expect.as_str()) {
-                return None;
-            }
-            if words.len() != next + 2 {
-                return None;
-            }
+            let word = words.get(next + 1)?;
+            let span = printed_span(word, name)?;
+            (next + 2, span)
         }
         _ => return None,
+    };
+    if !no_output_tail(&words[end..]) {
+        return None;
     }
-    Some(path)
+    Some((path, matches!(span, PrintedSpan::First)))
 }
 
 fn redirect_path(words: &[String], index: usize) -> Option<&str> {
@@ -5943,11 +5991,7 @@ fn redirect_path(words: &[String], index: usize) -> Option<&str> {
         return None;
     }
     let (path, next) = split_redirect(words, index + 1)?;
-    // `&& true` after the loop still leaves the loop's stdout.
-    if words[next..]
-        .iter()
-        .all(|word| matches!(word.as_str(), "true" | "false" | ":"))
-    {
+    if no_output_tail(&words[next..]) {
         return Some(path);
     }
     None
@@ -14114,6 +14158,29 @@ mod tests {
             format!(
                 r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {push_s} && true)""#
             ),
+            format!(r#"eval "$(read -r line < {push_s} && printf '%s\n' "$line" || true)""#),
+            format!(r#"eval "$(read -r line < {push_s} && printf '%s\n' "$line" && false)""#),
+            format!(r#"eval "$(read -r line < {push_s} && echo "$line" && :)""#),
+            format!(r#"eval "$(mapfile -t x < {push_s} && printf '%s\n' "${{x[0]}}" || true)""#),
+            format!(r#"eval "$(read -r line < {push_s} && printf '%s\n' "${{line}}")""#),
+            format!(r#"eval "$(read -r line < {push_s}; printf "%s\n" "${{line}}")""#),
+            format!(r#"eval "$(read -r line < {push_s} && echo "${{line}}")""#),
+            format!(r#"eval "$(read -r line < {push_s} && printf '%s\n' "${{line[0]}}")""#),
+            format!(
+                r#"eval "$(while read -r line; do printf '%s\n' "${{line}}"; done < {push_s})""#
+            ),
+            format!(r#"eval "$(while read -r line; do echo "${{line}}"; done < {push_s})""#),
+            format!(r#"eval "$(mapfile -t x < {push_s}; echo "$x")""#),
+            format!(r#"eval "$(mapfile -t x < {push_s}; echo "${{x}}")""#),
+            format!(r#"eval "$(mapfile -t x < {push_s} && printf '%s\n' "$x")""#),
+            format!(r#"eval "$(mapfile -t x < {multi_s}; printf '%s\n' "${{x[@]}}")""#),
+            format!(r#"eval "$(IFS= read -r line < {push_s} && printf '%s\n' "$line")""#),
+            format!(r#"eval "$(builtin read -r line < {push_s} && printf '%s\n' "$line")""#),
+            format!(r#"eval "$(command read -r line < {push_s} && printf '%s\n' "$line")""#),
+            format!(r#"eval "$(IFS= command read -r line < {push_s} && printf '%s\n' "$line")""#),
+            format!(r#"eval "$(builtin mapfile -t x < {push_s} && printf '%s\n' "${{x[0]}}")""#),
+            format!(r#"eval "$(command mapfile -t x < {push_s} && echo "$x")""#),
+            format!(r#"eval "$(IFS= mapfile -t x < {push_s} && printf '%s\n' "$x")""#),
             format!(r#"eval "$(read line < {push_s}; printf '%s\n' "$line")""#),
             format!(r#"eval "$(read -r line < {push_s}; printf "%s\n" "$line")""#),
             format!(r#"eval "$(read -r line < {push_s}; echo "$line")""#),
@@ -14391,6 +14458,14 @@ mod tests {
             format!(
                 r#"eval "$(while read -r line; do printf '%s\n' "$line"; done < {echo_s} && true)""#
             ),
+            format!(r#"eval "$(read -r line < {echo_s} && printf '%s\n' "$line" || true)""#),
+            format!(r#"eval "$(mapfile -t x < {echo_s} && printf '%s\n' "${{x[0]}}" || true)""#),
+            format!(r#"eval "$(read -r line < {echo_s} && printf '%s\n' "${{line}}")""#),
+            format!(r#"eval "$(mapfile -t x < {echo_s}; echo "$x")""#),
+            format!(r#"eval "$(while read -r line; do echo "${{line}}"; done < {echo_s})""#),
+            format!(r#"eval "$(mapfile -t x < {echo_s}; printf '%s\n' "${{x[@]}}")""#),
+            format!(r#"eval "$(IFS= read -r line < {echo_s} && printf '%s\n' "$line")""#),
+            format!(r#"eval "$(builtin mapfile -t x < {echo_s} && echo "$x")""#),
             format!(r#"eval "$(read -r line < {echo_s}; echo "$line")""#),
             format!("eval \"$(printf '%s\\n' {echo_s} | gxargs cat)\""),
             format!("eval \"$(gxargs cat {echo_s})\""),
