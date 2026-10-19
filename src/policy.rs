@@ -496,6 +496,7 @@ fn check_action(
 /// `uncompress -c` prints a compress payload. `tar -xOf` of a `.Z`
 /// archive prints the member. `bsdtar -xOf` prints it too.
 /// `gtar -I lz4` and `gtar -I brotli` print that member.
+/// `gtar -xOf` of an lzma archive prints it too.
 /// `7z e -so` prints the archive.
 /// `ruby -rbase64`
 /// that prints `Base64.decode64` of `File.binread` prints it.
@@ -7092,7 +7093,28 @@ fn tar_magic(bytes: &[u8]) -> Option<Vec<u8>> {
         let mut decoder = ruzstd::decoding::StreamingDecoder::new(zstd_frame(bytes)).ok()?;
         return inflate_all(&mut decoder);
     }
+    if let Some(out) = lzma_alone_tar(bytes) {
+        return Some(out);
+    }
     Some(bytes.to_vec())
+}
+
+fn lzma_alone_tar(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.len() < 13 || bytes[0] > 224 {
+        return None;
+    }
+    let dict = u32::from_le_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+    if !(4096..=1 << 27).contains(&dict) {
+        return None;
+    }
+    let mut input = std::io::Cursor::new(bytes);
+    let mut out = Vec::new();
+    lzma_rs::lzma_decompress(&mut input, &mut out).ok()?;
+    if out.len() > 262 && out[257..262] == *b"ustar" {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 fn tar_text(bytes: &[u8], member: Option<&str>, compress: TarCompress) -> Option<String> {
@@ -15814,6 +15836,25 @@ mod tests {
                     178, 232, 167, 242, 234, 254, 37, 208, 167, 27, 137, 134, 33, 11, 11, 95, 191,
                     117, 134, 16, 251, 149, 194, 198, 2, 180, 83, 242, 201, 124, 92, 59, 0, 0,
                 ],
+                "git.lzma" => &[
+                    93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 51, 154, 74, 235,
+                    19, 5, 33, 78, 97, 254, 189, 253, 181, 221, 24, 167, 147, 184, 229, 218, 174,
+                    53, 143, 72, 13, 255, 62, 218, 44, 91, 8, 144, 172, 139, 180, 97, 114, 227, 24,
+                    208, 195, 113, 46, 143, 230, 57, 142, 47, 21, 201, 184, 199, 175, 138, 90, 86,
+                    79, 95, 15, 76, 177, 131, 230, 192, 50, 139, 137, 174, 85, 156, 28, 152, 77,
+                    76, 219, 215, 235, 20, 205, 157, 176, 152, 105, 164, 197, 115, 162, 0, 119,
+                    134, 111, 81, 109, 252, 152, 92, 104, 64, 223, 178, 198, 116, 228, 63, 181,
+                    142, 81, 238, 127, 249, 24, 244, 192,
+                ],
+                "echo.lzma" => &[
+                    93, 0, 0, 128, 0, 255, 255, 255, 255, 255, 255, 255, 255, 0, 50, 152, 201, 79,
+                    139, 152, 159, 47, 49, 49, 28, 82, 151, 13, 122, 209, 64, 66, 7, 64, 70, 74,
+                    201, 106, 166, 127, 65, 192, 246, 106, 197, 83, 54, 132, 38, 255, 207, 208, 97,
+                    208, 157, 101, 51, 14, 253, 131, 61, 210, 144, 138, 28, 99, 32, 178, 25, 197,
+                    33, 235, 73, 162, 239, 115, 31, 179, 5, 85, 120, 37, 228, 29, 58, 161, 207,
+                    223, 215, 208, 236, 208, 96, 97, 237, 179, 186, 40, 151, 156, 74, 244, 247,
+                    250, 75, 235, 100, 131, 20, 13, 239, 181, 111, 255, 255, 67, 124, 0, 0,
+                ],
                 _ => &[],
             }
         }
@@ -16018,6 +16059,10 @@ mod tests {
         std::fs::write(&tbr, wrapped_tar("git.br")).expect("tbr");
         let tbr_hello = dir.join(format!("snapif-c39-tbr-hello-{pid}.tar.br"));
         std::fs::write(&tbr_hello, wrapped_tar("echo.br")).expect("tbr hello");
+        let tlzma = dir.join(format!("snapif-c40-tlzma-{pid}.tar.lzma"));
+        std::fs::write(&tlzma, wrapped_tar("git.lzma")).expect("tlzma");
+        let tlzma_hello = dir.join(format!("snapif-c40-tlzma-hello-{pid}.tar.lzma"));
+        std::fs::write(&tlzma_hello, wrapped_tar("echo.lzma")).expect("tlzma hello");
         let zip_file = dir.join(format!("snapif-c39-zip-{pid}.zip"));
         std::fs::write(&zip_file, zip_bytes("git.txt", "git push origin main\n")).expect("zip");
         let zip_hello = dir.join(format!("snapif-c39-zip-hello-{pid}.zip"));
@@ -16120,6 +16165,8 @@ mod tests {
         let tlz4_hello_s = plain_script_path(&tlz4_hello);
         let tbr_s = plain_script_path(&tbr);
         let tbr_hello_s = plain_script_path(&tbr_hello);
+        let tlzma_s = plain_script_path(&tlzma);
+        let tlzma_hello_s = plain_script_path(&tlzma_hello);
         let zip_s = plain_script_path(&zip_file);
         let zip_hello_s = plain_script_path(&zip_hello);
         let seven_s = plain_script_path(&seven_file);
@@ -16378,6 +16425,9 @@ mod tests {
             format!("eval \"$(gtar -I lz4 -xOf {tlz4_s} git.txt)\""),
             format!("eval \"$(gtar -I 'lz4 -d' -xOf {tlz4_s} git.txt)\""),
             format!("eval \"$(gtar -I brotli -xOf {tbr_s} git.txt)\""),
+            format!("eval \"$(gtar -xOf {tlzma_s} git.txt)\""),
+            format!("eval \"$(tar -xOf {tlzma_s} git.txt)\""),
+            format!("eval \"$(gtar -I lzma -xOf {tlzma_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s} git.txt)\""),
             format!("eval \"$(unzip -p {zip_s})\""),
             format!("eval \"$(7z e -so {seven_s})\""),
@@ -16829,6 +16879,8 @@ mod tests {
             format!("eval \"$(bsdtar -xOf {tar_hello_s} echo.txt)\""),
             format!("eval \"$(gtar -I lz4 -xOf {tlz4_hello_s} echo.txt)\""),
             format!("eval \"$(gtar -I brotli -xOf {tbr_hello_s} echo.txt)\""),
+            format!("eval \"$(gtar -xOf {tlzma_hello_s} echo.txt)\""),
+            format!("eval \"$(tar -xOf {tlzma_hello_s} echo.txt)\""),
             format!("eval \"$(unzip -p {zip_hello_s} echo.txt)\""),
             format!("eval \"$(7z e -so {seven_hello_s})\""),
             format!("eval \"$(7z e {seven_s})\""),
