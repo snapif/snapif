@@ -509,6 +509,8 @@ fn check_action(
 /// `compress.bzip2://` prints it. `zip://` of a named member prints
 /// that member. `zipfile.Path` `read_bytes` prints it. `Archive::Zip`
 /// `contents` prints it. `GzipReader.new` prints a gzip payload.
+/// `GzipReader.open` with `&:read` prints it. `ZipFile.open` and
+/// `namelist()[0]` print a zip member.
 /// `gzip.open` in text mode, `gzfile`, and `compress.zlib://` print
 /// a gzip payload. `GzipReader` `readlines` prints it too.
 /// `bz2.open` and `lzma.open` in text mode print those payloads.
@@ -7263,6 +7265,20 @@ fn unzip_query(args: &[String]) -> Option<ArchiveQuery> {
     })
 }
 
+fn unzip_first(bytes: &[u8]) -> Option<String> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index).ok()?;
+        if file.is_dir() {
+            continue;
+        }
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut out).ok()?;
+        return String::from_utf8(out).ok();
+    }
+    None
+}
+
 fn unzip_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
     let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
     let mut out = Vec::new();
@@ -11772,6 +11788,7 @@ fn ruby_gzip_query(name: &str, args: &[String]) -> Option<(RubyInflate, String)>
         | "Zlib::GzipReader.open(ARGV[0]){|f|printf.read}"
         | "printZlib::GzipReader.wrap(File.open(ARGV[0])){|f|f.read}"
         | "printZlib::GzipReader.new(File.open(ARGV[0])).read"
+        | "printZlib::GzipReader.open(ARGV[0],&:read)"
         | "printZlib.gunzip(File.binread(ARGV[0]))" => RubyInflate::Gzip,
         "printZlib::Inflate.new.inflate(File.binread(ARGV[0]))"
         | "printZlib.inflate(File.binread(ARGV[0]))" => RubyInflate::Zlib,
@@ -11875,7 +11892,13 @@ fn python_cat_run(
     if let Some(query) = python_archive_query(args) {
         return produced_archive(&query.archive, |bytes| match query.kind {
             PyArchive::Tar => tar_text(bytes, query.member.as_deref(), TarCompress::Auto),
-            PyArchive::Zip => unzip_text(bytes, query.member.as_deref()),
+            PyArchive::Zip => {
+                if query.member.is_none() {
+                    unzip_first(bytes)
+                } else {
+                    unzip_text(bytes, query.member.as_deref())
+                }
+            }
         });
     }
     let Some(file) = python_cat_query(args) else {
@@ -11944,6 +11967,18 @@ fn python_archive_query(args: &[String]) -> Option<PyArchiveQuery> {
         script_file_text(&path)?
     };
     let compact = compact_ws(&script);
+    if compact
+        == "importsys,zipfile;z=zipfile.ZipFile(sys.argv[1]);sys.stdout.buffer.write(z.read(z.namelist()[0]))"
+    {
+        if files.len() != 1 {
+            return None;
+        }
+        return Some(PyArchiveQuery {
+            kind: PyArchive::Zip,
+            archive: files.remove(0),
+            member: None,
+        });
+    }
     let (kind, archive_at, member_at) = match compact.as_str() {
         "importsys,tarfile;sys.stdout.buffer.write(tarfile.open(sys.argv[1]).extractfile(sys.argv[2]).read())" => {
             (PyArchive::Tar, 0usize, 1usize)
@@ -11955,7 +11990,8 @@ fn python_archive_query(args: &[String]) -> Option<PyArchiveQuery> {
             (PyArchive::Zip, 0, 1)
         }
         "importsys,zipfile;sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))"
-        | "importsys,zipfile;sys.stdout.buffer.write(zipfile.Path(sys.argv[1],sys.argv[2]).read_bytes())" => {
+        | "importsys,zipfile;sys.stdout.buffer.write(zipfile.Path(sys.argv[1],sys.argv[2]).read_bytes())"
+        | "importsys,zipfile;sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).open(sys.argv[2]).read())" => {
             (PyArchive::Zip, 0, 1)
         }
         _ => return None,
@@ -17460,6 +17496,15 @@ mod tests {
                 r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.new(File.open(ARGV[0])).read' {gz_s})""#
             ),
             format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.open(ARGV[0], &:read)' {gz_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).open(sys.argv[2]).read())' {zip_s} git.txt)""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(z.namelist()[0]))' {zip_s})""#
+            ),
+            format!(
                 r#"eval "$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.Path(sys.argv[1], sys.argv[2]).read_bytes())' {zip_s} git.txt)""#
             ),
             format!(
@@ -18195,6 +18240,15 @@ mod tests {
             ),
             format!(
                 r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.new(File.open(ARGV[0])).read' {gz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(ruby -rzlib -e 'print Zlib::GzipReader.open(ARGV[0], &:read)' {gz_hello_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).open(sys.argv[2]).read())' {zip_hello_s} echo.txt)""#
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1]); sys.stdout.buffer.write(z.read(z.namelist()[0]))' {zip_hello_s})""#
             ),
             format!(
                 r#"eval "$(python3 -c 'import sys,zipfile; sys.stdout.buffer.write(zipfile.Path(sys.argv[1], sys.argv[2]).read_bytes())' {zip_hello_s} echo.txt)""#
