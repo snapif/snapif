@@ -567,6 +567,16 @@ fn check_action(
 /// and `perl -e 'print <>'`, `File.readlines(...).join`,
 /// `Path.read_bytes` after `from pathlib import Path`, and
 /// `readFileSync` with `'utf8'`,
+/// `perl -e 'print while <>'`, `while (<>) { print }`, and
+/// `print $_ while <>` print the file. Python `print` of `open`
+/// with `encoding='utf-8'`, `sys.stdout.write` of `Path.read_text()`,
+/// and that read with `encoding='utf-8'` print it. `join("")`,
+/// `File.foreach`, `IO.foreach`, and `puts File.readlines` print it.
+/// `readFileSync` with `'utf-8'` or `"utf-8"`, and `require('fs')`
+/// `readFileSync` with or without `'utf8'`, print it. PHP `implode`
+/// of `file`, `stream_get_contents` of `fopen`, and `fread` of
+/// `fopen` with length 4096 print it. `fgets` of `fopen` prints the
+/// first line.
 /// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
@@ -11526,7 +11536,7 @@ fn line_print_query(name: &str, args: &[String]) -> Option<Option<String>> {
         }
         Some(text)
             if command_basename(name) == "perl"
-                && compact_ws(&text) == "print<>"
+                && perl_diamond_prints(&text)
                 && files.len() == 1 =>
         {
             Some(files.first().cloned())
@@ -11551,6 +11561,14 @@ fn line_prints_current(script: &str) -> bool {
     )
 }
 
+fn perl_diamond_prints(script: &str) -> bool {
+    let compact = compact_ws(script);
+    matches!(
+        compact.as_str(),
+        "print<>" | "printwhile<>" | "while(<>){print}" | "print$_while<>"
+    )
+}
+
 fn ruby_reads_argv0(script: &str) -> bool {
     let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
     matches!(
@@ -11559,6 +11577,10 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "printFile.binread(ARGV[0])"
             | "printFile.open(ARGV[0]).read"
             | "printFile.readlines(ARGV[0]).join"
+            | "printFile.readlines(ARGV[0]).join(\"\")"
+            | "File.foreach(ARGV[0]){|l|printl}"
+            | "IO.foreach(ARGV[0]){|l|printl}"
+            | "putsFile.readlines(ARGV[0])"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "printIO.binread(ARGV[0])"
@@ -12068,7 +12090,10 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importsys;print(open(sys.argv[1]).read())"
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
+            | "importsys;print(open(sys.argv[1],encoding='utf-8').read())"
             | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
+            | "importsys;frompathlibimportPath;sys.stdout.write(Path(sys.argv[1]).read_text())"
+            | "importsys;frompathlibimportPath;sys.stdout.write(Path(sys.argv[1]).read_text(encoding='utf-8'))"
             | "importsys;frompathlibimportPath;sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
@@ -12163,6 +12188,10 @@ fn node_reads_argv1(script: &str) -> bool {
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))"
             | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1]))"
             | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))"
+            | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1],'utf-8'))"
+            | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf-8\"))"
+            | "process.stdout.write(require('fs').readFileSync(process.argv[1]))"
+            | "process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1]))"
             | "require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))"
             | "process.stdout.write(Buffer.from(require(\"fs\").readFileSync(process.argv[1]).toString(),\"base64\"))"
@@ -12388,12 +12417,42 @@ fn php_cat_run(
     let Some(file) = php_cat_query(args) else {
         return Run::Unknown;
     };
-    let produced = source_text(file.as_deref(), input, depth, substitutions);
+    let produced = limit_php_plain(
+        args,
+        source_text(file.as_deref(), input, depth, substitutions),
+    );
     if php_b64_script(args) {
         decode_produced(produced)
     } else {
         produced
     }
+}
+
+/// `fgets` prints one line. `fread` of length 4096 prints that many bytes.
+fn limit_php_plain(args: &[String], produced: Run) -> Run {
+    let Run::Produced { text, ok } = produced else {
+        return produced;
+    };
+    let Some(script) = php_r_script(args) else {
+        return Run::Produced { text, ok };
+    };
+    let text = match compact_ws(script).as_str() {
+        "echofgets(fopen($argv[1],\"r\"));" => first_lines(&text, 1),
+        "echofread(fopen($argv[1],\"r\"),4096);" => first_bytes(&text, 4096),
+        _ => text,
+    };
+    Run::Produced { text, ok }
+}
+
+fn php_r_script(args: &[String]) -> Option<&str> {
+    let mut index = 0usize;
+    while index < args.len() {
+        if args[index] == "-r" {
+            return args.get(index + 1).map(String::as_str);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn php_cat_query(args: &[String]) -> Option<Option<String>> {
@@ -12433,6 +12492,10 @@ fn php_reads_argv1(script: &str) -> bool {
             | "readfile($argv[1]);"
             | "echoreadfile($argv[1]);"
             | "system(file_get_contents($argv[1]));"
+            | "echoimplode(\"\",file($argv[1]));"
+            | "echofread(fopen($argv[1],\"r\"),4096);"
+            | "echostream_get_contents(fopen($argv[1],\"r\"));"
+            | "echofgets(fopen($argv[1],\"r\"));"
             | "echobase64_decode(file_get_contents($argv[1]));"
     )
 }
@@ -17125,8 +17188,18 @@ mod tests {
         let mut big_body = b"git push origin main\n".to_vec();
         big_body.resize(super::SCRIPT_FILE_CAP as usize + 1, b' ');
         std::fs::write(&big, &big_body).expect("big script");
+        let fread_early = dir.join(format!("snapif-c47-early-{pid}.txt"));
+        let mut early_body = b"git push origin main\n".to_vec();
+        early_body.extend(std::iter::repeat_n(b'x', 5000));
+        std::fs::write(&fread_early, &early_body).expect("fread early");
+        let fread_late = dir.join(format!("snapif-c47-late-{pid}.txt"));
+        let mut late_body = vec![b'x'; 4096];
+        late_body.extend(b"\ngit push origin main\n");
+        std::fs::write(&fread_late, &late_body).expect("fread late");
         let push_s = plain_script_path(&push);
         let echo_s = plain_script_path(&echo);
+        let early_s = plain_script_path(&fread_early);
+        let late_s = plain_script_path(&fread_late);
         let assign_s = plain_script_path(&assign);
         let multi_s = plain_script_path(&multi);
         let beta_last_s = plain_script_path(&beta_last);
@@ -18038,6 +18111,42 @@ mod tests {
             format!("mapfile -O 2 -t x < {push_s}; eval \"${{x[2]}}\""),
             format!("mapfile -O 2 -t x < {multi_s}; eval \"${{x[4]}}\""),
             format!("f() {{ mapfile -t x < {push_s}; }}; f; eval \"${{x[0]}}\""),
+            format!(r#"eval "$(perl -e 'print while <>' {push_s})""#),
+            format!(r#"eval "$(perl -e 'while (<>) {{ print }}' {push_s})""#),
+            format!(r#"eval "$(perl -e 'print $_ while <>' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; print(open(sys.argv[1], encoding='utf-8').read())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; sys.stdout.write(Path(sys.argv[1]).read_text())" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; sys.stdout.write(Path(sys.argv[1]).read_text(encoding='utf-8'))" {push_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'print File.readlines(ARGV[0]).join("")' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'File.foreach(ARGV[0]) {{|l| print l}}' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'IO.foreach(ARGV[0]) {{|l| print l}}' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'puts File.readlines(ARGV[0])' {push_s})""#),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],'utf-8'))" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e 'const fs=require("fs"); process.stdout.write(fs.readFileSync(process.argv[1],"utf-8"))' {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "process.stdout.write(require('fs').readFileSync(process.argv[1]))" {push_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))" {push_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo implode("", file($argv[1]));' {push_s})""#),
+            format!(r#"eval "$(php -r 'echo fread(fopen($argv[1], "r"), 4096);' {push_s})""#),
+            format!(r#"eval "$(php -r 'echo fread(fopen($argv[1], "r"), 4096);' {early_s})""#),
+            format!(
+                r#"eval "$(php -r 'echo stream_get_contents(fopen($argv[1], "r"));' {push_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {push_s})""#),
+            format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {beta_last_s})""#),
         ];
         for command in &positives {
             assert_eq!(
@@ -18606,6 +18715,42 @@ mod tests {
                 r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))" {echo_s})""#
             ),
             format!(r#"eval "$(perl -e 'print <>' {echo_s})""#),
+            format!(r#"eval "$(perl -e 'print while <>' {echo_s})""#),
+            format!(r#"eval "$(perl -e 'while (<>) {{ print }}' {echo_s})""#),
+            format!(r#"eval "$(perl -e 'print $_ while <>' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; print(open(sys.argv[1], encoding='utf-8').read())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; sys.stdout.write(Path(sys.argv[1]).read_text())" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(python3 -c "import sys; from pathlib import Path; sys.stdout.write(Path(sys.argv[1]).read_text(encoding='utf-8'))" {echo_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'print File.readlines(ARGV[0]).join("")' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'File.foreach(ARGV[0]) {{|l| print l}}' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'IO.foreach(ARGV[0]) {{|l| print l}}' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'puts File.readlines(ARGV[0])' {echo_s})""#),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],'utf-8'))" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e 'const fs=require("fs"); process.stdout.write(fs.readFileSync(process.argv[1],"utf-8"))' {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "process.stdout.write(require('fs').readFileSync(process.argv[1]))" {echo_s})""#
+            ),
+            format!(
+                r#"eval "$(node -e "process.stdout.write(require('fs').readFileSync(process.argv[1],'utf8'))" {echo_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo implode("", file($argv[1]));' {echo_s})""#),
+            format!(r#"eval "$(php -r 'echo fread(fopen($argv[1], "r"), 4096);' {echo_s})""#),
+            format!(r#"eval "$(php -r 'echo fread(fopen($argv[1], "r"), 4096);' {late_s})""#),
+            format!(
+                r#"eval "$(php -r 'echo stream_get_contents(fopen($argv[1], "r"));' {echo_s})""#
+            ),
+            format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {echo_s})""#),
+            format!(r#"eval "$(php -r 'echo fgets(fopen($argv[1], "r"));' {multi_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {echo_s})""#
             ),
@@ -18702,7 +18847,17 @@ mod tests {
             let _ = std::fs::remove_file(&link);
             let _ = std::fs::remove_file(&fifo);
         }
-        for path in [&push, &echo, &assign, &multi, &beta_last, &coded, &big] {
+        for path in [
+            &push,
+            &echo,
+            &assign,
+            &multi,
+            &beta_last,
+            &coded,
+            &big,
+            &fread_early,
+            &fread_late,
+        ] {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(&sub);
