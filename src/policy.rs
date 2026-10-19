@@ -509,7 +509,8 @@ fn check_action(
 /// a gzip payload. `GzipReader` `readlines` prints it too.
 /// `bz2.open` and `lzma.open` in text mode print those payloads.
 /// `gzread` of `gzopen` and `stream_get_contents` of `gzopen` print
-/// a gzip payload. `gzgets` of `gzopen` prints it too. `gzip.open`
+/// a gzip payload. `gzgets`, `gzpassthru`, and `fread` of `gzopen`
+/// print it too. `gzip.open`
 /// with `encoding` prints it. A `GzipReader` block prints it.
 /// `perl` `AnyInflate` prints gzip, zlib, or raw deflate.
 /// `bzip2 -dc` and `bzcat` do too. `xz -dc` and `xzcat` do too.
@@ -12092,7 +12093,9 @@ fn php_gzip_query(args: &[String]) -> Option<String> {
             && compact != "echofile_get_contents(\"compress.zlib://\".$argv[1]);"
             && compact != "echostream_get_contents(gzopen($argv[1],\"r\"));"
             && compact != "echogzread(gzopen($argv[1],\"r\"),4096);"
-            && compact != "echogzgets(gzopen($argv[1],\"r\"));")
+            && compact != "echogzgets(gzopen($argv[1],\"r\"));"
+            && compact != "echogzpassthru(gzopen($argv[1],\"r\"));"
+            && compact != "echofread(gzopen($argv[1],\"r\"),4096);")
     {
         return None;
     }
@@ -17354,6 +17357,8 @@ mod tests {
             format!(r#"eval "$(php -r 'echo stream_get_contents(gzopen($argv[1],"r"));' {gz_s})""#),
             format!(r#"eval "$(php -r 'echo gzread(gzopen($argv[1],"r"), 4096);' {gz_s})""#),
             format!(r#"eval "$(php -r 'echo gzgets(gzopen($argv[1],"r"));' {gz_s})""#),
+            format!(r#"eval "$(php -r 'echo gzpassthru(gzopen($argv[1],"r"));' {gz_s})""#),
+            format!(r#"eval "$(php -r 'echo fread(gzopen($argv[1],"r"), 4096);' {gz_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" {gz_s})""#
             ),
@@ -18063,6 +18068,8 @@ mod tests {
             ),
             format!(r#"eval "$(php -r 'echo gzread(gzopen($argv[1],"r"), 4096);' {gz_hello_s})""#),
             format!(r#"eval "$(php -r 'echo gzgets(gzopen($argv[1],"r"));' {gz_hello_s})""#),
+            format!(r#"eval "$(php -r 'echo gzpassthru(gzopen($argv[1],"r"));' {gz_hello_s})""#),
+            format!(r#"eval "$(php -r 'echo fread(gzopen($argv[1],"r"), 4096);' {gz_hello_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys,gzip; sys.stdout.write(gzip.open(sys.argv[1],'rt',encoding='utf-8').read())" {gz_hello_s})""#
             ),
