@@ -469,7 +469,9 @@ fn check_action(
 /// prints the same bytes. `sort --compress-program` runs that program.
 /// `base64 -d` prints the decoded text. `openssl base64 -d -in` and
 /// `openssl enc -a -d -in` print that text too. A redirect into
-/// `openssl base64 -d` does too.
+/// `openssl base64 -d` does too. `python3 -c` that writes
+/// `base64.b64decode` of that file prints the decoded text. `ruby -e`
+/// `unpack1("m")` of `File.binread` prints it too.
 /// `paste`, `expand`, `unexpand`, `column`, `fold`, `fmt`, `pr`, and
 /// `strings` print that line too. `cat -v`, `cat -e`, `cat -t`, and
 /// `cat -s` still print it. `tee` copies its input. `tr` and
@@ -9904,7 +9906,12 @@ fn line_print_run(
     let Some(file) = line_print_query(name, args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    let produced = source_text(file.as_deref(), input, depth, substitutions);
+    if ruby_b64_script(name, args) {
+        decode_produced(produced)
+    } else {
+        produced
+    }
 }
 
 /// `perl -pe ''` and `ruby -pe ''` print each line unchanged.
@@ -10060,7 +10067,46 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "STDOUT.writeIO.read(ARGV[0])"
             | "IO.copy_stream(ARGV[0],STDOUT)"
             | "system(File.read(ARGV[0]))"
+            | "printFile.binread(ARGV[0]).unpack1(\"m\")"
+            | "printFile.binread(ARGV[0]).unpack1('m')"
     )
+}
+
+fn ruby_b64_script(name: &str, args: &[String]) -> bool {
+    if command_basename(name) != "ruby" {
+        return false;
+    }
+    let Some(script) = flag_script(args) else {
+        return false;
+    };
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    matches!(
+        compact.as_str(),
+        "printFile.binread(ARGV[0]).unpack1(\"m\")" | "printFile.binread(ARGV[0]).unpack1('m')"
+    )
+}
+
+fn flag_script(args: &[String]) -> Option<&str> {
+    let mut index = 0usize;
+    while index < args.len() {
+        if args[index] == "-e" || args[index] == "-c" {
+            return args.get(index + 1).map(String::as_str);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn decode_produced(produced: Run) -> Run {
+    match produced {
+        Run::Produced { text, ok: true } => {
+            let Some(text) = b64_decode(&text) else {
+                return Run::Unknown;
+            };
+            Run::Produced { text, ok: true }
+        }
+        other => other,
+    }
 }
 
 fn python_cat_run(
@@ -10072,7 +10118,12 @@ fn python_cat_run(
     let Some(file) = python_cat_query(args) else {
         return Run::Unknown;
     };
-    source_text(file.as_deref(), input, depth, substitutions)
+    let produced = source_text(file.as_deref(), input, depth, substitutions);
+    if python_b64_script(args) {
+        decode_produced(produced)
+    } else {
+        produced
+    }
 }
 
 fn python_cat_query(args: &[String]) -> Option<Option<String>> {
@@ -10119,6 +10170,20 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importsys;frompathlibimportPath;print(Path(sys.argv[1]).read_text())"
             | "importsys;print(open(sys.argv[1]).read(),end=\"\")"
             | "importos,sys;os.system(open(sys.argv[1]).read())"
+            | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],\"rb\").read()))"
+            | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],'rb').read()))"
+    )
+}
+
+fn python_b64_script(args: &[String]) -> bool {
+    let Some(script) = flag_script(args) else {
+        return false;
+    };
+    let compact: String = script.chars().filter(|ch| !ch.is_whitespace()).collect();
+    matches!(
+        compact.as_str(),
+        "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],\"rb\").read()))"
+            | "importbase64,sys;sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],'rb').read()))"
     )
 }
 
@@ -14141,6 +14206,10 @@ mod tests {
                 "eval \"$(node -e 'require(\"child_process\").execSync(require(\"fs\").readFileSync(process.argv[1],\"utf8\"))' {push_s})\""
             ),
             format!("eval \"$(ruby -e 'system(File.read(ARGV[0]))' {push_s})\""),
+            format!("eval \"$(ruby -e 'print File.binread(ARGV[0]).unpack1(\"m\")' {coded_s})\""),
+            format!(
+                r#"eval "$(python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],"rb").read()))' {coded_s})""#
+            ),
             format!("eval \"$(php -r 'system(file_get_contents($argv[1]));' {push_s})\""),
             format!("eval \"$(dd status=none if={push_s})\""),
             format!("eval \"$(cat {push_s} | cat)\""),
@@ -14511,6 +14580,12 @@ mod tests {
             format!("eval \"$(gbase64 -d {echo_s})\""),
             format!("eval \"$(openssl base64 -d -A -in {echo_b64_s})\""),
             format!("eval \"$(openssl base64 -d -A < {echo_b64_s})\""),
+            format!(
+                "eval \"$(ruby -e 'print File.binread(ARGV[0]).unpack1(\"m\")' {echo_b64_s})\""
+            ),
+            format!(
+                r#"eval "$(python3 -c 'import base64,sys; sys.stdout.buffer.write(base64.b64decode(open(sys.argv[1],"rb").read()))' {echo_b64_s})""#
+            ),
             format!("eval \"$(gbase32 -d {echo_s})\""),
             format!("eval \"$(gjoin {echo_s} {echo_s})\""),
             format!("eval \"$(gcomm -12 {echo_s} {echo_s})\""),
