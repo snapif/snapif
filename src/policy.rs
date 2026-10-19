@@ -586,6 +586,10 @@ fn check_action(
 /// `while (<>) { print; }`, `readlines.join("\n")`, `read_text` with
 /// `encoding='utf-8'`, a bare `fs=require('fs')` read, `{encoding:'utf8'}`,
 /// and `print implode` of `file` print it too.
+/// `console.log` of `readFileSync` with `'utf8'`, `print $_ while <>;`,
+/// `File.read` with `mode: "r"`, `file_get_contents` with `true`,
+/// `writelines` of an encoded `open`, and `puts` of `readlines.join`
+/// print it.
 /// `ruby -e 'system(File.read(ARGV[0]))'`, and `php -r`
 /// `system(file_get_contents($argv[1]));` run that file.
 /// `source <(echo 'git push')` and `bash <(echo 'git push')` run
@@ -11580,6 +11584,7 @@ fn perl_diamond_prints(script: &str) -> bool {
             | "while(<>){print}"
             | "while(<>){print;}"
             | "print$_while<>"
+            | "print$_while<>;"
     )
 }
 
@@ -11598,6 +11603,8 @@ fn ruby_reads_argv0(script: &str) -> bool {
             | "putsFile.readlines(ARGV[0])"
             | "File.read(ARGV[0]).each_line{|l|printl}"
             | "printFile.read(ARGV[0],encoding:\"UTF-8\")"
+            | "printFile.read(ARGV[0],mode:\"r\")"
+            | "putsFile.readlines(ARGV[0]).join"
             | "putsFile.read(ARGV[0])"
             | "printIO.read(ARGV[0])"
             | "printIO.binread(ARGV[0])"
@@ -12106,6 +12113,7 @@ fn python_reads_argv1(script: &str) -> bool {
             | "importsys;sys.stdout.write(open(sys.argv[1],'rb').read().decode())"
             | "importsys;print(open(sys.argv[1]).read())"
             | "importsys;sys.stdout.writelines(open(sys.argv[1]))"
+            | "importsys;sys.stdout.writelines(open(sys.argv[1],encoding='utf-8'))"
             | "importsys;print(open(sys.argv[1],encoding=\"utf-8\").read())"
             | "importsys;print(open(sys.argv[1],encoding='utf-8').read())"
             | "importsys;sys.stdout.write(open(sys.argv[1],encoding='utf-8').read())"
@@ -12209,6 +12217,7 @@ fn node_reads_argv1(script: &str) -> bool {
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf8\"))"
             | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1]))"
             | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))"
+            | "constfs=require('fs');console.log(fs.readFileSync(process.argv[1],'utf8'))"
             | "constfs=require('fs');process.stdout.write(fs.readFileSync(process.argv[1],'utf-8'))"
             | "constfs=require(\"fs\");process.stdout.write(fs.readFileSync(process.argv[1],\"utf-8\"))"
             | "process.stdout.write(require('fs').readFileSync(process.argv[1]))"
@@ -12523,6 +12532,7 @@ fn php_reads_argv1(script: &str) -> bool {
             | "echofgets(fopen($argv[1],\"r\"));"
             | "foreach(file($argv[1])as$line){echo$line;}"
             | "echofile_get_contents($argv[1],false);"
+            | "echofile_get_contents($argv[1],true);"
             | "echobase64_decode(file_get_contents($argv[1]));"
     )
 }
@@ -18205,6 +18215,16 @@ mod tests {
                 r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],{{encoding:'utf8'}}))" {push_s})""#
             ),
             format!(r#"eval "$(php -r 'print implode("", file($argv[1]));' {push_s})""#),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); console.log(fs.readFileSync(process.argv[1],'utf8'))" {push_s})""#
+            ),
+            format!(r#"eval "$(perl -e 'print $_ while <>;' {push_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.read(ARGV[0], mode: "r")' {push_s})""#),
+            format!(r#"eval "$(php -r 'echo file_get_contents($argv[1], true);' {push_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.writelines(open(sys.argv[1], encoding='utf-8'))" {push_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'puts File.readlines(ARGV[0]).join' {push_s})""#),
         ];
         for command in &positives {
             assert_eq!(
@@ -18840,6 +18860,16 @@ mod tests {
                 r#"eval "$(node -e "const fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1],{{encoding:'utf8'}}))" {echo_s})""#
             ),
             format!(r#"eval "$(php -r 'print implode("", file($argv[1]));' {echo_s})""#),
+            format!(
+                r#"eval "$(node -e "const fs=require('fs'); console.log(fs.readFileSync(process.argv[1],'utf8'))" {echo_s})""#
+            ),
+            format!(r#"eval "$(perl -e 'print $_ while <>;' {echo_s})""#),
+            format!(r#"eval "$(ruby -e 'print File.read(ARGV[0], mode: "r")' {echo_s})""#),
+            format!(r#"eval "$(php -r 'echo file_get_contents($argv[1], true);' {echo_s})""#),
+            format!(
+                r#"eval "$(python3 -c "import sys; sys.stdout.writelines(open(sys.argv[1], encoding='utf-8'))" {echo_s})""#
+            ),
+            format!(r#"eval "$(ruby -e 'puts File.readlines(ARGV[0]).join' {echo_s})""#),
             format!(
                 r#"eval "$(python3 -c "import sys; sys.stdout.write(open(sys.argv[1],'rb').read().decode())" {echo_s})""#
             ),
