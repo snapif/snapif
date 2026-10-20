@@ -5,6 +5,7 @@
 
 ### Bug Fixes
 
+* fail closed on a missed cascade answer, an unreadable transcript, and a trap action ([#237](https://github.com/snapif/snapif/issues/237)) ([97463ff](https://github.com/snapif/snapif/commit/97463ff69e02ba159d3a58fa4f63ef95ce8cbe80))
 * deny an oversized hook body and a shell past the depth cap ([#236](https://github.com/snapif/snapif/issues/236)) ([310eaa8](https://github.com/snapif/snapif/commit/310eaa8292498a2cd03a2114e4d4cb1500c1fe61))
 * match OpenSSH ProxyCommand and git config the way those programs read them ([#234](https://github.com/snapif/snapif/issues/234)) ([b3d9ac9](https://github.com/snapif/snapif/commit/b3d9ac911544a6d7e3db428418d52d2acc003168)), closes [#231](https://github.com/snapif/snapif/issues/231) [#232](https://github.com/snapif/snapif/issues/232) [#233](https://github.com/snapif/snapif/issues/233)
 
