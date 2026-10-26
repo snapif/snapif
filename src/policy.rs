@@ -1868,8 +1868,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// file with itself, `comm -12`, `jq -Rr .`, `python3 -c` that reads
 /// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
-/// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`, and
-/// `xz -dc` print a regular file.
+/// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
+/// `xz -dc`, and `zstd -dc` print a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1942,6 +1942,10 @@ fn score_printed_file<'a>(
             | "xz"
             | "unxz"
             | "xzcat"
+            | "zstd"
+            | "unzstd"
+            | "zstdcat"
+            | "pzstd"
     ) {
         return;
     }
@@ -1990,6 +1994,9 @@ fn score_printed_file<'a>(
         }
         "bzip2" | "bunzip2" | "bzcat" => bzip2_run(&name, args, input, depth, &mut substitutions),
         "xz" | "unxz" | "xzcat" => xz_run(&name, args, input, depth, &mut substitutions),
+        "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
+            zstd_run(&name, args, input, depth, &mut substitutions)
+        }
         _ => return,
     };
     match run {
@@ -2040,6 +2047,9 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
             bzip2_query(name, args).is_some_and(|query| query.file.is_none())
         }
         "xz" | "unxz" | "xzcat" => xz_query(name, args).is_some_and(|query| query.file.is_none()),
+        "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
+            zstd_query(name, args).is_some_and(|query| query.file.is_none())
+        }
         "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
         "comm" => {
             comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
@@ -18579,6 +18589,7 @@ mod tests {
             format!("gzip -dc {big_s}"),
             format!("bzip2 -dc {big_s}"),
             format!("xz -dc {big_s}"),
+            format!("zstd -dc {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19402,6 +19413,15 @@ mod tests {
             ],
         )
         .expect("xz");
+        let zst = format!("{path}.zst");
+        std::fs::write(
+            &zst,
+            [
+                40, 181, 47, 253, 36, 14, 113, 0, 0, 114, 109, 32, 45, 114, 102, 32, 47, 116, 109,
+                112, 47, 120, 10, 123, 150, 56, 186,
+            ],
+        )
+        .expect("zst");
         let missing = format!("{path}-missing");
         for command in [
             format!("bash '{path}'"),
@@ -19471,6 +19491,11 @@ mod tests {
             format!("xz -d -c {xz}"),
             format!("xzcat {xz}"),
             format!("unxz -c {xz}"),
+            format!("zstd -dc {zst}"),
+            format!("zstd -d -c {zst}"),
+            format!("zstdcat {zst}"),
+            format!("unzstd -c {zst}"),
+            format!("pzstd -dc {zst}"),
             format!("gunzip -c {gz}"),
             format!("gzcat {gz}"),
             format!("zcat {gz}"),
@@ -19531,6 +19556,7 @@ mod tests {
             format!("gzip -dc {path}"),
             format!("bzip2 -dc {path}"),
             format!("xz -dc {path}"),
+            format!("zstd -dc {path}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
