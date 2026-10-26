@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.2.6](https://github.com/snapif/snapif/compare/snapif-v0.2.5...snapif-v0.2.6) (2026-10-26)
+
+
+### Bug Fixes
+
+* score a command that prints a file as the text it prints ([#245](https://github.com/snapif/snapif/issues/245)) ([e02f9b3](https://github.com/snapif/snapif/commit/e02f9b383d9cdd671bf8807ed7922dab23d2beb8))
+* score cat, head, and tail of a drive-letter file ([#244](https://github.com/snapif/snapif/issues/244)) ([4d77916](https://github.com/snapif/snapif/commit/4d779165bbc56ea22f2564ae52f1035a7508a553)), closes [#239](https://github.com/snapif/snapif/issues/239)
+* update rustls certificate roots past emSign advisories ([#242](https://github.com/snapif/snapif/issues/242)) ([a92bf0c](https://github.com/snapif/snapif/commit/a92bf0c20fb5ec43d45523daee6f033d8b798c18))
+
 ## [0.2.5](https://github.com/snapif/snapif/compare/snapif-v0.2.4...snapif-v0.2.5) (2026-10-19)
 
 
