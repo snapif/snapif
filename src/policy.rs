@@ -1866,8 +1866,9 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `cat`, `head`, `tail`, `fold`, `fmt`, `paste`, `expand`,
 /// `dd if=path`, `iconv` of one charset, `perl -pe`, `tee`, `join` of a
 /// file with itself, `comm -12`, `jq -Rr .`, `python3 -c` that reads
-/// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, and `php -r`
-/// that reads `$argv[1]` print a regular file.
+/// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
+/// that reads `$argv[1]`, and `split --filter=cat` print a regular
+/// file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1926,6 +1927,7 @@ fn score_printed_file<'a>(
             | "python3"
             | "node"
             | "php"
+            | "split"
     ) {
         return;
     }
@@ -1965,6 +1967,7 @@ fn score_printed_file<'a>(
         "python" | "python3" => python_cat_run(args, input, depth, &mut substitutions),
         "node" => node_cat_run(args, input, depth, &mut substitutions),
         "php" => php_cat_run(args, input, depth, &mut substitutions),
+        "split" => split_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -18537,6 +18540,7 @@ mod tests {
                 "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {big_s}"
             ),
             format!("php -r 'print file_get_contents($argv[1]);' {big_s}"),
+            format!("split --filter=cat -l 1 {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19381,6 +19385,8 @@ mod tests {
                 "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {path}"
             ),
             format!("php -r 'print file_get_contents($argv[1]);' {path}"),
+            format!("split --filter=cat -l 1 {path}"),
+            format!("gsplit --filter=cat -l 1 {path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19429,6 +19435,7 @@ mod tests {
             ),
             format!("php -r 'echo 1;' {path}"),
             format!("php -r 'print file_get_contents($argv[1]);' {missing}"),
+            format!("split --filter=cat -l 1 {missing}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
