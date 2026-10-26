@@ -1869,8 +1869,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
 /// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
-/// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, `tar -xOf`, and
-/// `unzip -p` print a regular file.
+/// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, `tar -xOf`,
+/// `unzip -p`, and `7z e -so` print a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1953,6 +1953,9 @@ fn score_printed_file<'a>(
             | "brotli"
             | "tar"
             | "unzip"
+            | "7z"
+            | "7za"
+            | "7zz"
     ) {
         return;
     }
@@ -2008,6 +2011,7 @@ fn score_printed_file<'a>(
         "brotli" => brotli_run(&name, args, input, depth, &mut substitutions),
         "tar" => tar_run(args, input, depth, &mut substitutions),
         "unzip" => unzip_run(args, input, depth, &mut substitutions),
+        "7z" | "7za" | "7zz" => sevenz_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -2067,6 +2071,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "brotli" => brotli_query(name, args).is_some_and(|query| query.file.is_none()),
         "tar" => tar_query(args).is_some_and(|query| query.archive == "-"),
         "unzip" => unzip_query(args).is_some_and(|query| query.archive == "-"),
+        "7z" | "7za" | "7zz" => sevenz_query(args).is_some_and(|query| query.archive == "-"),
         "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
         "comm" => {
             comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
@@ -18611,6 +18616,7 @@ mod tests {
             format!("brotli -dc {big_s}"),
             format!("tar -xOf {big_s} payload.sh"),
             format!("unzip -p {big_s} payload.sh"),
+            format!("7z e -so {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19489,6 +19495,14 @@ mod tests {
             }
             std::fs::write(&zip_path, cursor.into_inner()).expect("zip");
         }
+        let seven_src = format!("{path}-7zsrc");
+        let seven = format!("{path}.7z");
+        std::fs::create_dir_all(&seven_src).expect("7z dir");
+        std::fs::write(format!("{seven_src}/payload.sh"), "rm -rf /tmp/x\n").expect("7z src");
+        let seven_cursor =
+            sevenz_rust2::compress(&seven_src, std::io::Cursor::new(Vec::new())).expect("7z");
+        std::fs::write(&seven, seven_cursor.into_inner()).expect("7z write");
+        std::fs::remove_dir_all(&seven_src).ok();
         let missing = format!("{path}-missing");
         for command in [
             format!("bash '{path}'"),
@@ -19576,6 +19590,9 @@ mod tests {
             format!("bsdtar -xOf {tar_path} payload.sh"),
             format!("unzip -p {zip_path} payload.sh"),
             format!("unzip -p {zip_path}"),
+            format!("7z e -so {seven}"),
+            format!("7z x -so {seven}"),
+            format!("7za e -so {seven}"),
             format!("gunzip -c {gz}"),
             format!("gzcat {gz}"),
             format!("zcat {gz}"),
@@ -19643,6 +19660,7 @@ mod tests {
             format!("tar -xOf {path} payload.sh"),
             format!("unzip -p {zip_path} missing.sh"),
             format!("unzip {zip_path} payload.sh"),
+            format!("7z e {seven}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
