@@ -1884,7 +1884,20 @@ fn score_printed_file<'a>(
     };
     let name = stage_command_name(first);
     let args = &argv[1..];
-    if !matches!(name.as_str(), "cat" | "head" | "tail") {
+    if !matches!(
+        name.as_str(),
+        "cat"
+            | "head"
+            | "tail"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "ggrep"
+            | "sed"
+            | "gsed"
+            | "awk"
+            | "gawk"
+    ) {
         return;
     }
     let stdin_body = stdin.map(path_body);
@@ -1901,6 +1914,11 @@ fn score_printed_file<'a>(
         "cat" => cat_run(args, input, depth, &mut substitutions),
         "head" => head_run(args, input, depth, &mut substitutions),
         "tail" => tail_run(args, input, depth, &mut substitutions),
+        "grep" | "egrep" | "fgrep" | "ggrep" => {
+            grep_run(&name, args, input, depth, &mut substitutions)
+        }
+        "sed" | "gsed" => sed_run(args, input, depth, &mut substitutions),
+        "awk" | "gawk" => awk_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -1932,6 +1950,11 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
             .is_some_and(|query| query.file.as_deref().is_none_or(|file| file == "-")),
         "tail" => tail_query(args)
             .is_some_and(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        "grep" | "egrep" | "fgrep" | "ggrep" => {
+            grep_query(args).is_some_and(|query| query.file.is_none())
+        }
+        "sed" | "gsed" => sed_query(args).is_some_and(|query| query.file.is_none()),
+        "awk" | "gawk" => awk_query(args).is_some_and(|query| query.file.is_none()),
         _ => false,
     }
 }
@@ -18427,6 +18450,9 @@ mod tests {
             format!("tail < {big_s}"),
             format!("head - < {big_s}"),
             format!("tail - < {big_s}"),
+            format!("grep . {big_s}"),
+            format!("sed -n p {big_s}"),
+            format!("awk '{{print}}' {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19229,6 +19255,9 @@ mod tests {
             format!("cat < \"{path}\""),
             format!("head < \"{path}\""),
             format!("tail < \"{path}\""),
+            format!("grep . {path}"),
+            format!("sed -n p {path}"),
+            format!("awk '{{print}}' {path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19255,6 +19284,8 @@ mod tests {
             format!("cat {missing}"),
             format!("cat < {missing}"),
             format!("cat < \"{path}$(echo)\""),
+            format!("grep zzzz {path}"),
+            format!("grep . {missing}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
