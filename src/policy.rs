@@ -1871,8 +1871,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
 /// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, `tar -xOf`,
 /// `unzip -p`, `7z e -so`, `base32 -d`, `openssl base64 -d`,
-/// `xxd -r -p`, `uudecode -p`, and `uncompress -c` print a regular
-/// file.
+/// `xxd -r -p`, `uudecode -p`, `uncompress -c`, and `unlzma -c` print
+/// a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1950,6 +1950,9 @@ fn score_printed_file<'a>(
             | "xz"
             | "unxz"
             | "xzcat"
+            | "lzma"
+            | "unlzma"
+            | "lzcat"
             | "zstd"
             | "unzstd"
             | "zstdcat"
@@ -2021,7 +2024,9 @@ fn score_printed_file<'a>(
             gzip_run(&name, args, input, depth, &mut substitutions)
         }
         "bzip2" | "bunzip2" | "bzcat" => bzip2_run(&name, args, input, depth, &mut substitutions),
-        "xz" | "unxz" | "xzcat" => xz_run(&name, args, input, depth, &mut substitutions),
+        "xz" | "unxz" | "xzcat" | "lzma" | "unlzma" | "lzcat" => {
+            xz_run(&name, args, input, depth, &mut substitutions)
+        }
         "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
             zstd_run(&name, args, input, depth, &mut substitutions)
         }
@@ -2084,7 +2089,9 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "bzip2" | "bunzip2" | "bzcat" => {
             bzip2_query(name, args).is_some_and(|query| query.file.is_none())
         }
-        "xz" | "unxz" | "xzcat" => xz_query(name, args).is_some_and(|query| query.file.is_none()),
+        "xz" | "unxz" | "xzcat" | "lzma" | "unlzma" | "lzcat" => {
+            xz_query(name, args).is_some_and(|query| query.file.is_none())
+        }
         "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
             zstd_query(name, args).is_some_and(|query| query.file.is_none())
         }
@@ -18635,6 +18642,7 @@ mod tests {
             format!("xxd -r -p {big_s}"),
             format!("uudecode -p {big_s}"),
             format!("uncompress -c {big_s}"),
+            format!("unlzma -c {big_s}"),
             format!("basenc --base64 -d {big_s}"),
             format!("gzip -dc {big_s}"),
             format!("bzip2 -dc {big_s}"),
@@ -19457,6 +19465,13 @@ mod tests {
             ],
         )
         .expect("Z");
+        let lzma_path = format!("{path}.lzma");
+        {
+            let mut input = std::io::Cursor::new(b"rm -rf /tmp/x\n".as_slice());
+            let mut out = Vec::new();
+            lzma_rs::lzma_compress(&mut input, &mut out).expect("lzma");
+            std::fs::write(&lzma_path, out).expect("lzma write");
+        }
         let gz = format!("{path}.gz");
         std::fs::write(
             &gz,
@@ -19615,6 +19630,9 @@ mod tests {
             format!("xxd -r -p < {hex}"),
             format!("uudecode -p {uu}"),
             format!("uncompress -c {zed}"),
+            format!("unlzma -c {lzma_path}"),
+            format!("lzcat {lzma_path}"),
+            format!("lzma -dc {lzma_path}"),
             format!("openssl base64 -d -in {coded}"),
             format!("openssl base64 -d -A < {coded}"),
             format!("gbase64 -d {coded}"),
@@ -19718,6 +19736,7 @@ mod tests {
             format!("uudecode -p {path}"),
             format!("uncompress {zed}"),
             format!("uncompress -c {path}"),
+            format!("lzma {lzma_path}"),
             format!("basenc --base64 -d {path}"),
             format!("gzip -dc {path}"),
             format!("bzip2 -dc {path}"),
