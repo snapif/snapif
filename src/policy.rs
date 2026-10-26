@@ -616,7 +616,9 @@ fn check_action(
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
 /// body in the same shell. `source path` and `bash path` run a regular
-/// file at that path. A missing path does not match. `bash -c` and
+/// file at that path. `cat path`, `head path`, and `tail path` score
+/// the text those commands print, including `gcat`, `ghead`, and
+/// `gtail`. A missing path does not match. `bash -c` and
 /// `bash -s` do not read a later path. `cat` and `bash -c` do not run
 /// a heredoc body.
 /// An unquoted heredoc still expands `$(...)` and backticks first, so
@@ -877,8 +879,10 @@ fn consider_segment<'a>(
         scope.pop_frame(exported);
     } else {
         // `bash script` starts a new process. `source script` is handled
-        // below, in this shell.
+        // below, in this shell. `cat`, `head`, and `tail` score the text
+        // they would print.
         score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
+        score_printed_file(policy, tool_name, &executed.argv, depth, local, git, best);
         if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
             prefer(policy, best, Some(id));
         }
@@ -1844,6 +1848,47 @@ fn scan_isolated<'a>(
 
 fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
     policy.actions.keys().find(|id| id.0 == "shell.deep")
+}
+
+/// `cat`, `head`, and `tail` print a regular file. That text is scored
+/// the same way as `bash path`. A missing path, a directory, and an
+/// empty print stay unmatched. A file past one megabyte is `shell.deep`.
+fn score_printed_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(first) = argv.first() else {
+        return;
+    };
+    let name = stage_command_name(first);
+    let args = &argv[1..];
+    let mut substitutions = Vec::new();
+    let run = match name.as_str() {
+        "cat" => cat_run(args, None, depth, &mut substitutions),
+        "head" => head_run(args, None, depth, &mut substitutions),
+        "tail" => tail_run(args, None, depth, &mut substitutions),
+        _ => return,
+    };
+    match run {
+        Run::Produced { text, .. } if text.chars().any(|ch| !ch.is_whitespace()) => {
+            scan_isolated(
+                policy,
+                tool_name,
+                std::slice::from_ref(&text),
+                depth,
+                local,
+                git,
+                best,
+            );
+        }
+        Run::Unscanned => prefer(policy, best, unscanned_action(policy)),
+        _ => {}
+    }
 }
 
 /// `bash path` and `sh path` run that file in a new process.
@@ -17376,6 +17421,12 @@ mod tests {
             format!("source -- {push_s}"),
             format!("bash {push_s}"),
             format!("bash -- {push_s}"),
+            format!("cat {push_s}"),
+            format!("head {push_s}"),
+            format!("tail {push_s}"),
+            format!("gcat {push_s}"),
+            format!("ghead {push_s}"),
+            format!("gtail {push_s}"),
             format!("sh {push_s}"),
             format!("command bash {push_s}"),
             format!("source {assign_s}; eval \"$x\""),
@@ -18274,6 +18325,9 @@ mod tests {
         for command in [
             format!("bash {big_s}"),
             format!("source {big_s}"),
+            format!("cat {big_s}"),
+            format!("head {big_s}"),
+            format!("tail {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -18305,7 +18359,6 @@ mod tests {
             format!("bash() {{ echo hello; }}; bash {push_s}"),
             "bash /dev/zero".to_string(),
             "source /dev/zero".to_string(),
-            format!("cat {push_s}"),
             format!("echo \"$(cat {push_s})\""),
             format!("eval \"$(cat -n {push_s})\""),
             format!("eval \"$(comm {push_s})\""),
@@ -19018,6 +19071,86 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(&sub);
+    }
+
+    /// `cat`, `head`, and `tail` of a drive-letter path score the file
+    /// text. A missing path stays unmatched. On Unix the `C:/...` string
+    /// is a relative path under a temporary root. On Windows it is the
+    /// real temp path with forward slashes.
+    #[test]
+    fn cat_of_a_drive_letter_path_scores_the_file() {
+        struct CwdGuard(Option<std::path::PathBuf>);
+        impl Drop for CwdGuard {
+            fn drop(&mut self) {
+                if let Some(prev) = self.0.take() {
+                    let _ = std::env::set_current_dir(prev);
+                }
+            }
+        }
+
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let pid = std::process::id();
+        let mut guard = CwdGuard(None);
+        let (path, root) = if cfg!(windows) {
+            let dir = std::env::temp_dir().join(format!("snapif-cat-{pid}"));
+            std::fs::create_dir_all(&dir).expect("dir");
+            let file = dir.join("payload.sh");
+            std::fs::write(&file, "rm -rf /tmp/x\n").expect("payload");
+            let mut shown = file.display().to_string().replace('\\', "/");
+            if let Some(rest) = shown.strip_prefix("//?/") {
+                shown = rest.to_string();
+            }
+            (shown, dir)
+        } else {
+            let root = std::env::temp_dir().join(format!("snapif-drive-root-{pid}"));
+            let rel = "C:/Users/sebta/AppData/Local/Temp/snapif-cat-39492/payload.sh";
+            let file = root.join(rel);
+            std::fs::create_dir_all(file.parent().expect("parent")).expect("dir");
+            std::fs::write(&file, "rm -rf /tmp/x\n").expect("payload");
+            guard.0 = Some(std::env::current_dir().expect("cwd"));
+            std::env::set_current_dir(&root).expect("chdir");
+            (rel.to_string(), root)
+        };
+        assert!(
+            path.as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_alphabetic())
+                && path.as_bytes().get(1) == Some(&b':')
+                && path.as_bytes().get(2) == Some(&b'/'),
+            "{path}"
+        );
+        let missing = format!("{path}-missing");
+        for command in [
+            format!("bash '{path}'"),
+            format!("source '{path}'"),
+            format!("cat '{path}'"),
+            format!("cat {path}"),
+            format!("head '{path}'"),
+            format!("head {path}"),
+            format!("tail '{path}'"),
+            format!("tail {path}"),
+        ] {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command:?}"
+            );
+        }
+        for command in [
+            format!("cat '{missing}'"),
+            format!("cat {missing}"),
+            format!("head {missing}"),
+            format!("tail {missing}"),
+            format!("bash {missing}"),
+            format!("source {missing}"),
+        ] {
+            assert!(
+                matched_action(&policy, "Bash", Some(&command)).is_none(),
+                "{command:?}"
+            );
+        }
+        drop(guard);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn plain_script_path(path: &std::path::Path) -> String {
