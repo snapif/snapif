@@ -1865,7 +1865,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 
 /// `cat`, `head`, `tail`, `fold`, `fmt`, `paste`, `expand`,
 /// `dd if=path`, `iconv` of one charset, `perl -pe`, `tee`, `join` of a
-/// file with itself, `comm -12`, and `jq -Rr .` print a regular file.
+/// file with itself, `comm -12`, `jq -Rr .`, and `python3 -c` that
+/// reads `sys.argv[1]` print a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1920,6 +1921,8 @@ fn score_printed_file<'a>(
             | "join"
             | "comm"
             | "jq"
+            | "python"
+            | "python3"
     ) {
         return;
     }
@@ -1956,6 +1959,7 @@ fn score_printed_file<'a>(
         "join" => join_run(args, input, depth, &mut substitutions),
         "comm" => comm_run(args, input, depth, &mut substitutions),
         "jq" => jq_run(args, input, depth, &mut substitutions),
+        "python" | "python3" => python_cat_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -2001,6 +2005,9 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
             comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
         }
         "jq" => jq_query(args).is_some_and(|file| file.as_deref() == Some("-")),
+        "python" | "python3" => {
+            python_cat_query(args).is_some_and(|file| file.as_deref() == Some("-"))
+        }
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(name, args).is_some_and(|query| query.is_none())
         }
@@ -18518,6 +18525,7 @@ mod tests {
             format!("join {big_s} {big_s}"),
             format!("comm -12 {big_s} {big_s}"),
             format!("jq -Rr . {big_s}"),
+            format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19356,6 +19364,8 @@ mod tests {
             format!("gcomm -12 {path} {path}"),
             format!("jq -Rr . {path}"),
             format!("jq -R -r . {path}"),
+            format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {path}"),
+            format!("python -c 'import sys; print(open(sys.argv[1]).read())' {path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19396,6 +19406,8 @@ mod tests {
             format!("comm -3 {path} {path}"),
             format!("jq . {path}"),
             format!("jq -Rr . {missing}"),
+            format!("python3 -c 'print(1)' {path}"),
+            format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {missing}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
