@@ -619,7 +619,8 @@ fn check_action(
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
 /// `gtail`. `cat < path`, `head < path`, and `tail < path` score
-/// that same text. `head - < path` and `tail - < path` do too.
+/// that same text, including a single-quoted path. `head - < path`
+/// and `tail - < path` do too.
 /// A missing path does not match. `bash -c` and
 /// `bash -s` do not read a later path. `cat` and `bash -c` do not run
 /// a heredoc body.
@@ -14998,9 +14999,24 @@ where
     }
     match chars.peek().copied() {
         None => return StdinTarget::Opaque,
+        Some('\'') => {
+            chars.next();
+            let mut path = String::new();
+            for ch in chars.by_ref() {
+                if ch == '\'' {
+                    break;
+                }
+                path.push(ch);
+            }
+            return if path.is_empty() {
+                StdinTarget::Opaque
+            } else {
+                StdinTarget::Path(path)
+            };
+        }
         Some(
-            '\'' | '"' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\'
-            | '#' | '&' | '|' | ';' | '>' | '<',
+            '"' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\' | '#'
+            | '&' | '|' | ';' | '>' | '<',
         ) => {
             skip_redirect_word(chars, substitutions);
             return StdinTarget::Opaque;
@@ -19178,6 +19194,7 @@ mod tests {
             format!("cat '{path}'"),
             format!("cat {path}"),
             format!("cat < {path}"),
+            format!("cat < '{path}'"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
