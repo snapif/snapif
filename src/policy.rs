@@ -1865,8 +1865,9 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 
 /// `cat`, `head`, `tail`, `fold`, `fmt`, `paste`, `expand`,
 /// `dd if=path`, `iconv` of one charset, `perl -pe`, `tee`, `join` of a
-/// file with itself, `comm -12`, `jq -Rr .`, and `python3 -c` that
-/// reads `sys.argv[1]` print a regular file.
+/// file with itself, `comm -12`, `jq -Rr .`, `python3 -c` that reads
+/// `sys.argv[1]`, and `node -e` that reads `process.argv[1]` print a
+/// regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1923,6 +1924,7 @@ fn score_printed_file<'a>(
             | "jq"
             | "python"
             | "python3"
+            | "node"
     ) {
         return;
     }
@@ -1960,6 +1962,7 @@ fn score_printed_file<'a>(
         "comm" => comm_run(args, input, depth, &mut substitutions),
         "jq" => jq_run(args, input, depth, &mut substitutions),
         "python" | "python3" => python_cat_run(args, input, depth, &mut substitutions),
+        "node" => node_cat_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -2008,6 +2011,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "python" | "python3" => {
             python_cat_query(args).is_some_and(|file| file.as_deref() == Some("-"))
         }
+        "node" => node_cat_query(args).is_some_and(|file| file.as_deref() == Some("-")),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(name, args).is_some_and(|query| query.is_none())
         }
@@ -18526,6 +18530,9 @@ mod tests {
             format!("comm -12 {big_s} {big_s}"),
             format!("jq -Rr . {big_s}"),
             format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {big_s}"),
+            format!(
+                "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {big_s}"
+            ),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19366,6 +19373,9 @@ mod tests {
             format!("jq -R -r . {path}"),
             format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {path}"),
             format!("python -c 'import sys; print(open(sys.argv[1]).read())' {path}"),
+            format!(
+                "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {path}"
+            ),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19408,6 +19418,10 @@ mod tests {
             format!("jq -Rr . {missing}"),
             format!("python3 -c 'print(1)' {path}"),
             format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {missing}"),
+            format!("node -e 'console.log(1)' {path}"),
+            format!(
+                "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {missing}"
+            ),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
