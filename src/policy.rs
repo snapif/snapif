@@ -1869,7 +1869,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
 /// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
-/// `xz -dc`, `zstd -dc`, and `lz4 -dc` print a regular file.
+/// `xz -dc`, `zstd -dc`, `lz4 -dc`, and `brotli -dc` print a regular
+/// file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1949,6 +1950,7 @@ fn score_printed_file<'a>(
             | "lz4"
             | "unlz4"
             | "lz4cat"
+            | "brotli"
     ) {
         return;
     }
@@ -2001,6 +2003,7 @@ fn score_printed_file<'a>(
             zstd_run(&name, args, input, depth, &mut substitutions)
         }
         "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, &mut substitutions),
+        "brotli" => brotli_run(&name, args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -2057,6 +2060,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "lz4" | "unlz4" | "lz4cat" => {
             lz4_query(name, args).is_some_and(|query| query.file.is_none())
         }
+        "brotli" => brotli_query(name, args).is_some_and(|query| query.file.is_none()),
         "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
         "comm" => {
             comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
@@ -18598,6 +18602,7 @@ mod tests {
             format!("xz -dc {big_s}"),
             format!("zstd -dc {big_s}"),
             format!("lz4 -dc {big_s}"),
+            format!("brotli -dc {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19439,6 +19444,14 @@ mod tests {
             ],
         )
         .expect("lz4");
+        let br = format!("{path}.br");
+        std::fs::write(
+            &br,
+            [
+                33, 52, 0, 4, 114, 109, 32, 45, 114, 102, 32, 47, 116, 109, 112, 47, 120, 10, 3,
+            ],
+        )
+        .expect("br");
         let missing = format!("{path}-missing");
         for command in [
             format!("bash '{path}'"),
@@ -19517,6 +19530,9 @@ mod tests {
             format!("lz4 -d -c {lz}"),
             format!("lz4cat {lz}"),
             format!("unlz4 -c {lz}"),
+            format!("brotli -dc {br}"),
+            format!("brotli -d -c {br}"),
+            format!("brotli --decompress --stdout {br}"),
             format!("gunzip -c {gz}"),
             format!("gzcat {gz}"),
             format!("zcat {gz}"),
@@ -19579,6 +19595,7 @@ mod tests {
             format!("xz -dc {path}"),
             format!("zstd -dc {path}"),
             format!("lz4 -dc {path}"),
+            format!("brotli -dc {path}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
