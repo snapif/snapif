@@ -618,7 +618,9 @@ fn check_action(
 /// body in the same shell. `source path` and `bash path` run a regular
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
-/// `gtail`. A missing path does not match. `bash -c` and
+/// `gtail`. `cat < path`, `head < path`, and `tail < path` score
+/// that same text. `head - < path` and `tail - < path` do too.
+/// A missing path does not match. `bash -c` and
 /// `bash -s` do not read a later path. `cat` and `bash -c` do not run
 /// a heredoc body.
 /// An unquoted heredoc still expands `$(...)` and backticks first, so
@@ -882,7 +884,16 @@ fn consider_segment<'a>(
         // below, in this shell. `cat`, `head`, and `tail` score the text
         // they would print.
         score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
-        score_printed_file(policy, tool_name, &executed.argv, depth, local, git, best);
+        score_printed_file(
+            policy,
+            tool_name,
+            &executed.argv,
+            segment.stdin_file.as_deref(),
+            depth,
+            local,
+            git,
+            best,
+        );
         if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
             prefer(policy, best, Some(id));
         }
@@ -1853,10 +1864,14 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `cat`, `head`, and `tail` print a regular file. That text is scored
 /// the same way as `bash path`. A missing path, a directory, and an
 /// empty print stay unmatched. A file past one megabyte is `shell.deep`.
+/// `cat < path` reads that redirect. A file operand still wins, so
+/// `cat other < path` scores `other`.
+#[allow(clippy::too_many_arguments)]
 fn score_printed_file<'a>(
     policy: &'a Policy,
     tool_name: &str,
     argv: &[String],
+    stdin: Option<&str>,
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
@@ -1867,11 +1882,23 @@ fn score_printed_file<'a>(
     };
     let name = stage_command_name(first);
     let args = &argv[1..];
+    if !matches!(name.as_str(), "cat" | "head" | "tail") {
+        return;
+    }
+    let stdin_body = stdin.map(path_body);
+    if matches!(stdin_body, Some(PathBody::Unscanned)) && printer_reads_stdin(&name, args) {
+        prefer(policy, best, unscanned_action(policy));
+        return;
+    }
+    let input = match &stdin_body {
+        Some(PathBody::Text(text)) => Some(text.as_str()),
+        _ => None,
+    };
     let mut substitutions = Vec::new();
     let run = match name.as_str() {
-        "cat" => cat_run(args, None, depth, &mut substitutions),
-        "head" => head_run(args, None, depth, &mut substitutions),
-        "tail" => tail_run(args, None, depth, &mut substitutions),
+        "cat" => cat_run(args, input, depth, &mut substitutions),
+        "head" => head_run(args, input, depth, &mut substitutions),
+        "tail" => tail_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -1888,6 +1915,22 @@ fn score_printed_file<'a>(
         }
         Run::Unscanned => prefer(policy, best, unscanned_action(policy)),
         _ => {}
+    }
+}
+
+/// `cat`, `head`, and `tail` read a `< path` redirect only when they
+/// have no file operand. `cat other < path` reads `other`.
+fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
+    match name {
+        "cat" => matches!(
+            cat_operands(args),
+            Some(ops) if ops.is_empty() || ops.iter().any(|op| op == "-")
+        ),
+        "head" => head_query(args)
+            .is_some_and(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        "tail" => tail_query(args)
+            .is_some_and(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        _ => false,
     }
 }
 
@@ -8908,7 +8951,9 @@ fn source_text(
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let loaded = if let Some(path) = file {
+    // `-` is stdin, the same way `cat -` is. Opening a file named `-`
+    // is not what head or tail runs.
+    let loaded = if let Some(path) = file.filter(|path| *path != "-") {
         load_text_operand(path, depth, substitutions)
     } else if let Some(text) = input {
         Loaded::Text(text.to_string())
@@ -13372,8 +13417,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "grep" | "egrep" | "fgrep" | "ggrep" => {
             grep_query(args).is_none_or(|query| query.file.is_none())
         }
-        "head" => head_query(args).is_none_or(|query| query.file.is_none()),
-        "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
+        "head" => head_query(args)
+            .is_none_or(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        "tail" => tail_query(args)
+            .is_none_or(|query| query.file.as_deref().is_none_or(|file| file == "-")),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
         "awk" | "gawk" => awk_query(args).is_none_or(|query| query.file.is_none()),
         "jq" => jq_query(args).is_none_or(|file| file.is_none()),
@@ -18328,6 +18375,11 @@ mod tests {
             format!("cat {big_s}"),
             format!("head {big_s}"),
             format!("tail {big_s}"),
+            format!("cat < {big_s}"),
+            format!("head < {big_s}"),
+            format!("tail < {big_s}"),
+            format!("head - < {big_s}"),
+            format!("tail - < {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19125,10 +19177,21 @@ mod tests {
             format!("source '{path}'"),
             format!("cat '{path}'"),
             format!("cat {path}"),
+            format!("cat < {path}"),
+            format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
+            format!("head < {path}"),
+            format!("ghead < {path}"),
+            format!("head -n 1 < {path}"),
+            format!("head - < {path}"),
+            format!("head -n 1 - < {path}"),
+            format!("tail - < {path}"),
             format!("tail '{path}'"),
             format!("tail {path}"),
+            format!("tail < {path}"),
+            format!("gtail < {path}"),
+            format!("cat {path} < {missing}"),
         ] {
             assert_eq!(
                 matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
@@ -19139,8 +19202,13 @@ mod tests {
         for command in [
             format!("cat '{missing}'"),
             format!("cat {missing}"),
+            format!("cat < {missing}"),
             format!("head {missing}"),
+            format!("head < {missing}"),
+            "head -".to_string(),
+            "tail -".to_string(),
             format!("tail {missing}"),
+            format!("tail < {missing}"),
             format!("bash {missing}"),
             format!("source {missing}"),
         ] {
