@@ -1869,8 +1869,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
 /// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
-/// `xz -dc`, `zstd -dc`, `lz4 -dc`, and `brotli -dc` print a regular
-/// file.
+/// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, and `tar -xOf` print
+/// a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1951,6 +1951,7 @@ fn score_printed_file<'a>(
             | "unlz4"
             | "lz4cat"
             | "brotli"
+            | "tar"
     ) {
         return;
     }
@@ -2004,6 +2005,7 @@ fn score_printed_file<'a>(
         }
         "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, &mut substitutions),
         "brotli" => brotli_run(&name, args, input, depth, &mut substitutions),
+        "tar" => tar_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -2061,6 +2063,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
             lz4_query(name, args).is_some_and(|query| query.file.is_none())
         }
         "brotli" => brotli_query(name, args).is_some_and(|query| query.file.is_none()),
+        "tar" => tar_query(args).is_some_and(|query| query.archive == "-"),
         "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
         "comm" => {
             comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
@@ -18603,6 +18606,7 @@ mod tests {
             format!("zstd -dc {big_s}"),
             format!("lz4 -dc {big_s}"),
             format!("brotli -dc {big_s}"),
+            format!("tar -xOf {big_s} payload.sh"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19452,6 +19456,20 @@ mod tests {
             ],
         )
         .expect("br");
+        let tar_path = format!("{path}.tar");
+        {
+            let text = "rm -rf /tmp/x\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("payload.sh").expect("tar path");
+            header.set_size(text.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let mut builder = tar::Builder::new(Vec::new());
+            builder
+                .append(&header, text.as_bytes())
+                .expect("tar append");
+            std::fs::write(&tar_path, builder.into_inner().expect("tar finish")).expect("tar");
+        }
         let missing = format!("{path}-missing");
         for command in [
             format!("bash '{path}'"),
@@ -19533,6 +19551,10 @@ mod tests {
             format!("brotli -dc {br}"),
             format!("brotli -d -c {br}"),
             format!("brotli --decompress --stdout {br}"),
+            format!("tar -xOf {tar_path} payload.sh"),
+            format!("tar -xOf {tar_path}"),
+            format!("gtar -xOf {tar_path} payload.sh"),
+            format!("bsdtar -xOf {tar_path} payload.sh"),
             format!("gunzip -c {gz}"),
             format!("gzcat {gz}"),
             format!("zcat {gz}"),
@@ -19596,6 +19618,8 @@ mod tests {
             format!("zstd -dc {path}"),
             format!("lz4 -dc {path}"),
             format!("brotli -dc {path}"),
+            format!("tar -xOf {tar_path} missing.sh"),
+            format!("tar -xOf {path} payload.sh"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
