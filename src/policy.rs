@@ -1867,8 +1867,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// `dd if=path`, `iconv` of one charset, `perl -pe`, `tee`, `join` of a
 /// file with itself, `comm -12`, `jq -Rr .`, `python3 -c` that reads
 /// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
-/// that reads `$argv[1]`, and `split --filter=cat` print a regular
-/// file.
+/// that reads `$argv[1]`, `split --filter=cat`, and `tr` of a redirect
+/// print a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1928,6 +1928,7 @@ fn score_printed_file<'a>(
             | "node"
             | "php"
             | "split"
+            | "tr"
     ) {
         return;
     }
@@ -1968,6 +1969,7 @@ fn score_printed_file<'a>(
         "node" => node_cat_run(args, input, depth, &mut substitutions),
         "php" => php_cat_run(args, input, depth, &mut substitutions),
         "split" => split_run(args, input, depth, &mut substitutions),
+        "tr" => tr_run(args, input),
         _ => return,
     };
     match run {
@@ -2008,6 +2010,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "iconv" => iconv_query(args).is_some_and(|query| query.is_none()),
         "perl" | "ruby" => line_print_query(name, args).is_some_and(|query| query.is_none()),
         "tee" => tee_query(args),
+        "tr" => !args.is_empty(),
         "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
         "comm" => {
             comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
@@ -18541,6 +18544,7 @@ mod tests {
             ),
             format!("php -r 'print file_get_contents($argv[1]);' {big_s}"),
             format!("split --filter=cat -l 1 {big_s}"),
+            format!("tr a-z A-Z < {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19387,6 +19391,8 @@ mod tests {
             format!("php -r 'print file_get_contents($argv[1]);' {path}"),
             format!("split --filter=cat -l 1 {path}"),
             format!("gsplit --filter=cat -l 1 {path}"),
+            format!("tr a-z A-Z < {path}"),
+            format!("gtr a-z A-Z < {path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19436,6 +19442,8 @@ mod tests {
             format!("php -r 'echo 1;' {path}"),
             format!("php -r 'print file_get_contents($argv[1]);' {missing}"),
             format!("split --filter=cat -l 1 {missing}"),
+            format!("tr < {path}"),
+            format!("tr a-z A-Z < {missing}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
