@@ -1870,7 +1870,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
 /// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
 /// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, `tar -xOf`,
-/// `unzip -p`, `7z e -so`, and `base32 -d` print a regular file.
+/// `unzip -p`, `7z e -so`, `base32 -d`, and `openssl base64 -d` print
+/// a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1934,6 +1935,7 @@ fn score_printed_file<'a>(
             | "base64"
             | "base32"
             | "basenc"
+            | "openssl"
             | "gzip"
             | "gunzip"
             | "gzcat"
@@ -2001,6 +2003,7 @@ fn score_printed_file<'a>(
         "base64" => base64_run(args, input, depth, &mut substitutions),
         "base32" => base32_run(args, input, depth, &mut substitutions),
         "basenc" => basenc_run(args, input, depth, &mut substitutions),
+        "openssl" => openssl_b64_run(args, input, depth, &mut substitutions),
         "gzip" | "gunzip" | "gzcat" | "zcat" => {
             gzip_run(&name, args, input, depth, &mut substitutions)
         }
@@ -2057,6 +2060,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "tr" => !args.is_empty(),
         "base64" => base64_query(args).is_some_and(|query| query.file.is_none()),
         "base32" => base32_query(args).is_some_and(|query| query.file.is_none()),
+        "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
         "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
         "gzip" | "gunzip" | "gzcat" | "zcat" => {
             gzip_query(name, args).is_some_and(|query| query.file.is_none())
@@ -18611,6 +18615,7 @@ mod tests {
             format!("tr a-z A-Z < {big_s}"),
             format!("base64 -d {big_s}"),
             format!("base32 -d {big_s}"),
+            format!("openssl base64 -d -A -in {big_s}"),
             format!("basenc --base64 -d {big_s}"),
             format!("gzip -dc {big_s}"),
             format!("bzip2 -dc {big_s}"),
@@ -19567,6 +19572,9 @@ mod tests {
             format!("tr a-z A-Z < {path}"),
             format!("gtr a-z A-Z < {path}"),
             format!("base64 -d {coded}"),
+            format!("openssl base64 -d -A -in {coded}"),
+            format!("openssl base64 -d -in {coded}"),
+            format!("openssl base64 -d -A < {coded}"),
             format!("gbase64 -d {coded}"),
             format!("base32 -d {b32}"),
             format!("base32 -d -i {b32}"),
@@ -19660,6 +19668,8 @@ mod tests {
             format!("base64 {coded}"),
             format!("base32 -d {path}"),
             format!("base32 {b32}"),
+            format!("openssl base64 -A -in {coded}"),
+            format!("openssl base64 -d -A -in {path}"),
             format!("basenc --base64 -d {path}"),
             format!("gzip -dc {path}"),
             format!("bzip2 -dc {path}"),
