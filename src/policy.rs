@@ -1864,9 +1864,9 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 }
 
 /// `cat`, `head`, `tail`, `fold`, `fmt`, `paste`, `expand`,
-/// `dd if=path`, and `iconv` of one charset print a regular file. That
-/// text is scored the same way as `bash path`. A missing path, a
-/// directory, and an empty print stay unmatched. A file past one
+/// `dd if=path`, `iconv` of one charset, and `perl -pe` print a regular
+/// file. That text is scored the same way as `bash path`. A missing
+/// path, a directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
 /// redirect. A file operand still wins, so `cat other < path` scores
 /// `other`.
@@ -1913,6 +1913,8 @@ fn score_printed_file<'a>(
             | "strings"
             | "dd"
             | "iconv"
+            | "perl"
+            | "ruby"
     ) {
         return;
     }
@@ -1944,6 +1946,7 @@ fn score_printed_file<'a>(
         }
         "dd" => dd_run(args, input, depth, &mut substitutions),
         "iconv" => iconv_run(args, input, depth, &mut substitutions),
+        "perl" | "ruby" => line_print_run(&name, args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -1982,6 +1985,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "awk" | "gawk" => awk_query(args).is_some_and(|query| query.file.is_none()),
         "dd" => dd_query(args).is_some_and(|query| query.is_none()),
         "iconv" => iconv_query(args).is_some_and(|query| query.is_none()),
+        "perl" | "ruby" => line_print_query(name, args).is_some_and(|query| query.is_none()),
         "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
             identity_query(name, args).is_some_and(|query| query.is_none())
         }
@@ -18494,6 +18498,7 @@ mod tests {
             format!("dd status=none if={big_s}"),
             format!("fold < {big_s}"),
             format!("iconv -f utf-8 -t utf-8 {big_s}"),
+            format!("perl -pe '' {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19320,6 +19325,9 @@ mod tests {
             format!("gdd if={path}"),
             format!("iconv -f utf-8 -t utf-8 {path}"),
             format!("iconv -f UTF-8 -t utf8 {path}"),
+            format!("perl -pe '' {path}"),
+            format!("ruby -pe '' {path}"),
+            format!("perl -ne 'print' {path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19352,6 +19360,7 @@ mod tests {
             format!("dd status=none if={missing}"),
             format!("iconv -f utf-8 -t utf-8 {missing}"),
             format!("iconv -f utf-8 -t utf-16 {path}"),
+            format!("perl -pe '' {missing}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
