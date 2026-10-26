@@ -1870,8 +1870,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
 /// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
 /// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, `tar -xOf`,
-/// `unzip -p`, `7z e -so`, `base32 -d`, `openssl base64 -d`, and
-/// `xxd -r -p` print a regular file.
+/// `unzip -p`, `7z e -so`, `base32 -d`, `openssl base64 -d`,
+/// `xxd -r -p`, and `uudecode -p` print a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1937,6 +1937,7 @@ fn score_printed_file<'a>(
             | "basenc"
             | "openssl"
             | "xxd"
+            | "uudecode"
             | "gzip"
             | "gunzip"
             | "gzcat"
@@ -2006,6 +2007,7 @@ fn score_printed_file<'a>(
         "basenc" => basenc_run(args, input, depth, &mut substitutions),
         "openssl" => openssl_b64_run(args, input, depth, &mut substitutions),
         "xxd" => xxd_run(args, input, depth, &mut substitutions),
+        "uudecode" => uudecode_run(args, input, depth, &mut substitutions),
         "gzip" | "gunzip" | "gzcat" | "zcat" => {
             gzip_run(&name, args, input, depth, &mut substitutions)
         }
@@ -2064,6 +2066,7 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "base32" => base32_query(args).is_some_and(|query| query.file.is_none()),
         "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
         "xxd" => xxd_query(args).is_some_and(|file| file.is_none()),
+        "uudecode" => uudecode_query(args).is_some_and(|file| file.is_none()),
         "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
         "gzip" | "gunzip" | "gzcat" | "zcat" => {
             gzip_query(name, args).is_some_and(|query| query.file.is_none())
@@ -18620,6 +18623,7 @@ mod tests {
             format!("base32 -d {big_s}"),
             format!("openssl base64 -d -A -in {big_s}"),
             format!("xxd -r -p {big_s}"),
+            format!("uudecode -p {big_s}"),
             format!("basenc --base64 -d {big_s}"),
             format!("gzip -dc {big_s}"),
             format!("bzip2 -dc {big_s}"),
@@ -19427,6 +19431,12 @@ mod tests {
         std::fs::write(&b32, "OJWSALLSMYQC65DNOAXXQCQ=\n").expect("b32");
         let hex = format!("{path}.hex");
         std::fs::write(&hex, "726d202d7266202f746d702f780a\n").expect("hex");
+        let uu = format!("{path}.uu");
+        std::fs::write(
+            &uu,
+            "begin 644 payload.sh\n.<FT@+7)F(\"]T;7 O> H \n`\nend\n",
+        )
+        .expect("uu");
         let gz = format!("{path}.gz");
         std::fs::write(
             &gz,
@@ -19583,6 +19593,7 @@ mod tests {
             format!("xxd -p -r {hex}"),
             format!("xxd -r -ps {hex}"),
             format!("xxd -r -p < {hex}"),
+            format!("uudecode -p {uu}"),
             format!("openssl base64 -d -in {coded}"),
             format!("openssl base64 -d -A < {coded}"),
             format!("gbase64 -d {coded}"),
@@ -19682,6 +19693,8 @@ mod tests {
             format!("openssl base64 -d -A -in {path}"),
             format!("xxd -r -p {path}"),
             format!("xxd {hex}"),
+            format!("uudecode {uu}"),
+            format!("uudecode -p {path}"),
             format!("basenc --base64 -d {path}"),
             format!("gzip -dc {path}"),
             format!("bzip2 -dc {path}"),
