@@ -1863,10 +1863,11 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
     policy.actions.keys().find(|id| id.0 == "shell.deep")
 }
 
-/// `cat`, `head`, and `tail` print a regular file. That text is scored
-/// the same way as `bash path`. A missing path, a directory, and an
-/// empty print stay unmatched. A file past one megabyte is `shell.deep`.
-/// `cat < path` reads that redirect. A file operand still wins, so
+/// `cat`, `head`, `tail`, `fold`, `fmt`, `paste`, `expand`, and
+/// `dd if=path` print a regular file. That text is scored the same way
+/// as `bash path`. A missing path, a directory, and an empty print stay
+/// unmatched. A file past one megabyte is `shell.deep`. `cat < path`
+/// and `fold < path` read that redirect. A file operand still wins, so
 /// `cat other < path` scores `other`.
 #[allow(clippy::too_many_arguments)]
 fn score_printed_file<'a>(
@@ -1901,6 +1902,15 @@ fn score_printed_file<'a>(
             | "sort"
             | "uniq"
             | "tac"
+            | "paste"
+            | "expand"
+            | "unexpand"
+            | "column"
+            | "fold"
+            | "fmt"
+            | "pr"
+            | "strings"
+            | "dd"
     ) {
         return;
     }
@@ -1927,6 +1937,10 @@ fn score_printed_file<'a>(
         "sort" => sort_run(args, input, depth, &mut substitutions),
         "uniq" => uniq_run(args, input, depth, &mut substitutions),
         "tac" => tac_run(args, input, depth, &mut substitutions),
+        "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
+            identity_run(&name, args, input, depth, &mut substitutions)
+        }
+        "dd" => dd_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -1963,6 +1977,10 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         }
         "sed" | "gsed" => sed_query(args).is_some_and(|query| query.file.is_none()),
         "awk" | "gawk" => awk_query(args).is_some_and(|query| query.file.is_none()),
+        "dd" => dd_query(args).is_some_and(|query| query.is_none()),
+        "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
+            identity_query(name, args).is_some_and(|query| query.is_none())
+        }
         _ => false,
     }
 }
@@ -18465,6 +18483,12 @@ mod tests {
             format!("sort {big_s}"),
             format!("uniq {big_s}"),
             format!("tac {big_s}"),
+            format!("fold {big_s}"),
+            format!("fmt {big_s}"),
+            format!("paste {big_s}"),
+            format!("expand {big_s}"),
+            format!("dd status=none if={big_s}"),
+            format!("fold < {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19274,6 +19298,21 @@ mod tests {
             format!("sort {path}"),
             format!("uniq {path}"),
             format!("tac {path}"),
+            format!("fold {path}"),
+            format!("fold -w 80 {path}"),
+            format!("fold < {path}"),
+            format!("gfold {path}"),
+            format!("fmt {path}"),
+            format!("fmt -w 80 {path}"),
+            format!("paste {path}"),
+            format!("paste -s {path}"),
+            format!("expand {path}"),
+            format!("unexpand {path}"),
+            format!("column {path}"),
+            format!("pr -t {path}"),
+            format!("strings -n 1 {path}"),
+            format!("dd status=none if={path}"),
+            format!("gdd if={path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19302,6 +19341,8 @@ mod tests {
             format!("cat < \"{path}$(echo)\""),
             format!("grep zzzz {path}"),
             format!("grep . {missing}"),
+            format!("fold {missing}"),
+            format!("dd status=none if={missing}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
