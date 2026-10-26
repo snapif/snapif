@@ -1897,6 +1897,10 @@ fn score_printed_file<'a>(
             | "gsed"
             | "awk"
             | "gawk"
+            | "cut"
+            | "sort"
+            | "uniq"
+            | "tac"
     ) {
         return;
     }
@@ -1919,6 +1923,10 @@ fn score_printed_file<'a>(
         }
         "sed" | "gsed" => sed_run(args, input, depth, &mut substitutions),
         "awk" | "gawk" => awk_run(args, input, depth, &mut substitutions),
+        "cut" => cut_run(args, input, depth, &mut substitutions),
+        "sort" => sort_run(args, input, depth, &mut substitutions),
+        "uniq" => uniq_run(args, input, depth, &mut substitutions),
+        "tac" => tac_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -18453,6 +18461,10 @@ mod tests {
             format!("grep . {big_s}"),
             format!("sed -n p {big_s}"),
             format!("awk '{{print}}' {big_s}"),
+            format!("cut -c 1- {big_s}"),
+            format!("sort {big_s}"),
+            format!("uniq {big_s}"),
+            format!("tac {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19258,6 +19270,10 @@ mod tests {
             format!("grep . {path}"),
             format!("sed -n p {path}"),
             format!("awk '{{print}}' {path}"),
+            format!("cut -c 1- {path}"),
+            format!("sort {path}"),
+            format!("uniq {path}"),
+            format!("tac {path}"),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
