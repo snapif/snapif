@@ -1868,8 +1868,8 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
 /// file with itself, `comm -12`, `jq -Rr .`, `python3 -c` that reads
 /// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
 /// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
-/// `base64 -d`, `basenc --base64 -d`, and `gzip -dc` print a regular
-/// file.
+/// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, and `bzip2 -dc` print
+/// a regular file.
 /// That text is scored the same way as `bash path`. A missing path, a
 /// directory, and an empty print stay unmatched. A file past one
 /// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
@@ -1936,6 +1936,9 @@ fn score_printed_file<'a>(
             | "gunzip"
             | "gzcat"
             | "zcat"
+            | "bzip2"
+            | "bunzip2"
+            | "bzcat"
     ) {
         return;
     }
@@ -1982,6 +1985,7 @@ fn score_printed_file<'a>(
         "gzip" | "gunzip" | "gzcat" | "zcat" => {
             gzip_run(&name, args, input, depth, &mut substitutions)
         }
+        "bzip2" | "bunzip2" | "bzcat" => bzip2_run(&name, args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -2027,6 +2031,9 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
         "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
         "gzip" | "gunzip" | "gzcat" | "zcat" => {
             gzip_query(name, args).is_some_and(|query| query.file.is_none())
+        }
+        "bzip2" | "bunzip2" | "bzcat" => {
+            bzip2_query(name, args).is_some_and(|query| query.file.is_none())
         }
         "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
         "comm" => {
@@ -18565,6 +18572,7 @@ mod tests {
             format!("base64 -d {big_s}"),
             format!("basenc --base64 -d {big_s}"),
             format!("gzip -dc {big_s}"),
+            format!("bzip2 -dc {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19367,6 +19375,16 @@ mod tests {
             ],
         )
         .expect("gz");
+        let bz = format!("{path}.bz2");
+        std::fs::write(
+            &bz,
+            [
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 99, 126, 202, 34, 0, 0, 5, 209, 128, 0,
+                16, 64, 2, 129, 2, 84, 64, 32, 0, 33, 160, 52, 200, 64, 12, 25, 56, 57, 7, 169, 49,
+                226, 238, 72, 167, 10, 18, 12, 111, 217, 68, 64,
+            ],
+        )
+        .expect("bz");
         let missing = format!("{path}-missing");
         for command in [
             format!("bash '{path}'"),
@@ -19429,6 +19447,9 @@ mod tests {
             format!("basenc --base64 -d {coded}"),
             format!("gbasenc --base64 -d {coded}"),
             format!("gzip -dc {gz}"),
+            format!("bzip2 -dc {bz}"),
+            format!("bunzip2 -c {bz}"),
+            format!("bzcat {bz}"),
             format!("gunzip -c {gz}"),
             format!("gzcat {gz}"),
             format!("zcat {gz}"),
@@ -19487,6 +19508,7 @@ mod tests {
             format!("base64 {coded}"),
             format!("basenc --base64 -d {path}"),
             format!("gzip -dc {path}"),
+            format!("bzip2 -dc {path}"),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
