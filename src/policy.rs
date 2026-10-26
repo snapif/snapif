@@ -618,7 +618,11 @@ fn check_action(
 /// body in the same shell. `source path` and `bash path` run a regular
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
-/// `gtail`. A missing path does not match. `bash -c` and
+/// `gtail`. `cat < path`, `head < path`, and `tail < path` score
+/// that same text, including a single-quoted path and a double-quoted
+/// path with no expansion. `head - < path`
+/// and `tail - < path` do too.
+/// A missing path does not match. `bash -c` and
 /// `bash -s` do not read a later path. `cat` and `bash -c` do not run
 /// a heredoc body.
 /// An unquoted heredoc still expands `$(...)` and backticks first, so
@@ -882,7 +886,16 @@ fn consider_segment<'a>(
         // below, in this shell. `cat`, `head`, and `tail` score the text
         // they would print.
         score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
-        score_printed_file(policy, tool_name, &executed.argv, depth, local, git, best);
+        score_printed_file(
+            policy,
+            tool_name,
+            &executed.argv,
+            segment.stdin_file.as_deref(),
+            depth,
+            local,
+            git,
+            best,
+        );
         if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
             prefer(policy, best, Some(id));
         }
@@ -1850,13 +1863,27 @@ fn unscanned_action(policy: &Policy) -> Option<&ActionId> {
     policy.actions.keys().find(|id| id.0 == "shell.deep")
 }
 
-/// `cat`, `head`, and `tail` print a regular file. That text is scored
-/// the same way as `bash path`. A missing path, a directory, and an
-/// empty print stay unmatched. A file past one megabyte is `shell.deep`.
+/// `cat`, `head`, `tail`, `fold`, `fmt`, `paste`, `expand`,
+/// `dd if=path`, `iconv` of one charset, `perl -pe`, `tee`, `join` of a
+/// file with itself, `comm -12`, `jq -Rr .`, `python3 -c` that reads
+/// `sys.argv[1]`, `node -e` that reads `process.argv[1]`, `php -r`
+/// that reads `$argv[1]`, `split --filter=cat`, `tr` of a redirect, and
+/// `base64 -d`, `basenc --base64 -d`, `gzip -dc`, `bzip2 -dc`,
+/// `xz -dc`, `zstd -dc`, `lz4 -dc`, `brotli -dc`, `tar -xOf`,
+/// `unzip -p`, `7z e -so`, `base32 -d`, `openssl base64 -d`,
+/// `xxd -r -p`, `uudecode -p`, `uncompress -c`, and `unlzma -c` print
+/// a regular file.
+/// That text is scored the same way as `bash path`. A missing path, a
+/// directory, and an empty print stay unmatched. A file past one
+/// megabyte is `shell.deep`. `cat < path` and `fold < path` read that
+/// redirect. A file operand still wins, so `cat other < path` scores
+/// `other`.
+#[allow(clippy::too_many_arguments)]
 fn score_printed_file<'a>(
     policy: &'a Policy,
     tool_name: &str,
     argv: &[String],
+    stdin: Option<&str>,
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
@@ -1867,11 +1894,147 @@ fn score_printed_file<'a>(
     };
     let name = stage_command_name(first);
     let args = &argv[1..];
+    if !matches!(
+        name.as_str(),
+        "cat"
+            | "head"
+            | "tail"
+            | "grep"
+            | "egrep"
+            | "fgrep"
+            | "ggrep"
+            | "sed"
+            | "gsed"
+            | "awk"
+            | "gawk"
+            | "cut"
+            | "sort"
+            | "uniq"
+            | "tac"
+            | "paste"
+            | "expand"
+            | "unexpand"
+            | "column"
+            | "fold"
+            | "fmt"
+            | "pr"
+            | "strings"
+            | "dd"
+            | "iconv"
+            | "perl"
+            | "ruby"
+            | "tee"
+            | "join"
+            | "comm"
+            | "jq"
+            | "python"
+            | "python3"
+            | "node"
+            | "php"
+            | "split"
+            | "tr"
+            | "base64"
+            | "base32"
+            | "basenc"
+            | "openssl"
+            | "xxd"
+            | "uudecode"
+            | "uncompress"
+            | "gzip"
+            | "gunzip"
+            | "gzcat"
+            | "zcat"
+            | "bzip2"
+            | "bunzip2"
+            | "bzcat"
+            | "xz"
+            | "unxz"
+            | "xzcat"
+            | "lzma"
+            | "unlzma"
+            | "lzcat"
+            | "zstd"
+            | "unzstd"
+            | "zstdcat"
+            | "pzstd"
+            | "lz4"
+            | "unlz4"
+            | "lz4cat"
+            | "brotli"
+            | "tar"
+            | "unzip"
+            | "7z"
+            | "7za"
+            | "7zz"
+    ) {
+        return;
+    }
+    let stdin_body = stdin.map(path_body);
+    if matches!(stdin_body, Some(PathBody::Unscanned)) && printer_reads_stdin(&name, args) {
+        prefer(policy, best, unscanned_action(policy));
+        return;
+    }
+    let input = match &stdin_body {
+        Some(PathBody::Text(text)) => Some(text.as_str()),
+        _ => None,
+    };
     let mut substitutions = Vec::new();
     let run = match name.as_str() {
-        "cat" => cat_run(args, None, depth, &mut substitutions),
-        "head" => head_run(args, None, depth, &mut substitutions),
-        "tail" => tail_run(args, None, depth, &mut substitutions),
+        "cat" => cat_run(args, input, depth, &mut substitutions),
+        "head" => head_run(args, input, depth, &mut substitutions),
+        "tail" => tail_run(args, input, depth, &mut substitutions),
+        "grep" | "egrep" | "fgrep" | "ggrep" => {
+            grep_run(&name, args, input, depth, &mut substitutions)
+        }
+        "sed" | "gsed" => sed_run(args, input, depth, &mut substitutions),
+        "awk" | "gawk" => awk_run(args, input, depth, &mut substitutions),
+        "cut" => cut_run(args, input, depth, &mut substitutions),
+        "sort" => sort_run(args, input, depth, &mut substitutions),
+        "uniq" => uniq_run(args, input, depth, &mut substitutions),
+        "tac" => tac_run(args, input, depth, &mut substitutions),
+        "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
+            identity_run(&name, args, input, depth, &mut substitutions)
+        }
+        "dd" => dd_run(args, input, depth, &mut substitutions),
+        "iconv" => iconv_run(args, input, depth, &mut substitutions),
+        "perl" | "ruby" => line_print_run(&name, args, input, depth, &mut substitutions),
+        "tee" => tee_run(args, input),
+        "join" => join_run(args, input, depth, &mut substitutions),
+        "comm" => comm_run(args, input, depth, &mut substitutions),
+        "jq" => jq_run(args, input, depth, &mut substitutions),
+        "python" | "python3" => python_cat_run(args, input, depth, &mut substitutions),
+        "node" => node_cat_run(args, input, depth, &mut substitutions),
+        "php" => php_cat_run(args, input, depth, &mut substitutions),
+        "split" => split_run(args, input, depth, &mut substitutions),
+        "tr" => tr_run(args, input),
+        "base64" => base64_run(args, input, depth, &mut substitutions),
+        "base32" => base32_run(args, input, depth, &mut substitutions),
+        "basenc" => basenc_run(args, input, depth, &mut substitutions),
+        "openssl" => openssl_b64_run(args, input, depth, &mut substitutions),
+        "xxd" => xxd_run(args, input, depth, &mut substitutions),
+        "uudecode" => uudecode_run(args, input, depth, &mut substitutions),
+        "uncompress" => decoded_bytes_run(
+            uncompress_query(args),
+            input,
+            depth,
+            &mut substitutions,
+            gzip_decode,
+        ),
+        "gzip" | "gunzip" | "gzcat" | "zcat" => {
+            gzip_run(&name, args, input, depth, &mut substitutions)
+        }
+        "bzip2" | "bunzip2" | "bzcat" => bzip2_run(&name, args, input, depth, &mut substitutions),
+        "xz" | "unxz" | "xzcat" | "lzma" | "unlzma" | "lzcat" => {
+            xz_run(&name, args, input, depth, &mut substitutions)
+        }
+        "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
+            zstd_run(&name, args, input, depth, &mut substitutions)
+        }
+        "lz4" | "unlz4" | "lz4cat" => lz4_run(&name, args, input, depth, &mut substitutions),
+        "brotli" => brotli_run(&name, args, input, depth, &mut substitutions),
+        "tar" => tar_run(args, input, depth, &mut substitutions),
+        "unzip" => unzip_run(args, input, depth, &mut substitutions),
+        "7z" | "7za" | "7zz" => sevenz_run(args, input, depth, &mut substitutions),
         _ => return,
     };
     match run {
@@ -1888,6 +2051,71 @@ fn score_printed_file<'a>(
         }
         Run::Unscanned => prefer(policy, best, unscanned_action(policy)),
         _ => {}
+    }
+}
+
+/// `cat`, `head`, and `tail` read a `< path` redirect only when they
+/// have no file operand. `cat other < path` reads `other`.
+fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
+    match name {
+        "cat" => matches!(
+            cat_operands(args),
+            Some(ops) if ops.is_empty() || ops.iter().any(|op| op == "-")
+        ),
+        "head" => head_query(args)
+            .is_some_and(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        "tail" => tail_query(args)
+            .is_some_and(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        "grep" | "egrep" | "fgrep" | "ggrep" => {
+            grep_query(args).is_some_and(|query| query.file.is_none())
+        }
+        "sed" | "gsed" => sed_query(args).is_some_and(|query| query.file.is_none()),
+        "awk" | "gawk" => awk_query(args).is_some_and(|query| query.file.is_none()),
+        "dd" => dd_query(args).is_some_and(|query| query.is_none()),
+        "iconv" => iconv_query(args).is_some_and(|query| query.is_none()),
+        "perl" | "ruby" => line_print_query(name, args).is_some_and(|query| query.is_none()),
+        "tee" => tee_query(args),
+        "tr" => !args.is_empty(),
+        "base64" => base64_query(args).is_some_and(|query| query.file.is_none()),
+        "base32" => base32_query(args).is_some_and(|query| query.file.is_none()),
+        "openssl" => openssl_b64_query(args).is_some_and(|query| query.file.is_none()),
+        "xxd" => xxd_query(args).is_some_and(|file| file.is_none()),
+        "uudecode" => uudecode_query(args).is_some_and(|file| file.is_none()),
+        "uncompress" => uncompress_query(args).is_some_and(|query| query.file.is_none()),
+        "basenc" => basenc_query(args).is_some_and(|query| query.file.is_none()),
+        "gzip" | "gunzip" | "gzcat" | "zcat" => {
+            gzip_query(name, args).is_some_and(|query| query.file.is_none())
+        }
+        "bzip2" | "bunzip2" | "bzcat" => {
+            bzip2_query(name, args).is_some_and(|query| query.file.is_none())
+        }
+        "xz" | "unxz" | "xzcat" | "lzma" | "unlzma" | "lzcat" => {
+            xz_query(name, args).is_some_and(|query| query.file.is_none())
+        }
+        "zstd" | "unzstd" | "zstdcat" | "pzstd" => {
+            zstd_query(name, args).is_some_and(|query| query.file.is_none())
+        }
+        "lz4" | "unlz4" | "lz4cat" => {
+            lz4_query(name, args).is_some_and(|query| query.file.is_none())
+        }
+        "brotli" => brotli_query(name, args).is_some_and(|query| query.file.is_none()),
+        "tar" => tar_query(args).is_some_and(|query| query.archive == "-"),
+        "unzip" => unzip_query(args).is_some_and(|query| query.archive == "-"),
+        "7z" | "7za" | "7zz" => sevenz_query(args).is_some_and(|query| query.archive == "-"),
+        "join" => join_query(args).is_some_and(|files| files.iter().any(|file| file == "-")),
+        "comm" => {
+            comm_query(args).is_some_and(|(_, _, _, left, right)| left == "-" || right == "-")
+        }
+        "jq" => jq_query(args).is_some_and(|file| file.as_deref() == Some("-")),
+        "python" | "python3" => {
+            python_cat_query(args).is_some_and(|file| file.as_deref() == Some("-"))
+        }
+        "node" => node_cat_query(args).is_some_and(|file| file.as_deref() == Some("-")),
+        "php" => php_cat_query(args).is_some_and(|file| file.as_deref() == Some("-")),
+        "paste" | "expand" | "unexpand" | "column" | "fold" | "fmt" | "pr" | "strings" => {
+            identity_query(name, args).is_some_and(|query| query.is_none())
+        }
+        _ => false,
     }
 }
 
@@ -8908,7 +9136,9 @@ fn source_text(
     depth: u32,
     substitutions: &mut Vec<String>,
 ) -> Run {
-    let loaded = if let Some(path) = file {
+    // `-` is stdin, the same way `cat -` is. Opening a file named `-`
+    // is not what head or tail runs.
+    let loaded = if let Some(path) = file.filter(|path| *path != "-") {
         load_text_operand(path, depth, substitutions)
     } else if let Some(text) = input {
         Loaded::Text(text.to_string())
@@ -13372,8 +13602,10 @@ fn builtin_reads_stdin(words: &[String]) -> bool {
         "grep" | "egrep" | "fgrep" | "ggrep" => {
             grep_query(args).is_none_or(|query| query.file.is_none())
         }
-        "head" => head_query(args).is_none_or(|query| query.file.is_none()),
-        "tail" => tail_query(args).is_none_or(|query| query.file.is_none()),
+        "head" => head_query(args)
+            .is_none_or(|query| query.file.as_deref().is_none_or(|file| file == "-")),
+        "tail" => tail_query(args)
+            .is_none_or(|query| query.file.as_deref().is_none_or(|file| file == "-")),
         "sed" | "gsed" => sed_query(args).is_none_or(|query| query.file.is_none()),
         "awk" | "gawk" => awk_query(args).is_none_or(|query| query.file.is_none()),
         "jq" => jq_query(args).is_none_or(|file| file.is_none()),
@@ -14930,7 +15162,9 @@ enum StdinTarget {
 }
 
 /// The word after `<`. A literal path is kept. `<(...)` is the printed
-/// text of that command. Quotes, globs, and expansions are not a path.
+/// text of that command. A single-quoted path, and a double-quoted
+/// path with no `$`, backtick, or backslash, are that literal path.
+/// Globs and expansions are not a path.
 fn take_stdin_target<I>(
     chars: &mut std::iter::Peekable<I>,
     substitutions: &mut Vec<String>,
@@ -14951,9 +15185,52 @@ where
     }
     match chars.peek().copied() {
         None => return StdinTarget::Opaque,
+        Some('\'') => {
+            chars.next();
+            let mut path = String::new();
+            for ch in chars.by_ref() {
+                if ch == '\'' {
+                    break;
+                }
+                path.push(ch);
+            }
+            return if path.is_empty() {
+                StdinTarget::Opaque
+            } else {
+                StdinTarget::Path(path)
+            };
+        }
+        Some('"') => {
+            let mut look = chars.clone();
+            look.next();
+            let mut path = String::new();
+            let mut literal = true;
+            for ch in look.by_ref() {
+                if ch == '"' {
+                    break;
+                }
+                if matches!(ch, '\\' | '$' | '`') {
+                    literal = false;
+                    break;
+                }
+                path.push(ch);
+            }
+            if literal && !path.is_empty() {
+                chars.next();
+                for _ in 0..path.chars().count() {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                }
+                return StdinTarget::Path(path);
+            }
+            skip_redirect_word(chars, substitutions);
+            return StdinTarget::Opaque;
+        }
         Some(
-            '\'' | '"' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\'
-            | '#' | '&' | '|' | ';' | '>' | '<',
+            '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\' | '#' | '&'
+            | '|' | ';' | '>' | '<',
         ) => {
             skip_redirect_word(chars, substitutions);
             return StdinTarget::Opaque;
@@ -18328,6 +18605,54 @@ mod tests {
             format!("cat {big_s}"),
             format!("head {big_s}"),
             format!("tail {big_s}"),
+            format!("cat < {big_s}"),
+            format!("head < {big_s}"),
+            format!("tail < {big_s}"),
+            format!("head - < {big_s}"),
+            format!("tail - < {big_s}"),
+            format!("grep . {big_s}"),
+            format!("sed -n p {big_s}"),
+            format!("awk '{{print}}' {big_s}"),
+            format!("cut -c 1- {big_s}"),
+            format!("sort {big_s}"),
+            format!("uniq {big_s}"),
+            format!("tac {big_s}"),
+            format!("fold {big_s}"),
+            format!("fmt {big_s}"),
+            format!("paste {big_s}"),
+            format!("expand {big_s}"),
+            format!("dd status=none if={big_s}"),
+            format!("fold < {big_s}"),
+            format!("iconv -f utf-8 -t utf-8 {big_s}"),
+            format!("perl -pe '' {big_s}"),
+            format!("tee out < {big_s}"),
+            format!("join {big_s} {big_s}"),
+            format!("comm -12 {big_s} {big_s}"),
+            format!("jq -Rr . {big_s}"),
+            format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {big_s}"),
+            format!(
+                "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {big_s}"
+            ),
+            format!("php -r 'print file_get_contents($argv[1]);' {big_s}"),
+            format!("split --filter=cat -l 1 {big_s}"),
+            format!("tr a-z A-Z < {big_s}"),
+            format!("base64 -d {big_s}"),
+            format!("base32 -d {big_s}"),
+            format!("openssl base64 -d -A -in {big_s}"),
+            format!("xxd -r -p {big_s}"),
+            format!("uudecode -p {big_s}"),
+            format!("uncompress -c {big_s}"),
+            format!("unlzma -c {big_s}"),
+            format!("basenc --base64 -d {big_s}"),
+            format!("gzip -dc {big_s}"),
+            format!("bzip2 -dc {big_s}"),
+            format!("xz -dc {big_s}"),
+            format!("zstd -dc {big_s}"),
+            format!("lz4 -dc {big_s}"),
+            format!("brotli -dc {big_s}"),
+            format!("tar -xOf {big_s} payload.sh"),
+            format!("unzip -p {big_s} payload.sh"),
+            format!("7z e -so {big_s}"),
             format!("eval \"$(cat {big_s})\""),
             format!("x=$(<{big_s}); eval \"$x\""),
             format!("eval \"$(cat {big_s} {push_s})\""),
@@ -19119,16 +19444,249 @@ mod tests {
                 && path.as_bytes().get(2) == Some(&b'/'),
             "{path}"
         );
+        let coded = format!("{path}.b64");
+        std::fs::write(&coded, "cm0gLXJmIC90bXAveAo=\n").expect("coded");
+        let b32 = format!("{path}.b32");
+        std::fs::write(&b32, "OJWSALLSMYQC65DNOAXXQCQ=\n").expect("b32");
+        let hex = format!("{path}.hex");
+        std::fs::write(&hex, "726d202d7266202f746d702f780a\n").expect("hex");
+        let uu = format!("{path}.uu");
+        std::fs::write(
+            &uu,
+            "begin 644 payload.sh\n.<FT@+7)F(\"]T;7 O> H \n`\nend\n",
+        )
+        .expect("uu");
+        let zed = format!("{path}.Z");
+        std::fs::write(
+            &zed,
+            [
+                31, 157, 144, 114, 218, 128, 104, 33, 199, 12, 136, 23, 116, 218, 192, 121, 129,
+                71, 1,
+            ],
+        )
+        .expect("Z");
+        let lzma_path = format!("{path}.lzma");
+        {
+            let mut input = std::io::Cursor::new(b"rm -rf /tmp/x\n".as_slice());
+            let mut out = Vec::new();
+            lzma_rs::lzma_compress(&mut input, &mut out).expect("lzma");
+            std::fs::write(&lzma_path, out).expect("lzma write");
+        }
+        let gz = format!("{path}.gz");
+        std::fs::write(
+            &gz,
+            [
+                31, 139, 8, 0, 0, 0, 0, 0, 0, 255, 43, 202, 85, 208, 45, 74, 83, 208, 47, 201, 45,
+                208, 175, 224, 2, 0, 5, 108, 22, 117, 14, 0, 0, 0,
+            ],
+        )
+        .expect("gz");
+        let bz = format!("{path}.bz2");
+        std::fs::write(
+            &bz,
+            [
+                66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 99, 126, 202, 34, 0, 0, 5, 209, 128, 0,
+                16, 64, 2, 129, 2, 84, 64, 32, 0, 33, 160, 52, 200, 64, 12, 25, 56, 57, 7, 169, 49,
+                226, 238, 72, 167, 10, 18, 12, 111, 217, 68, 64,
+            ],
+        )
+        .expect("bz");
+        let xz = format!("{path}.xz");
+        std::fs::write(
+            &xz,
+            [
+                253, 55, 122, 88, 90, 0, 0, 4, 230, 214, 180, 70, 2, 0, 33, 1, 22, 0, 0, 0, 116,
+                47, 229, 163, 1, 0, 13, 114, 109, 32, 45, 114, 102, 32, 47, 116, 109, 112, 47, 120,
+                10, 0, 0, 0, 109, 2, 0, 252, 142, 104, 100, 55, 0, 1, 38, 14, 8, 27, 224, 4, 31,
+                182, 243, 125, 1, 0, 0, 0, 0, 4, 89, 90,
+            ],
+        )
+        .expect("xz");
+        let zst = format!("{path}.zst");
+        std::fs::write(
+            &zst,
+            [
+                40, 181, 47, 253, 36, 14, 113, 0, 0, 114, 109, 32, 45, 114, 102, 32, 47, 116, 109,
+                112, 47, 120, 10, 123, 150, 56, 186,
+            ],
+        )
+        .expect("zst");
+        let lz = format!("{path}.lz4");
+        std::fs::write(
+            &lz,
+            [
+                4, 34, 77, 24, 100, 64, 167, 14, 0, 0, 128, 114, 109, 32, 45, 114, 102, 32, 47,
+                116, 109, 112, 47, 120, 10, 0, 0, 0, 0, 80, 220, 136, 211,
+            ],
+        )
+        .expect("lz4");
+        let br = format!("{path}.br");
+        std::fs::write(
+            &br,
+            [
+                33, 52, 0, 4, 114, 109, 32, 45, 114, 102, 32, 47, 116, 109, 112, 47, 120, 10, 3,
+            ],
+        )
+        .expect("br");
+        let tar_path = format!("{path}.tar");
+        {
+            let text = "rm -rf /tmp/x\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_path("payload.sh").expect("tar path");
+            header.set_size(text.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            let mut builder = tar::Builder::new(Vec::new());
+            builder
+                .append(&header, text.as_bytes())
+                .expect("tar append");
+            std::fs::write(&tar_path, builder.into_inner().expect("tar finish")).expect("tar");
+        }
+        let zip_path = format!("{path}.zip");
+        {
+            use std::io::Write;
+            let text = "rm -rf /tmp/x\n";
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            {
+                let mut writer = zip::ZipWriter::new(&mut cursor);
+                let options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+                writer.start_file("payload.sh", options).expect("zip start");
+                writer.write_all(text.as_bytes()).expect("zip write");
+                writer.finish().expect("zip finish");
+            }
+            std::fs::write(&zip_path, cursor.into_inner()).expect("zip");
+        }
+        let seven_src = format!("{path}-7zsrc");
+        let seven = format!("{path}.7z");
+        std::fs::create_dir_all(&seven_src).expect("7z dir");
+        std::fs::write(format!("{seven_src}/payload.sh"), "rm -rf /tmp/x\n").expect("7z src");
+        let seven_cursor =
+            sevenz_rust2::compress(&seven_src, std::io::Cursor::new(Vec::new())).expect("7z");
+        std::fs::write(&seven, seven_cursor.into_inner()).expect("7z write");
+        std::fs::remove_dir_all(&seven_src).ok();
         let missing = format!("{path}-missing");
         for command in [
             format!("bash '{path}'"),
             format!("source '{path}'"),
             format!("cat '{path}'"),
             format!("cat {path}"),
+            format!("cat < {path}"),
+            format!("cat < '{path}'"),
+            format!("cat < \"{path}\""),
+            format!("head < \"{path}\""),
+            format!("tail < \"{path}\""),
+            format!("grep . {path}"),
+            format!("sed -n p {path}"),
+            format!("awk '{{print}}' {path}"),
+            format!("cut -c 1- {path}"),
+            format!("sort {path}"),
+            format!("uniq {path}"),
+            format!("tac {path}"),
+            format!("fold {path}"),
+            format!("fold -w 80 {path}"),
+            format!("fold < {path}"),
+            format!("gfold {path}"),
+            format!("fmt {path}"),
+            format!("fmt -w 80 {path}"),
+            format!("paste {path}"),
+            format!("paste -s {path}"),
+            format!("expand {path}"),
+            format!("unexpand {path}"),
+            format!("column {path}"),
+            format!("pr -t {path}"),
+            format!("strings -n 1 {path}"),
+            format!("dd status=none if={path}"),
+            format!("gdd if={path}"),
+            format!("iconv -f utf-8 -t utf-8 {path}"),
+            format!("iconv -f UTF-8 -t utf8 {path}"),
+            format!("perl -pe '' {path}"),
+            format!("ruby -pe '' {path}"),
+            format!("perl -ne 'print' {path}"),
+            format!("tee out < {path}"),
+            format!("tee -a out < {path}"),
+            format!("gtee out < {path}"),
+            format!("join {path} {path}"),
+            format!("gjoin {path} {path}"),
+            format!("comm -12 {path} {path}"),
+            format!("gcomm -12 {path} {path}"),
+            format!("jq -Rr . {path}"),
+            format!("jq -R -r . {path}"),
+            format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {path}"),
+            format!("python -c 'import sys; print(open(sys.argv[1]).read())' {path}"),
+            format!(
+                "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {path}"
+            ),
+            format!("php -r 'print file_get_contents($argv[1]);' {path}"),
+            format!("split --filter=cat -l 1 {path}"),
+            format!("gsplit --filter=cat -l 1 {path}"),
+            format!("tr a-z A-Z < {path}"),
+            format!("gtr a-z A-Z < {path}"),
+            format!("base64 -d {coded}"),
+            format!("openssl base64 -d -A -in {coded}"),
+            format!("xxd -r -p {hex}"),
+            format!("xxd -p -r {hex}"),
+            format!("xxd -r -ps {hex}"),
+            format!("xxd -r -p < {hex}"),
+            format!("uudecode -p {uu}"),
+            format!("uncompress -c {zed}"),
+            format!("unlzma -c {lzma_path}"),
+            format!("lzcat {lzma_path}"),
+            format!("lzma -dc {lzma_path}"),
+            format!("openssl base64 -d -in {coded}"),
+            format!("openssl base64 -d -A < {coded}"),
+            format!("gbase64 -d {coded}"),
+            format!("base32 -d {b32}"),
+            format!("base32 -d -i {b32}"),
+            format!("gbase32 -d {b32}"),
+            format!("basenc --base64 -d {coded}"),
+            format!("gbasenc --base64 -d {coded}"),
+            format!("gzip -dc {gz}"),
+            format!("bzip2 -dc {bz}"),
+            format!("bunzip2 -c {bz}"),
+            format!("bzcat {bz}"),
+            format!("xz -dc {xz}"),
+            format!("xz -d -c {xz}"),
+            format!("xzcat {xz}"),
+            format!("unxz -c {xz}"),
+            format!("zstd -dc {zst}"),
+            format!("zstd -d -c {zst}"),
+            format!("zstdcat {zst}"),
+            format!("unzstd -c {zst}"),
+            format!("pzstd -dc {zst}"),
+            format!("lz4 -dc {lz}"),
+            format!("lz4 -d -c {lz}"),
+            format!("lz4cat {lz}"),
+            format!("unlz4 -c {lz}"),
+            format!("brotli -dc {br}"),
+            format!("brotli -d -c {br}"),
+            format!("brotli --decompress --stdout {br}"),
+            format!("tar -xOf {tar_path} payload.sh"),
+            format!("tar -xOf {tar_path}"),
+            format!("gtar -xOf {tar_path} payload.sh"),
+            format!("bsdtar -xOf {tar_path} payload.sh"),
+            format!("unzip -p {zip_path} payload.sh"),
+            format!("unzip -p {zip_path}"),
+            format!("7z e -so {seven}"),
+            format!("7z x -so {seven}"),
+            format!("7za e -so {seven}"),
+            format!("gunzip -c {gz}"),
+            format!("gzcat {gz}"),
+            format!("zcat {gz}"),
+            format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
+            format!("head < {path}"),
+            format!("ghead < {path}"),
+            format!("head -n 1 < {path}"),
+            format!("head - < {path}"),
+            format!("head -n 1 - < {path}"),
+            format!("tail - < {path}"),
             format!("tail '{path}'"),
             format!("tail {path}"),
+            format!("tail < {path}"),
+            format!("gtail < {path}"),
+            format!("cat {path} < {missing}"),
         ] {
             assert_eq!(
                 matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
@@ -19139,8 +19697,64 @@ mod tests {
         for command in [
             format!("cat '{missing}'"),
             format!("cat {missing}"),
+            format!("cat < {missing}"),
+            format!("cat < \"{path}$(echo)\""),
+            format!("grep zzzz {path}"),
+            format!("grep . {missing}"),
+            format!("fold {missing}"),
+            format!("dd status=none if={missing}"),
+            format!("iconv -f utf-8 -t utf-8 {missing}"),
+            format!("iconv -f utf-8 -t utf-16 {path}"),
+            format!("perl -pe '' {missing}"),
+            format!("tee out < {missing}"),
+            format!("tee --output-error=exit < {path}"),
+            format!("join {path} {missing}"),
+            format!("comm -12 {path} {missing}"),
+            format!("comm -3 {path} {path}"),
+            format!("jq . {path}"),
+            format!("jq -Rr . {missing}"),
+            format!("python3 -c 'print(1)' {path}"),
+            format!("python3 -c 'import sys; print(open(sys.argv[1]).read())' {missing}"),
+            format!("node -e 'console.log(1)' {path}"),
+            format!(
+                "node -e \"fs=require('fs'); process.stdout.write(fs.readFileSync(process.argv[1]))\" {missing}"
+            ),
+            format!("php -r 'echo 1;' {path}"),
+            format!("php -r 'print file_get_contents($argv[1]);' {missing}"),
+            format!("split --filter=cat -l 1 {missing}"),
+            format!("tr < {path}"),
+            format!("tr a-z A-Z < {missing}"),
+            format!("base64 -d {path}"),
+            format!("base64 {coded}"),
+            format!("base32 -d {path}"),
+            format!("base32 {b32}"),
+            format!("openssl base64 -A -in {coded}"),
+            format!("openssl base64 -d -A -in {path}"),
+            format!("xxd -r -p {path}"),
+            format!("xxd {hex}"),
+            format!("uudecode {uu}"),
+            format!("uudecode -p {path}"),
+            format!("uncompress {zed}"),
+            format!("uncompress -c {path}"),
+            format!("lzma {lzma_path}"),
+            format!("basenc --base64 -d {path}"),
+            format!("gzip -dc {path}"),
+            format!("bzip2 -dc {path}"),
+            format!("xz -dc {path}"),
+            format!("zstd -dc {path}"),
+            format!("lz4 -dc {path}"),
+            format!("brotli -dc {path}"),
+            format!("tar -xOf {tar_path} missing.sh"),
+            format!("tar -xOf {path} payload.sh"),
+            format!("unzip -p {zip_path} missing.sh"),
+            format!("unzip {zip_path} payload.sh"),
+            format!("7z e {seven}"),
             format!("head {missing}"),
+            format!("head < {missing}"),
+            "head -".to_string(),
+            "tail -".to_string(),
             format!("tail {missing}"),
+            format!("tail < {missing}"),
             format!("bash {missing}"),
             format!("source {missing}"),
         ] {
