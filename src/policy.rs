@@ -619,7 +619,8 @@ fn check_action(
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
 /// `gtail`. `cat < path`, `head < path`, and `tail < path` score
-/// that same text, including a single-quoted path. `head - < path`
+/// that same text, including a single-quoted path and a double-quoted
+/// path with no expansion. `head - < path`
 /// and `tail - < path` do too.
 /// A missing path does not match. `bash -c` and
 /// `bash -s` do not read a later path. `cat` and `bash -c` do not run
@@ -14978,7 +14979,9 @@ enum StdinTarget {
 }
 
 /// The word after `<`. A literal path is kept. `<(...)` is the printed
-/// text of that command. Quotes, globs, and expansions are not a path.
+/// text of that command. A single-quoted path, and a double-quoted
+/// path with no `$`, backtick, or backslash, are that literal path.
+/// Globs and expansions are not a path.
 fn take_stdin_target<I>(
     chars: &mut std::iter::Peekable<I>,
     substitutions: &mut Vec<String>,
@@ -15014,9 +15017,37 @@ where
                 StdinTarget::Path(path)
             };
         }
+        Some('"') => {
+            let mut look = chars.clone();
+            look.next();
+            let mut path = String::new();
+            let mut literal = true;
+            for ch in look.by_ref() {
+                if ch == '"' {
+                    break;
+                }
+                if matches!(ch, '\\' | '$' | '`') {
+                    literal = false;
+                    break;
+                }
+                path.push(ch);
+            }
+            if literal && !path.is_empty() {
+                chars.next();
+                for _ in 0..path.chars().count() {
+                    chars.next();
+                }
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                }
+                return StdinTarget::Path(path);
+            }
+            skip_redirect_word(chars, substitutions);
+            return StdinTarget::Opaque;
+        }
         Some(
-            '"' | '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\' | '#'
-            | '&' | '|' | ';' | '>' | '<',
+            '$' | '`' | '*' | '?' | '[' | ']' | '{' | '}' | '~' | '(' | ')' | '\\' | '#' | '&'
+            | '|' | ';' | '>' | '<',
         ) => {
             skip_redirect_word(chars, substitutions);
             return StdinTarget::Opaque;
@@ -19195,6 +19226,9 @@ mod tests {
             format!("cat {path}"),
             format!("cat < {path}"),
             format!("cat < '{path}'"),
+            format!("cat < \"{path}\""),
+            format!("head < \"{path}\""),
+            format!("tail < \"{path}\""),
             format!("gcat < {path}"),
             format!("head '{path}'"),
             format!("head {path}"),
@@ -19220,6 +19254,7 @@ mod tests {
             format!("cat '{missing}'"),
             format!("cat {missing}"),
             format!("cat < {missing}"),
+            format!("cat < \"{path}$(echo)\""),
             format!("head {missing}"),
             format!("head < {missing}"),
             "head -".to_string(),
