@@ -1132,6 +1132,36 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_doctest(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_bundle_rake(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_terraform_apply(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_ansible_playbook(
                 policy,
                 tool_name,
@@ -11369,8 +11399,9 @@ fn node_test_name(name: &str) -> bool {
         || (name.starts_with("test-") && name.ends_with(".js"))
 }
 
-/// `go test` runs `exec.Command` in every `.go` file of the package
-/// directory, including `init`. Another package path is left alone.
+/// `go test` runs `exec.Command` in every `.go` file of the package,
+/// including `init`. `./sub` is that directory. `./...` walks packages
+/// under it. `vendor` is skipped.
 #[allow(clippy::too_many_arguments)]
 fn score_go_test_package<'a>(
     policy: &'a Policy,
@@ -11392,24 +11423,88 @@ fn score_go_test_package<'a>(
     if words.first().map(String::as_str) != Some("test") {
         return;
     }
-    if words.iter().skip(1).any(|word| word != ".") {
-        return;
-    }
-    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
-        return;
-    };
     let mut commands = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.ends_with(".go") {
+    for package in go_test_dirs(&words[1..], dir) {
+        let Ok(entries) = std::fs::read_dir(&package) else {
             continue;
-        }
-        if let Some(text) = load_text(&entry.path().display().to_string()) {
-            commands.extend(go_commands(&text));
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".go") {
+                continue;
+            }
+            if let Some(text) = load_text(&entry.path().display().to_string()) {
+                commands.extend(go_commands(&text));
+            }
         }
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn go_test_dirs(specs: &[String], dir: Option<&str>) -> Vec<std::path::PathBuf> {
+    let base = shell_dir(dir);
+    if specs.is_empty() {
+        return vec![base];
+    }
+    let mut dirs = Vec::new();
+    for spec in specs {
+        let Some((start, walk)) = go_package_spec(&base, spec) else {
+            continue;
+        };
+        if walk {
+            go_package_walk(&start, &mut dirs, 0);
+        } else if start.is_dir() {
+            dirs.push(start);
+        }
+    }
+    dirs
+}
+
+fn go_package_spec(base: &std::path::Path, spec: &str) -> Option<(std::path::PathBuf, bool)> {
+    if spec == "." {
+        return Some((base.to_path_buf(), false));
+    }
+    let walk = spec.ends_with("/...");
+    let path = spec.strip_suffix("/...").unwrap_or(spec);
+    if path == "." {
+        return Some((base.to_path_buf(), walk));
+    }
+    let rel = path.strip_prefix("./")?;
+    if rel.is_empty() || rel.split('/').any(|part| part.is_empty() || part == "..") {
+        return None;
+    }
+    Some((base.join(rel), walk))
+}
+
+fn go_package_walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children = Vec::new();
+    let mut go_file = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "vendor" || name == ".git" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            children.push(path);
+        } else if name.ends_with(".go") {
+            go_file = true;
+        }
+    }
+    if go_file {
+        found.push(dir.to_path_buf());
+    }
+    for child in children {
+        go_package_walk(&child, found, depth + 1);
+    }
 }
 
 /// `rake` runs `sh` in the `default` task. `rake name` runs that task.
@@ -11766,6 +11861,179 @@ fn score_unittest<'a>(
         }
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `python3 -m doctest file.py` runs `>>>` examples. Code outside
+/// an example does not run.
+#[allow(clippy::too_many_arguments)]
+fn score_doctest<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !python_module_is(argv, "doctest") {
+        return;
+    }
+    let mut commands = Vec::new();
+    for word in script_positionals(argv) {
+        if !word.ends_with(".py") {
+            continue;
+        }
+        let Some(text) = load_text(&shell_path(&word, dir)) else {
+            continue;
+        };
+        let source = doctest_examples(&text);
+        commands.extend(interpreter_commands(HostLang::Python, &source));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn doctest_examples(text: &str) -> String {
+    let mut source = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(code) = trimmed
+            .strip_prefix(">>> ")
+            .or_else(|| trimmed.strip_prefix("... "))
+        {
+            source.push_str(code);
+            source.push('\n');
+        }
+    }
+    source
+}
+
+/// `bundle exec rake` runs the Rakefile the same way `rake` does.
+#[allow(clippy::too_many_arguments)]
+fn score_bundle_rake<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("bundle") {
+        return;
+    }
+    let words = script_positionals(argv);
+    if words.first().map(String::as_str) != Some("exec")
+        || words.get(1).map(String::as_str) != Some("rake")
+    {
+        return;
+    }
+    let mut rake_argv = vec!["rake".to_string()];
+    rake_argv.extend(words.into_iter().skip(2));
+    score_rake(policy, tool_name, &rake_argv, depth, local, git, dir, best);
+}
+
+/// `terraform apply` runs `local-exec` provisioners. `terraform plan`
+/// does not.
+#[allow(clippy::too_many_arguments)]
+fn score_terraform_apply<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("terraform") {
+        return;
+    }
+    if script_positionals(argv).first().map(String::as_str) != Some("apply") {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "tf") {
+            continue;
+        }
+        if let Some(text) = load_text(&path.display().to_string()) {
+            commands.extend(terraform_local_exec(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn terraform_local_exec(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "local-exec") {
+            let mut cursor = index + "local-exec".len();
+            while cursor < chars.len() && chars[cursor] != '{' {
+                cursor += 1;
+            }
+            if let Some((inner, end)) = balanced(&chars, cursor, '{', '}') {
+                commands.extend(hcl_command_strings(&inner));
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn hcl_command_strings(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, "command")
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + "command".len();
+            if chars
+                .get(cursor)
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
+            {
+                index += 1;
+                continue;
+            }
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'=') {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+                if let Some((command, end)) = read_quoted(&chars, cursor)
+                    && !command.is_empty()
+                {
+                    commands.push(command);
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        index += 1;
+    }
+    commands
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -26903,6 +27171,75 @@ mod tests {
         std::fs::write(ut.join("test_h.py"), "print(\"git push origin main\")\n").expect("quiet");
         let quiet = format!("cd {ut_s} && python3 -m unittest -q");
         assert_eq!(kind(&quiet), None, "{quiet}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `go test ./sub` and `go test ./...` run that package.
+    /// `python3 -m doctest` runs `>>>` examples. `bundle exec rake`
+    /// runs the Rakefile. `terraform apply` runs `local-exec`.
+    /// `terraform plan` does not.
+    #[test]
+    fn package_paths_and_examples_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-paths-{}", std::process::id()));
+        let gomod = root.join("gomod");
+        let sub = gomod.join("sub");
+        let rk = root.join("rk");
+        let tf = root.join("tf");
+        for dir in [&gomod, &sub, &rk, &tf] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        std::fs::write(gomod.join("doc.go"), "package gomod\n").expect("doc");
+        std::fs::write(
+            sub.join("p_test.go"),
+            "package sub\nimport \"os/exec\"\nfunc TestP(t *testing.T) { exec.Command(\"git\", \"push\", \"origin\", \"main\").Run() }\n",
+        )
+        .expect("ptest");
+        std::fs::write(
+            root.join("body.py"),
+            "import os\ndef hidden():\n    os.system(\"git push origin main\")\n",
+        )
+        .expect("body");
+        std::fs::write(
+            root.join("ex.py"),
+            "def add():\n    \"\"\"\n    >>> import os\n    >>> os.system(\"git push origin main\")\n    \"\"\"\n",
+        )
+        .expect("ex");
+        std::fs::write(
+            rk.join("Rakefile"),
+            "task :default do\n  sh \"git push origin main\"\nend\n",
+        )
+        .expect("rake");
+        std::fs::write(
+            tf.join("main.tf"),
+            "resource \"null_resource\" \"p\" {\n  provisioner \"local-exec\" {\n    command = \"git push origin main\"\n  }\n}\n",
+        )
+        .expect("tf");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let go_s = gomod.display().to_string();
+        let rk_s = rk.display().to_string();
+        let tf_s = tf.display().to_string();
+        let root_s = root.display().to_string();
+        let cases = [
+            (format!("cd {go_s} && go test"), None),
+            (format!("cd {go_s} && go test ./sub"), Some("git.push")),
+            (format!("cd {go_s} && go test ./..."), Some("git.push")),
+            (format!("cd {root_s} && python3 -m doctest body.py"), None),
+            (
+                format!("cd {root_s} && python3 -m doctest ex.py"),
+                Some("git.push"),
+            ),
+            (format!("cd {rk_s} && bundle exec rake"), Some("git.push")),
+            (
+                format!("cd {tf_s} && terraform apply -auto-approve"),
+                Some("git.push"),
+            ),
+            (format!("cd {tf_s} && terraform plan"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
