@@ -10356,25 +10356,14 @@ fn score_makefile<'a>(
     let Some(path) = make_file(argv, dir) else {
         return;
     };
-    let Some(loaded) = load_script_file(&path) else {
-        return;
-    };
-    match loaded {
-        ScriptFile::Text(text) => {
-            let mut commands = make_shell_commands(&text);
-            if !make_dry(argv) {
-                commands.extend(text.lines().filter_map(|line| {
-                    let line = line.strip_prefix('\t')?.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        None
-                    } else {
-                        Some(line.replace("$$", "$"))
-                    }
-                }));
-            }
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(_)) => {
+            let mut seen = Vec::new();
+            let commands = make_loaded(&path, make_dry(argv), &mut seen, 0);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
         }
-        ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
     }
 }
 
@@ -10420,13 +10409,109 @@ fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
         }
         index += 1;
     }
+    let root = make_root(argv, dir).display().to_string();
     if let Some(path) = file.filter(|path| !path.is_empty()) {
-        return Some(shell_path(path, dir));
+        return Some(shell_path(path, Some(&root)));
     }
     ["GNUmakefile", "makefile", "Makefile"]
         .into_iter()
-        .map(|name| shell_path(name, dir))
+        .map(|name| shell_path(name, Some(&root)))
         .find(|name| load_script_file(name).is_some())
+}
+
+fn make_root(argv: &[String], dir: Option<&str>) -> std::path::PathBuf {
+    let mut tree = shell_dir(dir);
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" {
+            break;
+        }
+        if token == "-C" {
+            index += 1;
+            if let Some(path) = argv.get(index) {
+                tree = tree.join(path.as_str());
+                index += 1;
+            }
+            continue;
+        }
+        if token == "-f" || token == "--file" || token == "--makefile" {
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = token.strip_prefix("-f")
+            && !rest.is_empty()
+            && !token.starts_with("--")
+        {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    tree
+}
+
+fn make_loaded(path: &str, dry: bool, seen: &mut Vec<String>, depth: u32) -> Vec<String> {
+    if depth > 4 || seen.iter().any(|have| have == path) {
+        return Vec::new();
+    }
+    seen.push(path.to_string());
+    let Some(ScriptFile::Text(text)) = load_script_file(path) else {
+        return Vec::new();
+    };
+    let mut commands = make_shell_commands(&text);
+    if !dry {
+        commands.extend(text.lines().filter_map(|line| {
+            let line = line.strip_prefix('\t')?.trim();
+            if line.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                Some(line.replace("$$", "$"))
+            }
+        }));
+    }
+    let parent = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new(""));
+    for name in make_includes(&text) {
+        if name.contains('$') {
+            continue;
+        }
+        let included = if std::path::Path::new(&name).is_absolute() {
+            name
+        } else {
+            parent.join(name).display().to_string()
+        };
+        commands.extend(make_loaded(&included, dry, seen, depth + 1));
+    }
+    commands
+}
+
+fn make_includes(text: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed
+            .strip_prefix("include ")
+            .or_else(|| trimmed.strip_prefix("-include "))
+            .or_else(|| trimmed.strip_prefix("sinclude "))
+        else {
+            continue;
+        };
+        files.extend(
+            rest.split_whitespace()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+        );
+    }
+    files
 }
 
 fn make_dry(argv: &[String]) -> bool {
@@ -27394,6 +27479,62 @@ mod tests {
                 Some("git.push"),
             ),
             (format!("cd {tf_s} && tofu plan"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `make -C dir` reads the makefile in that directory. `include`
+    /// reads the named file. A makefile in the current directory does
+    /// not run when `-C` points somewhere else.
+    #[test]
+    fn make_directory_scores_the_makefile_it_reads() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-makec-{}", std::process::id()));
+        let sub = root.join("sub");
+        let inc = root.join("inc");
+        std::fs::create_dir_all(&sub).expect("sub");
+        std::fs::create_dir_all(&inc).expect("inc");
+        std::fs::write(
+            root.join("Makefile"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("parent");
+        std::fs::write(sub.join("Makefile"), "all:\n\t@true\n").expect("sub");
+        std::fs::write(
+            sub.join("extra.mk"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("extra");
+        std::fs::write(
+            inc.join("part.mk"),
+            "STAMP := $(shell git push origin main)\n",
+        )
+        .expect("part");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let wrong = format!("cd {root_s} && make -C sub");
+        assert_eq!(kind(&wrong), None, "{wrong}");
+        std::fs::write(
+            sub.join("Makefile"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("sub2");
+        std::fs::write(
+            root.join("Makefile"),
+            "include inc/part.mk\nall:\n\t@true\n",
+        )
+        .expect("include");
+        let cases = [
+            (format!("cd {root_s} && make -C sub"), Some("git.push")),
+            (
+                format!("cd {root_s} && make -C sub -f extra.mk"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && make"), Some("git.push")),
         ];
         for (command, want) in cases {
             assert_eq!(kind(&command), want, "{command}");
