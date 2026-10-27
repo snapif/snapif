@@ -972,6 +972,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_package_exec(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_just_recipe(
                 policy,
                 tool_name,
@@ -5641,6 +5651,314 @@ fn score_package_scripts<'a>(
 ) {
     let scripts = package_script_bodies(argv);
     scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecTool {
+    Npx,
+    Npm,
+    Pnpm,
+    Bunx,
+}
+
+/// `npx`, `npm exec`, `npm x`, `pnpm exec`, `bunx`, and `bun x` run a
+/// command. `npm` and `npx` prefer a `PATH` program over
+/// `node_modules/.bin`. `pnpm` and `bunx` prefer the local bin. A bin
+/// that is not executable does not run. `pnpm` runs nothing unless a
+/// `package.json` is at that directory or a parent. `npm exec -c` and
+/// `--call` run that string.
+#[allow(clippy::too_many_arguments)]
+fn score_package_exec<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(parsed) = package_exec(argv, dir) else {
+        return;
+    };
+    if let Some(call) = parsed.call {
+        scan_isolated(
+            policy,
+            tool_name,
+            std::slice::from_ref(&call),
+            depth,
+            local,
+            git,
+            best,
+        );
+        return;
+    }
+    let Some(name) = parsed.command.first() else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    let on_path = command_on_path(name, local);
+    let walk = !matches!(parsed.tool, ExecTool::Pnpm);
+    let bin = local_bin(&parsed.start, name, walk);
+    let script = bin.as_deref().filter(|path| hook_executable(path));
+    match parsed.tool {
+        ExecTool::Npx | ExecTool::Npm => {
+            if on_path {
+                score_exec_command(policy, tool_name, &parsed.command, depth, local, git, best);
+            } else if let Some(path) = script {
+                score_exec_file(policy, tool_name, path, depth, local, git, best);
+            }
+        }
+        ExecTool::Pnpm => {
+            if !package_json_above(&parsed.start) {
+                return;
+            }
+            if let Some(path) = script {
+                score_exec_file(policy, tool_name, path, depth, local, git, best);
+            } else if bin.is_none() && on_path {
+                score_exec_command(policy, tool_name, &parsed.command, depth, local, git, best);
+            }
+        }
+        ExecTool::Bunx => {
+            if let Some(path) = script {
+                score_exec_file(policy, tool_name, path, depth, local, git, best);
+            } else if bin.is_none() && on_path {
+                score_exec_command(policy, tool_name, &parsed.command, depth, local, git, best);
+            }
+        }
+    }
+}
+
+struct PackageExec {
+    tool: ExecTool,
+    start: std::path::PathBuf,
+    call: Option<String>,
+    command: Vec<String>,
+}
+
+fn package_exec(argv: &[String], dir: Option<&str>) -> Option<PackageExec> {
+    let base = command_basename(argv.first()?).to_ascii_lowercase();
+    let mode = match base.as_str() {
+        "npx" => ExecTool::Npx,
+        "bunx" => ExecTool::Bunx,
+        "npm" => ExecTool::Npm,
+        "pnpm" => ExecTool::Pnpm,
+        "bun" => ExecTool::Bunx,
+        _ => return None,
+    };
+    let direct = matches!(base.as_str(), "npx" | "bunx");
+    let mut start = shell_dir(dir);
+    let mut call = None;
+    let mut positionals = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            index += 1;
+            positionals.extend(argv[index..].iter().cloned());
+            break;
+        }
+        if let Some(value) = exec_flag_value(mode, arg) {
+            apply_exec_flag(mode, dir, &mut start, &mut call, value.0, value.1)?;
+            index += 1;
+            continue;
+        }
+        if exec_flag_takes_value(mode, arg) {
+            index += 1;
+            let value = argv.get(index)?.as_str();
+            apply_exec_flag(mode, dir, &mut start, &mut call, arg, value)?;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            if exec_bool_flag(arg) {
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+        positionals.push(arg.to_string());
+        index += 1;
+    }
+    if !direct {
+        let sub = positionals.first()?.as_str();
+        let ok = match base.as_str() {
+            "npm" => sub == "exec" || sub == "x",
+            "pnpm" => sub == "exec",
+            "bun" => sub == "x",
+            _ => false,
+        };
+        if !ok {
+            return None;
+        }
+        positionals.remove(0);
+    }
+    if matches!(mode, ExecTool::Pnpm) {
+        call = None;
+    }
+    Some(PackageExec {
+        tool: mode,
+        start,
+        call,
+        command: positionals,
+    })
+}
+
+fn exec_bool_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--offline" | "--no-install" | "--bun" | "--yes" | "-y" | "--silent" | "--verbose"
+    )
+}
+
+fn exec_flag_takes_value(mode: ExecTool, flag: &str) -> bool {
+    match flag {
+        "--prefix" => matches!(mode, ExecTool::Npx | ExecTool::Npm),
+        "--dir" => mode == ExecTool::Pnpm,
+        "--cwd" => mode == ExecTool::Bunx,
+        "-c" | "--call" => matches!(mode, ExecTool::Npx | ExecTool::Npm),
+        _ => false,
+    }
+}
+
+fn exec_flag_value(mode: ExecTool, flag: &str) -> Option<(&str, &str)> {
+    let (name, value) = if let Some(value) = flag.strip_prefix("--prefix=") {
+        ("--prefix", value)
+    } else if let Some(value) = flag.strip_prefix("--dir=") {
+        ("--dir", value)
+    } else if let Some(value) = flag.strip_prefix("--cwd=") {
+        ("--cwd", value)
+    } else if let Some(value) = flag.strip_prefix("--call=") {
+        ("--call", value)
+    } else {
+        return None;
+    };
+    if value.is_empty() || !exec_flag_takes_value(mode, name) {
+        return None;
+    }
+    Some((name, value))
+}
+
+fn apply_exec_flag(
+    mode: ExecTool,
+    dir: Option<&str>,
+    start: &mut std::path::PathBuf,
+    call: &mut Option<String>,
+    name: &str,
+    value: &str,
+) -> Option<()> {
+    if !exec_flag_takes_value(mode, name) {
+        return None;
+    }
+    match name {
+        "--prefix" | "--dir" | "--cwd" => {
+            *start = std::path::PathBuf::from(shell_path(value, dir));
+        }
+        "-c" | "--call" => {
+            *call = Some(value.to_string());
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+fn command_on_path(name: &str, env: &[(String, String)]) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let owned;
+    let path_var = if let Some(value) = last_assignment(env, "PATH") {
+        value
+    } else if let Ok(value) = std::env::var("PATH") {
+        owned = value;
+        owned.as_str()
+    } else {
+        return false;
+    };
+    std::env::split_paths(path_var).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file() && hook_executable(&candidate)
+    })
+}
+
+fn local_bin(start: &std::path::Path, name: &str, walk: bool) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join("node_modules").join(".bin").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !walk || !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn package_json_above(start: &std::path::Path) -> bool {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join("package.json").is_file() {
+            return true;
+        }
+        if !dir.pop() {
+            return false;
+        }
+    }
+}
+
+fn score_exec_command<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    command: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    if command.is_empty() {
+        return;
+    }
+    let text = quote_argv(command);
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&text),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+fn score_exec_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    path: &std::path::Path,
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    match load_script_file(&path.display().to_string()) {
+        Some(ScriptFile::Text(text)) => {
+            scan_isolated(
+                policy,
+                tool_name,
+                std::slice::from_ref(&text),
+                depth,
+                local,
+                git,
+                best,
+            );
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -24355,6 +24673,134 @@ mod tests {
         assert_eq!(kind(&explicit), Some("bash.rm"), "{explicit}");
         let stuck = format!("cd {empty_s} && git -C{repo_s} checkout side");
         assert_eq!(kind(&stuck), None, "{stuck}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npx` and `npm exec` run a `PATH` program before a local bin.
+    /// `pnpm exec` and `bunx` run the local bin first. `pnpm` does
+    /// nothing without a `package.json`. `-c` and `--call` run that
+    /// string. A bin that is not executable does not run.
+    #[test]
+    fn package_exec_scores_the_command_the_host_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-exec-{}", std::process::id()));
+        let proj = root.join("proj");
+        let bins = proj.join("node_modules").join(".bin");
+        let sub = proj.join("sub");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&bins).expect("bins");
+        std::fs::create_dir_all(&sub).expect("sub");
+        std::fs::create_dir_all(&empty).expect("empty");
+        std::fs::write(proj.join("package.json"), "{\"name\":\"p\"}\n").expect("pkg");
+        let write = |name: &str, mode: u32| {
+            let path = bins.join(name);
+            std::fs::write(&path, "#!/bin/sh\ngit push origin main\n").expect(name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(mode);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
+            let _ = mode;
+        };
+        write("hostprobe", 0o755);
+        write("echo", 0o755);
+        write("quiet", 0o644);
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let proj_s = proj.display().to_string();
+        let empty_s = empty.display().to_string();
+        let push = "git push origin main";
+        let cases = [
+            (
+                format!("cd {proj_s} && npx --no-install hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {proj_s}/sub && npx --no-install hostprobe"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && npx --no-install echo hi"), None),
+            (
+                format!("cd {empty_s} && npx --no-install {push}"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && npx --no-install quiet"), None),
+            (format!("cd {proj_s} && npx --no-install nosuchbin"), None),
+            (
+                format!("cd {proj_s} && npm exec --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {proj_s} && npm x --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm exec --prefix proj --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm exec --prefix=proj --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {empty_s} && npm exec --offline -c '{push}'"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {empty_s} && npm exec --offline --call='{push}'"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {empty_s} && npx --no-install -c '{push}'"),
+                Some("git.push"),
+            ),
+            (format!("npm exec --offline"), None),
+            (
+                format!("cd {proj_s} && pnpm exec hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {proj_s} && pnpm exec echo hi"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && pnpm exec {push}"), Some("git.push")),
+            (format!("cd {proj_s}/sub && pnpm exec hostprobe"), None),
+            (
+                format!("cd {proj_s}/sub && pnpm exec {push}"),
+                Some("git.push"),
+            ),
+            (format!("cd {empty_s} && pnpm exec {push}"), None),
+            (format!("cd {proj_s} && pnpm exec quiet"), None),
+            (format!("cd {proj_s} && pnpm exec nosuchbin"), None),
+            (
+                format!("cd {root_s} && pnpm --dir proj exec hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm --dir=proj exec hostprobe"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && bunx hostprobe"), Some("git.push")),
+            (format!("cd {proj_s} && bun x hostprobe"), Some("git.push")),
+            (format!("cd {proj_s} && bunx echo hi"), Some("git.push")),
+            (format!("cd {proj_s}/sub && bunx echo hi"), Some("git.push")),
+            (format!("cd {empty_s} && bunx {push}"), Some("git.push")),
+            (
+                format!("cd {empty_s} && bunx --cwd {proj_s} hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && bunx --cwd=proj hostprobe"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && bunx quiet"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
