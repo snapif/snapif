@@ -5820,17 +5820,30 @@ fn sqlite_shells(argv: &[String]) -> Vec<String> {
         if arg.starts_with('-') {
             continue;
         }
-        for line in arg.lines() {
-            let Some(rest) = line.trim().strip_prefix(".shell ") else {
-                continue;
-            };
+        sqlite_text(&mut commands, arg, 0);
+    }
+    commands
+}
+
+fn sqlite_text(commands: &mut Vec<String>, text: &str, depth: u32) {
+    if depth > 2 {
+        return;
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(".shell ") {
             let rest = rest.trim();
             if !rest.is_empty() {
                 commands.push(rest.to_string());
             }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix(".read ")
+            && let Some(ScriptFile::Text(body)) = load_script_file(path.trim())
+        {
+            sqlite_text(commands, &body, depth + 1);
         }
     }
-    commands
 }
 
 fn score_octave_script<'a>(
@@ -5872,6 +5885,9 @@ fn octave_programs(argv: &[String]) -> Vec<String> {
             index += 1;
             continue;
         }
+        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+            texts.push(text);
+        }
         break;
     }
     texts
@@ -5887,8 +5903,15 @@ fn score_julia_script<'a>(
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
-    for text in flag_programs(argv, "julia", &["-e", "--eval"]) {
-        commands.extend(julia_commands(&text));
+    let inline = flag_programs(argv, "julia", &["-e", "--eval"]);
+    if inline.is_empty() {
+        if let Some(text) = positional_script(argv, "julia") {
+            commands.extend(julia_commands(&text));
+        }
+    } else {
+        for text in &inline {
+            commands.extend(julia_commands(text));
+        }
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
@@ -5937,8 +5960,15 @@ fn score_elixir_script<'a>(
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
-    for text in flag_programs(argv, "elixir", &["-e", "--eval"]) {
-        commands.extend(elixir_commands(&text));
+    let inline = flag_programs(argv, "elixir", &["-e", "--eval"]);
+    if inline.is_empty() {
+        if let Some(text) = positional_script(argv, "elixir") {
+            commands.extend(elixir_commands(&text));
+        }
+    } else {
+        for text in &inline {
+            commands.extend(elixir_commands(text));
+        }
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
@@ -6484,11 +6514,51 @@ fn score_osascript<'a>(
     best: &mut Option<&'a ActionId>,
 ) {
     let texts = osascript_texts(argv);
+    let javascript = osascript_javascript(argv);
     let mut commands = Vec::new();
     for text in &texts {
         commands.extend(applescript_shells(text));
+        if javascript {
+            commands.extend(quoted_call(text, "system", &[]));
+        }
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn osascript_javascript(argv: &[String]) -> bool {
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-l" || arg == "--language" {
+            return argv
+                .get(index + 1)
+                .is_some_and(|lang| lang.eq_ignore_ascii_case("JavaScript"));
+        }
+        index += 1;
+    }
+    false
+}
+
+fn positional_script(argv: &[String], command: &str) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
+    {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return match load_script_file(arg) {
+            Some(ScriptFile::Text(text)) => Some(text),
+            _ => None,
+        };
+    }
+    None
 }
 
 fn osascript_texts(argv: &[String]) -> Vec<String> {
@@ -22517,6 +22587,17 @@ mod tests {
             "execute_process(COMMAND git push origin main)\n",
         );
         write("quiet.cmake", "message(STATUS \"git push origin main\")\n");
+        write("run.m", "system(\"git push origin main\");\n");
+        write("quiet.m", "disp(1);\n");
+        write("run.jl", "run(`git push origin main`)\n");
+        write("quiet.jl", "println(1)\n");
+        write(
+            "run.exs",
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        );
+        write("quiet.exs", "IO.puts(\"git push origin main\")\n");
+        write("cmds.sql", ".shell git push origin main\n");
+        write("quiet.sql", "select 1;\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -22603,6 +22684,11 @@ mod tests {
             "erl -noshell -eval 'os:cmd(\"git push origin main\"), halt().'".to_string(),
             format!("go run {show}/main.go"),
             format!("cmake -P {show}/run.cmake"),
+            format!("octave --quiet {show}/run.m"),
+            format!("julia --startup-file=no {show}/run.jl"),
+            format!("elixir {show}/run.exs"),
+            format!("sqlite3 :memory: '.read {show}/cmds.sql'"),
+            "osascript -l JavaScript -e '$.system(\"git push origin main\")'".to_string(),
             "sbcl --noinform --non-interactive --eval '(sb-ext:run-program \"git\" (list \"push\" \"origin\" \"main\") :search t :output *standard-output*)' --quit".to_string(),
         ];
         for command in &review {
@@ -22649,6 +22735,11 @@ mod tests {
             format!("just -f {show}/justfile absent"),
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
+            format!("octave --quiet {show}/quiet.m"),
+            format!("julia --startup-file=no {show}/quiet.jl"),
+            format!("elixir {show}/quiet.exs"),
+            format!("sqlite3 :memory: '.read {show}/quiet.sql'"),
+            "osascript -l JavaScript -e '1'".to_string(),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
