@@ -8466,6 +8466,21 @@ fn mix_alias_shell(text: &str, task: &str) -> Option<String> {
             return Some(command.to_string());
         }
     }
+    let lists = [format!("{task}: [\""), format!("{task}:[\"")];
+    for pattern in &lists {
+        let Some(start) = text.find(pattern) else {
+            continue;
+        };
+        let rest = &text[start + pattern.len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        if let Some(command) = rest[..end].strip_prefix("cmd ")
+            && !command.is_empty()
+        {
+            return Some(command.to_string());
+        }
+    }
     None
 }
 
@@ -12712,8 +12727,8 @@ fn score_crystal<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-/// `dart file.dart` runs `Process.run("prog", ["args"])`.
-/// A printed string does not.
+/// `dart file.dart` and `dart run file.dart` run `Process.run` and
+/// `Process.runSync`. A printed string does not.
 #[allow(clippy::too_many_arguments)]
 fn score_dart_file<'a>(
     policy: &'a Policy,
@@ -12887,8 +12902,15 @@ fn dart_processes(text: &str) -> Vec<String> {
             index = end;
             continue;
         }
-        if haskell_word(&chars, index, "Process.run")
-            && let Some(command) = dart_run_after(&chars, index + "Process.run".len())
+        let dart_call = if haskell_word(&chars, index, "Process.runSync") {
+            Some("Process.runSync")
+        } else if haskell_word(&chars, index, "Process.run") {
+            Some("Process.run")
+        } else {
+            None
+        };
+        if let Some(name) = dart_call
+            && let Some(command) = dart_run_after(&chars, index + name.len())
         {
             commands.push(command);
         }
@@ -29971,6 +29993,25 @@ mod tests {
         assert_eq!(kind(&format!("cd {root_s} && mix go")), Some("git.push"));
         assert_eq!(kind(&format!("cd {root_s} && mix nope")), None);
         assert_eq!(kind(&format!("cd {root_s} && mix missing")), None);
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", aliases: [go: [\"cmd git push origin main\"]]]\n  end\nend\n",
+        )
+        .expect("list alias");
+        assert_eq!(kind(&format!("cd {root_s} && mix go")), Some("git.push"));
+        std::fs::write(
+            root.join("tool.dart"),
+            "import 'dart:io';\nvoid main() { Process.runSync('git', ['push', 'origin', 'main']); }\n",
+        )
+        .expect("dart");
+        assert_eq!(
+            kind(&format!("cd {root_s} && dart run tool.dart")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && dart tool.dart")),
+            Some("git.push")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
