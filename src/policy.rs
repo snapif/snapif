@@ -1193,6 +1193,36 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_maven(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_sbt(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_brew_ruby(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_exec(
                 policy,
                 tool_name,
@@ -9623,6 +9653,460 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
         }
     }
     bodies
+}
+
+/// `mvn <phase>` runs antrun `<exec>` bound to that phase or an
+/// earlier one. `mvn -v` and a run with no goal do not. `-f` selects
+/// the pom.
+#[allow(clippy::too_many_arguments)]
+fn score_maven<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("mvn"))
+    {
+        return;
+    }
+    let Some(reached) = maven_phase_reached(argv) else {
+        return;
+    };
+    let path = maven_pom_path(argv, dir);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let commands = maven_exec_commands(&text, reached);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+const MAVEN_PHASES: &[&str] = &[
+    "validate",
+    "initialize",
+    "generate-sources",
+    "process-sources",
+    "generate-resources",
+    "process-resources",
+    "compile",
+    "process-classes",
+    "generate-test-sources",
+    "process-test-sources",
+    "generate-test-resources",
+    "process-test-resources",
+    "test-compile",
+    "process-test-classes",
+    "test",
+    "prepare-package",
+    "package",
+    "pre-integration-test",
+    "integration-test",
+    "post-integration-test",
+    "verify",
+    "install",
+    "deploy",
+];
+
+fn maven_phase_reached(argv: &[String]) -> Option<usize> {
+    let mut reached = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" || arg == "-P" || arg == "-pl" || arg == "-s" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if let Some(phase) = MAVEN_PHASES.iter().position(|phase| *phase == arg) {
+            reached = Some(reached.map_or(phase, |earlier: usize| earlier.max(phase)));
+        }
+        index += 1;
+    }
+    reached
+}
+
+fn maven_pom_path(argv: &[String], dir: Option<&str>) -> std::path::PathBuf {
+    let mut chosen = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" {
+            if let Some(path) = argv.get(index + 1).filter(|path| !path.is_empty()) {
+                chosen = Some((*path).clone());
+                index += 2;
+                continue;
+            }
+        } else if let Some(path) = arg.strip_prefix("--file=").filter(|path| !path.is_empty()) {
+            chosen = Some(path.to_string());
+        }
+        index += 1;
+    }
+    match chosen {
+        Some(path) => std::path::PathBuf::from(shell_path(&path, dir)),
+        None => shell_dir(dir).join("pom.xml"),
+    }
+}
+
+fn maven_exec_commands(pom: &str, reached: usize) -> Vec<String> {
+    let text = strip_xml_comments(pom);
+    let text = strip_xml_element(&text, "profiles");
+    let text = strip_xml_element(&text, "pluginManagement");
+    let mut commands = Vec::new();
+    for execution in xml_blocks(&text, "execution") {
+        let Some(phase) = xml_element_text(execution, "phase") else {
+            continue;
+        };
+        let Some(index) = MAVEN_PHASES.iter().position(|name| *name == phase.trim()) else {
+            continue;
+        };
+        if index > reached {
+            continue;
+        }
+        for exec in xml_blocks(execution, "exec") {
+            if let Some(command) = maven_exec_command(exec) {
+                commands.push(command);
+            }
+        }
+    }
+    commands
+}
+
+fn maven_exec_command(block: &str) -> Option<String> {
+    let executable = xml_attr(block, "executable")?;
+    if executable.is_empty() {
+        return None;
+    }
+    let mut words = vec![executable.to_string()];
+    words.extend(xml_arg_values(block));
+    Some(words.join(" "))
+}
+
+fn xml_arg_values(block: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = block;
+    while let Some(start) = rest.find("<arg") {
+        let after = &rest[start + 4..];
+        if !matches!(
+            after.chars().next(),
+            Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
+        ) {
+            rest = &rest[start + 4..];
+            continue;
+        }
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        if let Some(value) = xml_attr(&after[..end], "value") {
+            values.push(value.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    values
+}
+
+fn xml_attr<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let double = format!("{name}=\"");
+    if let Some(start) = text.find(&double) {
+        let rest = &text[start + double.len()..];
+        let end = rest.find('"')?;
+        return Some(&rest[..end]);
+    }
+    let single = format!("{name}='");
+    if let Some(start) = text.find(&single) {
+        let rest = &text[start + single.len()..];
+        let end = rest.find('\'')?;
+        return Some(&rest[..end]);
+    }
+    None
+}
+
+fn xml_element_text<'a>(block: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = block.find(&open)? + open.len();
+    let end = block[start..].find(&close)? + start;
+    Some(block[start..end].trim())
+}
+
+fn xml_blocks<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut blocks = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let after_name = start + open.len();
+        if !matches!(
+            rest[after_name..].chars().next(),
+            Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
+        ) {
+            rest = &rest[after_name..];
+            continue;
+        }
+        let Some(rel) = rest[start..].find(&close) else {
+            break;
+        };
+        let end = start + rel + close.len();
+        blocks.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    blocks
+}
+
+fn strip_xml_comments(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("-->") {
+            rest = &rest[start + end + 3..];
+        } else {
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_xml_element(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let after = start + open.len();
+        if !matches!(
+            rest[after..].chars().next(),
+            Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
+        ) {
+            out.push_str(&rest[..after]);
+            rest = &rest[after..];
+            continue;
+        }
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find(&close) {
+            rest = &rest[start + end + close.len()..];
+        } else {
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `sbt <task>` loads `build.sbt`. A top-level `cmd.!` runs on load.
+/// A `task := { cmd.! }` runs when that task is named. `sbt -V` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_sbt<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("sbt"))
+    {
+        return;
+    }
+    let tasks = sbt_positionals(argv);
+    if tasks.is_empty() {
+        return;
+    }
+    let path = shell_dir(dir).join("build.sbt");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let commands = sbt_shell_commands(&text)
+        .into_iter()
+        .filter_map(|(task, command)| match task {
+            None => Some(command),
+            Some(name) if tasks.iter().any(|task| task == &name) => Some(command),
+            Some(_) => None,
+        })
+        .collect::<Vec<_>>();
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn sbt_positionals(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .cloned()
+        .collect()
+}
+
+fn sbt_shell_commands(source: &str) -> Vec<(Option<String>, String)> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut index = 0usize;
+    let mut depth = 0i32;
+    let mut task: Option<String> = None;
+    let mut pending: Option<String> = None;
+    let mut commands = Vec::new();
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if chars[index] == '"' || chars[index] == '`' {
+            let quote = chars[index];
+            index += 1;
+            let mut body = String::new();
+            while index < chars.len() && chars[index] != quote {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    body.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                body.push(chars[index]);
+                index += 1;
+            }
+            if index < chars.len() {
+                index += 1;
+            }
+            let mut after = index;
+            while after < chars.len() && chars[after].is_whitespace() {
+                after += 1;
+            }
+            if after + 1 < chars.len() && chars[after] == '.' && chars[after + 1] == '!' {
+                let owner = if depth == 0 {
+                    pending.clone()
+                } else {
+                    task.clone()
+                };
+                commands.push((owner, body));
+                index = after + 2;
+            }
+            continue;
+        }
+        if chars[index] == '{' {
+            depth += 1;
+            if depth == 1 {
+                task = pending.take();
+            }
+            index += 1;
+            continue;
+        }
+        if chars[index] == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                task = None;
+                pending = None;
+            }
+            index += 1;
+            continue;
+        }
+        if chars[index] == '\n' && depth == 0 {
+            pending = None;
+            index += 1;
+            continue;
+        }
+        if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            let ident: String = chars[start..index].iter().collect();
+            let mut after = index;
+            while after < chars.len() && chars[after].is_whitespace() {
+                after += 1;
+            }
+            if after + 1 < chars.len() && chars[after] == ':' && chars[after + 1] == '=' {
+                pending = Some(ident);
+                index = after + 2;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+/// `brew ruby -e` and `brew ruby file.rb` run that Ruby. `puts` does not
+/// run a shell command.
+#[allow(clippy::too_many_arguments)]
+fn score_brew_ruby<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let sources = brew_ruby_sources(argv, dir);
+    if sources.is_empty() {
+        return;
+    }
+    let mut commands = Vec::new();
+    for source in &sources {
+        commands.extend(interpreter_commands(HostLang::Ruby, source));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn brew_ruby_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("brew"))
+    {
+        return Vec::new();
+    }
+    let mut index = 1usize;
+    let mut ruby = false;
+    let mut sources = Vec::new();
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if !ruby {
+            if arg == "ruby" {
+                ruby = true;
+            } else if !arg.starts_with('-') {
+                return Vec::new();
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "-e" {
+            if let Some(code) = argv.get(index + 1) {
+                sources.push((*code).clone());
+                index += 2;
+                continue;
+            }
+        } else if let Some(code) = arg.strip_prefix("-e").filter(|code| !code.is_empty()) {
+            sources.push(code.to_string());
+        } else if !arg.starts_with('-')
+            && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir))
+        {
+            sources.push(text);
+        }
+        index += 1;
+    }
+    sources
 }
 
 /// `npm explore pkg -- command` runs `command` in `node_modules/pkg`.
@@ -28395,6 +28879,104 @@ mod tests {
             kind(&format!("cd {app_s} && npm explore p -- ./run.sh")),
             Some("git.push")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `mvn <phase>` runs antrun exec bound to that phase or earlier.
+    /// `sbt` loads `build.sbt` unless it is version-only. `brew ruby`
+    /// runs `system`. `puts` does not.
+    #[test]
+    fn build_tools_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-build-{}", std::process::id()));
+        let app = root.join("app");
+        let sub = root.join("sub");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&app).expect("app");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let app_s = app.display().to_string();
+        let pom = |early: &str, late: &str| {
+            format!(
+                r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution><execution><id>l</id><phase>package</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="{late}"/></exec></target></configuration></execution></executions></plugin></plugins></build><profiles><profile><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>p</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="{early}-profile"/></exec></target></configuration></execution></executions></plugin></plugins></build></profile></profiles></project>"#,
+                late = late,
+                early = early
+            )
+        };
+        std::fs::write(app.join("pom.xml"), pom("early", "later")).expect("pom");
+        std::fs::write(
+            sub.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>s</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("sub pom");
+        std::fs::write(root.join("pom.xml"), pom("root", "root")).expect("root pom");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q validate")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {app_s} && mvn -v")), None);
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="early"/></exec></target></configuration></execution><execution><id>l</id><phase>package</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("late pom");
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q validate")), None);
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q compile")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q package")),
+            Some("git.push")
+        );
+        std::fs::write(root.join("pom.xml"), r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>r</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="root"/></exec></target></configuration></execution></executions></plugin></plugins></build></project>"#).expect("root echo");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mvn -q -f sub/pom.xml validate")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mvn -q validate")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build><profiles><profile><id>x</id><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>p</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></profile></profiles></project>"#,
+        )
+        .expect("profile pom");
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q validate")), None);
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"git push origin main\".!\nextra := { \"echo safe\".! }\n",
+        )
+        .expect("sbt");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -V")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"echo safe\".!\nextra := { \"git push origin main\".! }\n",
+        )
+        .expect("sbt2");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch extra")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind("brew ruby -e 'system(\"git push origin main\")'"),
+            Some("git.push")
+        );
+        assert_eq!(kind("brew ruby -e 'puts \"git push origin main\"'"), None);
+        std::fs::write(app.join("push.rb"), "system(\"git push origin main\")\n").expect("rb");
+        std::fs::write(app.join("puts.rb"), "puts \"git push origin main\"\n").expect("puts");
+        assert_eq!(
+            kind(&format!("cd {app_s} && brew ruby push.rb")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {app_s} && brew ruby puts.rb")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
