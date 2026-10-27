@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.7](https://github.com/snapif/snapif/compare/snapif-v0.2.6...snapif-v0.2.7) (2026-10-27)
+
+
+### Bug Fixes
+
+* score more programs the host actually runs ([#257](https://github.com/snapif/snapif/issues/257)) ([d487244](https://github.com/snapif/snapif/commit/d487244f4c692edeace9761eeb627de2c3cc8a7d))
+* score node preloads, awk, ruby -r, and osascript ([#256](https://github.com/snapif/snapif/issues/256)) ([3683a3d](https://github.com/snapif/snapif/commit/3683a3d7852450dfeec70227bcdc9720a3dc718a))
+* score programs and hooks the host actually runs ([#255](https://github.com/snapif/snapif/issues/255)) ([b5768df](https://github.com/snapif/snapif/commit/b5768dfda644a617080a8e6a8c170370c4ba080b))
+* score the commit hooks core.hooksPath names ([#253](https://github.com/snapif/snapif/issues/253)) ([8774d37](https://github.com/snapif/snapif/commit/8774d372d34fedf38845c05c630707c2126cf2fd))
+* score the merge hooks core.hooksPath names ([#254](https://github.com/snapif/snapif/issues/254)) ([58f866b](https://github.com/snapif/snapif/commit/58f866be10e5b61e05edd19997527a62a47a0702))
+* score the PowerShell script the engine runs ([#252](https://github.com/snapif/snapif/issues/252)) ([ec1ddd1](https://github.com/snapif/snapif/commit/ec1ddd189564fea142b64285467fd67b316e78ab))
+* score the Windows script files the host runs ([#250](https://github.com/snapif/snapif/issues/250)) ([d0678e4](https://github.com/snapif/snapif/commit/d0678e4aba04c063596166293c44a59693730889))
+
 ## [0.2.6](https://github.com/snapif/snapif/compare/snapif-v0.2.5...snapif-v0.2.6) (2026-10-26)
 
 
