@@ -988,6 +988,10 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &loaded, depth, local, git, best);
             let julia_includes = julia_include_commands(&executed.argv, host_dir);
             scan_isolated(policy, tool_name, &julia_includes, depth, local, git, best);
+            let octave_sources = octave_source_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &octave_sources, depth, local, git, best);
+            let generated = go_generate_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &generated, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6447,11 +6451,15 @@ fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
             let mut paths = python_exec_opens(text);
             paths.extend(python_imports(text));
             paths.extend(python_from_imports(text));
+            paths.extend(call_strings(text, "run_path"));
+            paths.extend(python_import_modules(text));
             paths
         }
         HostLang::Php => {
             let mut paths = call_strings(text, "include");
+            paths.extend(call_strings(text, "include_once"));
             paths.extend(call_strings(text, "require"));
+            paths.extend(call_strings(text, "require_once"));
             paths
         }
         HostLang::Perl => {
@@ -6495,6 +6503,19 @@ fn call_strings(text: &str, word: &str) -> Vec<String> {
         index += 1;
     }
     paths
+}
+
+fn python_import_modules(text: &str) -> Vec<String> {
+    call_strings(text, "import_module")
+        .into_iter()
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+        .map(|name| format!("{name}.py"))
+        .collect()
 }
 
 fn python_from_imports(text: &str) -> Vec<String> {
@@ -6659,6 +6680,71 @@ fn lua_module_names(argv: &[String]) -> Vec<String> {
         index += 1;
     }
     names
+}
+
+fn octave_source_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut commands = Vec::new();
+    for text in octave_programs(argv) {
+        for raw in call_strings(&text, "source") {
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(quoted_call(&body, "system", &['%', '#']));
+            }
+        }
+    }
+    commands
+}
+
+fn go_generate_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("go"))
+    {
+        return Vec::new();
+    }
+    let mut saw_generate = false;
+    let mut extra = false;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if !saw_generate && arg == "generate" {
+            saw_generate = true;
+            continue;
+        }
+        extra = true;
+    }
+    if !saw_generate || extra {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("go") {
+            continue;
+        }
+        let Some(ScriptFile::Text(text)) = load_script_file(&path.display().to_string()) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("//go:generate") else {
+                continue;
+            };
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                commands.push(rest.to_string());
+            }
+        }
+    }
+    commands
 }
 
 fn julia_include_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
@@ -23702,6 +23788,18 @@ mod tests {
         write("push.php", "<?php\nsystem(\"git push origin main\");\n");
         write("push.R", "system(\"git push origin main\")\n");
         write("push.jl", "run(`git push origin main`)\n");
+        write("push.m", "system(\"git push origin main\");\n");
+        std::fs::create_dir_all(root.join("gogen")).expect("gogen");
+        std::fs::write(
+            root.join("gogen/main.go"),
+            "package main\n//go:generate git push origin main\nfunc main() {}\n",
+        )
+        .expect("gogen");
+        std::fs::write(
+            root.join("gogen/quiet.go"),
+            "package main\nfunc main() { println(\"//go:generate git push origin main\") }\n",
+        )
+        .expect("gogen quiet");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -23810,6 +23908,12 @@ mod tests {
             format!("cd {show} && ruby -e 'require_relative \"push.rb\"'"),
             format!("cd {show} && R --vanilla -e 'source(\"push.R\")'"),
             format!("cd {show} && julia --startup-file=no -e 'include(\"push.jl\")'"),
+            format!("cd {show} && python3 -c 'import importlib; importlib.import_module(\"push\")'"),
+            format!("cd {show} && python3 -c 'import runpy; runpy.run_path(\"push.py\")'"),
+            format!("cd {show} && php -r 'include_once \"push.php\";'"),
+            format!("cd {show} && php -r 'require_once \"push.php\";'"),
+            format!("cd {show} && octave --quiet --eval 'source(\"push.m\");'"),
+            format!("cd {show}/gogen && go generate"),
             "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
@@ -23884,6 +23988,10 @@ mod tests {
             format!("cd {show} && perl -e 'require \"push.pl\";'"),
             format!("cd {show} && python3 -c 'from missing import os'"),
             format!("cd {show} && julia --startup-file=no -e 'include(\"quiet.jl\")'"),
+            format!(
+                "cd {show} && python3 -c 'import importlib; importlib.import_module(\"os.path\")'"
+            ),
+            format!("cd {show}/gogen && go build"),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
