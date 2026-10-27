@@ -1223,6 +1223,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_xcodebuild(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_exec(
                 policy,
                 tool_name,
@@ -10287,6 +10297,368 @@ fn brew_ruby_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
         index += 1;
     }
     sources
+}
+
+/// `xcodebuild` runs each Run Script phase of the selected target.
+/// With no `-target`, that is the first target. `build`, `archive`,
+/// and a command with no action run the scripts. `clean`, `test`,
+/// and `-version` do not.
+#[allow(clippy::too_many_arguments)]
+fn score_xcodebuild<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("xcodebuild"))
+    {
+        return;
+    }
+    if argv
+        .iter()
+        .any(|arg| arg == "-version" || arg == "--version")
+    {
+        return;
+    }
+    let positionals = xcode_positionals(argv);
+    if !xcode_runs_scripts(&positionals) {
+        return;
+    }
+    let Some(project) = xcode_project_dir(argv, dir) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(project.join("project.pbxproj")) else {
+        return;
+    };
+    let scripts = xcode_shell_scripts(&text, &xcode_target_names(argv));
+    scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+}
+
+fn xcode_runs_scripts(positionals: &[String]) -> bool {
+    if positionals
+        .iter()
+        .any(|word| word == "build" || word == "archive")
+    {
+        return true;
+    }
+    positionals.is_empty()
+}
+
+fn xcode_positionals(argv: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if matches!(
+            arg,
+            "-project"
+                | "-target"
+                | "-configuration"
+                | "-scheme"
+                | "-workspace"
+                | "-destination"
+                | "-sdk"
+                | "-arch"
+                | "-derivedDataPath"
+                | "-xcconfig"
+                | "-archivePath"
+                | "-exportPath"
+                | "-exportOptionsPlist"
+                | "-resultBundlePath"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    words
+}
+
+fn xcode_target_names(argv: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-target"
+            && let Some(name) = argv.get(index + 1)
+        {
+            names.push(name.clone());
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    names
+}
+
+fn xcode_project_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    let mut chosen = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-project"
+            && let Some(path) = argv.get(index + 1).filter(|path| !path.is_empty())
+        {
+            chosen = Some((*path).clone());
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    let path = std::path::PathBuf::from(shell_path(chosen.as_deref()?, dir));
+    if path.is_dir() { Some(path) } else { None }
+}
+
+fn xcode_shell_scripts(text: &str, targets: &[String]) -> Vec<String> {
+    let objects = xcode_object_bodies(text);
+    let ids = if targets.is_empty() {
+        xcode_first_target(&objects).into_iter().collect::<Vec<_>>()
+    } else {
+        objects
+            .iter()
+            .filter(|(_, body)| xcode_named_target(body, targets))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut scripts = Vec::new();
+    for id in ids {
+        let Some(body) = objects
+            .iter()
+            .find(|(oid, _)| oid == &id)
+            .map(|(_, body)| body)
+        else {
+            continue;
+        };
+        for phase in xcode_id_list(body, "buildPhases") {
+            let Some(phase_body) = objects
+                .iter()
+                .find(|(oid, _)| oid == &phase)
+                .map(|(_, body)| body)
+            else {
+                continue;
+            };
+            if xcode_plain_field(phase_body, "isa").as_deref() != Some("PBXShellScriptBuildPhase") {
+                continue;
+            }
+            if let Some(script) = xcode_string_field(phase_body, "shellScript")
+                && !script.is_empty()
+            {
+                scripts.push(script);
+            }
+        }
+    }
+    scripts
+}
+
+fn xcode_named_target(body: &str, names: &[String]) -> bool {
+    let Some(isa) = xcode_plain_field(body, "isa") else {
+        return false;
+    };
+    if !matches!(
+        isa.as_str(),
+        "PBXAggregateTarget" | "PBXNativeTarget" | "PBXLegacyTarget"
+    ) {
+        return false;
+    }
+    xcode_plain_field(body, "name").is_some_and(|name| names.iter().any(|want| want == &name))
+}
+
+fn xcode_first_target(objects: &[(String, String)]) -> Option<String> {
+    let project = objects
+        .iter()
+        .find(|(_, body)| xcode_plain_field(body, "isa").as_deref() == Some("PBXProject"))?;
+    xcode_id_list(&project.1, "targets").into_iter().next()
+}
+
+fn xcode_object_bodies(text: &str) -> Vec<(String, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker: Vec<char> = "objects = {".chars().collect();
+    let Some(start) = xcode_find(&chars, &marker) else {
+        return Vec::new();
+    };
+    let mut index = start + marker.len();
+    let mut depth = 1i32;
+    let mut bodies = Vec::new();
+    while index < chars.len() && depth > 0 {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index = xcode_skip_comment(&chars, index);
+            continue;
+        }
+        if chars[index] == '"' {
+            index = xcode_skip_quoted(&chars, index);
+            continue;
+        }
+        if depth == 1 && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+            let id_start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            let id: String = chars[id_start..index].iter().collect();
+            index = xcode_skip_gap(&chars, index);
+            if chars.get(index) == Some(&'=') {
+                index = xcode_skip_gap(&chars, index + 1);
+                if chars.get(index) == Some(&'{') {
+                    let body_start = index;
+                    let mut inner = 0i32;
+                    while index < chars.len() {
+                        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                            index = xcode_skip_comment(&chars, index);
+                            continue;
+                        }
+                        if chars[index] == '"' {
+                            index = xcode_skip_quoted(&chars, index);
+                            continue;
+                        }
+                        if chars[index] == '{' {
+                            inner += 1;
+                        }
+                        if chars[index] == '}' {
+                            inner -= 1;
+                            if inner == 0 {
+                                index += 1;
+                                break;
+                            }
+                        }
+                        index += 1;
+                    }
+                    let body: String = chars[body_start..index].iter().collect();
+                    bodies.push((id, body));
+                    continue;
+                }
+            }
+            continue;
+        }
+        if chars[index] == '{' {
+            depth += 1;
+        }
+        if chars[index] == '}' {
+            depth -= 1;
+        }
+        index += 1;
+    }
+    bodies
+}
+
+fn xcode_find(chars: &[char], needle: &[char]) -> Option<usize> {
+    chars
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn xcode_skip_comment(chars: &[char], mut index: usize) -> usize {
+    index += 2;
+    while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+        index += 1;
+    }
+    (index + 2).min(chars.len())
+}
+
+fn xcode_skip_quoted(chars: &[char], mut index: usize) -> usize {
+    index += 1;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            index += 2;
+            continue;
+        }
+        if chars[index] == '"' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+fn xcode_skip_gap(chars: &[char], mut index: usize) -> usize {
+    loop {
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if chars.get(index) == Some(&'/') && chars.get(index + 1) == Some(&'*') {
+            index = xcode_skip_comment(chars, index);
+            continue;
+        }
+        return index;
+    }
+}
+
+fn xcode_plain_field(body: &str, field: &str) -> Option<String> {
+    let key = format!("{field} = ");
+    let start = body.find(&key)? + key.len();
+    let rest = body[start..].trim_start();
+    if let Some(rest) = rest.strip_prefix('"') {
+        return xcode_unescape(rest);
+    }
+    let end = rest.find([';', '\n']).unwrap_or(rest.len());
+    let value = rest[..end].split("/*").next().unwrap_or("").trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn xcode_string_field(body: &str, field: &str) -> Option<String> {
+    let key = format!("{field} = \"");
+    let start = body.find(&key)? + key.len();
+    xcode_unescape(&body[start..])
+}
+
+fn xcode_unescape(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            match chars[index + 1] {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                other => out.push(other),
+            }
+            index += 2;
+            continue;
+        }
+        if chars[index] == '"' {
+            break;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    Some(out)
+}
+
+fn xcode_id_list(body: &str, field: &str) -> Vec<String> {
+    let key = format!("{field} = (");
+    let Some(found) = body.find(&key) else {
+        return Vec::new();
+    };
+    let rest = &body[found + key.len()..];
+    let Some(end) = rest.find(')') else {
+        return Vec::new();
+    };
+    rest[..end]
+        .split(',')
+        .filter_map(|item| {
+            let item = item.split("/*").next().unwrap_or("").trim();
+            if item.is_empty() {
+                None
+            } else {
+                Some(item.to_string())
+            }
+        })
+        .collect()
 }
 
 /// `npm explore pkg -- command` runs `command` in `node_modules/pkg`.
@@ -29227,6 +29599,79 @@ mod tests {
             kind(&format!("cd {app_s} && sbt -batch extra")),
             Some("git.push")
         );
+        let project = root.join("Probe.xcodeproj");
+        std::fs::create_dir_all(&project).expect("xcodeproj");
+        std::fs::write(
+            project.join("project.pbxproj"),
+            r#"// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA00000000000000000000A1 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B1, );
+			name = Probe;
+		};
+		AA00000000000000000000A4 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B2, );
+			name = Other;
+		};
+		AA00000000000000000000A2 = {
+			isa = PBXProject;
+			targets = ( AA00000000000000000000A1, AA00000000000000000000A4, );
+		};
+		AA00000000000000000000B1 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "git push origin main";
+		};
+		AA00000000000000000000B2 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "echo other";
+		};
+	};
+	rootObject = AA00000000000000000000A2;
+}
+"#,
+        )
+        .expect("pbxproj");
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe build"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Other build"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe clean"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe test"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe archive"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(kind("xcodebuild -version"), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
