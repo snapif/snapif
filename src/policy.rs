@@ -982,7 +982,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
-            score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_uv_run(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_swift_script(
                 policy,
                 tool_name,
@@ -1003,7 +1012,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
-            score_osascript(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_osascript(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_bun_script(
                 policy,
                 tool_name,
@@ -1027,8 +1045,26 @@ fn consider_segment<'a>(
             score_tcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sqlite_shell(policy, tool_name, &executed.argv, depth, local, git, best);
             score_octave_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_julia_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_elixir_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_julia_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_elixir_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_erlang_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_go_run(
                 policy,
@@ -1041,8 +1077,26 @@ fn consider_segment<'a>(
                 best,
             );
             score_cargo_run(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_coffee_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_haskell_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_coffee_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_haskell_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_mix_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_clojure_script(policy, tool_name, &executed.argv, depth, local, git, best);
             let host_dir = scope.dir.as_deref();
@@ -5516,6 +5570,7 @@ fn just_recipe_body(argv: &[String], dir: Option<&str>) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_uv_run<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5523,12 +5578,13 @@ fn score_uv_run<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(path) = uv_python_script(argv) else {
         return;
     };
-    match load_script_file(&path) {
+    match load_script_file(&shell_path(&path, dir)) {
         Some(ScriptFile::Text(text)) => {
             let commands = interpreter_commands(HostLang::Python, &text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -6043,6 +6099,7 @@ fn octave_programs(argv: &[String]) -> Vec<String> {
     texts
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_julia_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -6050,12 +6107,13 @@ fn score_julia_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
     let inline = flag_programs(argv, "julia", &["-e", "--eval"]);
     if inline.is_empty() {
-        if let Some(text) = positional_script(argv, "julia") {
+        if let Some(text) = positional_script(argv, "julia", dir) {
             commands.extend(julia_commands(&text));
         }
     } else {
@@ -6100,6 +6158,7 @@ fn julia_commands(text: &str) -> Vec<String> {
     commands
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_elixir_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -6107,12 +6166,13 @@ fn score_elixir_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
     let inline = flag_programs(argv, "elixir", &["-e", "--eval"]);
     if inline.is_empty() {
-        if let Some(text) = positional_script(argv, "elixir") {
+        if let Some(text) = positional_script(argv, "elixir", dir) {
             commands.extend(elixir_commands(&text));
         }
     } else {
@@ -7439,6 +7499,7 @@ fn process_builder_commands(text: &str) -> Vec<String> {
     commands
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_coffee_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -7446,16 +7507,17 @@ fn score_coffee_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(text) = coffee_program(argv) else {
+    let Some(text) = coffee_program(argv, dir) else {
         return;
     };
     let commands = interpreter_commands(HostLang::Node, &text);
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn coffee_program(argv: &[String]) -> Option<String> {
+fn coffee_program(argv: &[String], dir: Option<&str>) -> Option<String> {
     if argv
         .first()
         .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("coffee"))
@@ -7469,13 +7531,14 @@ fn coffee_program(argv: &[String]) -> Option<String> {
         if arg.starts_with('-') {
             continue;
         }
-        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+        if let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir)) {
             return Some(text);
         }
     }
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_haskell_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -7483,6 +7546,7 @@ fn score_haskell_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
@@ -7492,7 +7556,7 @@ fn score_haskell_script<'a>(
         }
     }
     for command in ["runghc", "runhaskell"] {
-        if let Some(text) = positional_script(argv, command) {
+        if let Some(text) = positional_script(argv, command, dir) {
             commands.extend(haskell_commands(&text));
         }
     }
@@ -8232,6 +8296,7 @@ fn awk_systems(text: &str) -> Vec<String> {
     commands
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_osascript<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -8239,9 +8304,10 @@ fn score_osascript<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let texts = osascript_texts(argv);
+    let texts = osascript_texts(argv, dir);
     let javascript = osascript_javascript(argv);
     let mut commands = Vec::new();
     for text in &texts {
@@ -8267,7 +8333,7 @@ fn osascript_javascript(argv: &[String]) -> bool {
     false
 }
 
-fn positional_script(argv: &[String], command: &str) -> Option<String> {
+fn positional_script(argv: &[String], command: &str, dir: Option<&str>) -> Option<String> {
     if argv
         .first()
         .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
@@ -8281,7 +8347,7 @@ fn positional_script(argv: &[String], command: &str) -> Option<String> {
             index += 1;
             continue;
         }
-        return match load_script_file(arg) {
+        return match load_script_file(&shell_path(arg, dir)) {
             Some(ScriptFile::Text(text)) => Some(text),
             _ => None,
         };
@@ -8289,7 +8355,7 @@ fn positional_script(argv: &[String], command: &str) -> Option<String> {
     None
 }
 
-fn osascript_texts(argv: &[String]) -> Vec<String> {
+fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
@@ -8316,7 +8382,7 @@ fn osascript_texts(argv: &[String]) -> Vec<String> {
             index += 1;
             continue;
         }
-        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+        if let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir)) {
             texts.push(text);
         }
         break;
@@ -24507,6 +24573,12 @@ mod tests {
             format!("cd {show}/empty-lib && expect ../run.exp"),
             format!("cd {show}/empty-lib && bun ../preload.js"),
             format!("cd {show}/empty-lib && go run ../gorun/main.go"),
+            format!("cd {show}/empty-lib && coffee ../run.coffee"),
+            format!("cd {show}/empty-lib && runghc ../Run.hs"),
+            format!("cd {show}/empty-lib && uv run --no-project ../push.py"),
+            format!("cd {show}/empty-lib && julia --startup-file=no ../push.jl"),
+            format!("cd {show}/empty-lib && elixir ../run.exs"),
+            format!("cd {show}/empty-lib && osascript ../run.scpt"),
             "sqlite3 :memory: '.shell git push origin main'".to_string(),
             "octave --quiet --eval 'system(\"git push origin main\");'".to_string(),
             "julia --startup-file=no -e 'run(`git push origin main`)'".to_string(),
@@ -24630,6 +24702,8 @@ mod tests {
             format!("cd {show}/empty-lib && cmake -P ../missing.cmake"),
             format!("cd {show}/empty-lib && swift ../missing.swift"),
             format!("cd {show}/empty-lib && expect ../missing.exp"),
+            format!("cd {show}/empty-lib && coffee ../missing.coffee"),
+            format!("cd {show}/empty-lib && osascript ../missing.scpt"),
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
             format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
