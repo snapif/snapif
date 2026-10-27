@@ -946,6 +946,7 @@ fn consider_segment<'a>(
             // below, in this shell. `cat`, `head`, and `tail` score the text
             // they would print.
             score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_makefile(policy, tool_name, &executed.argv, depth, local, git, best);
             score_printed_file(
                 policy,
                 tool_name,
@@ -5544,6 +5545,91 @@ fn bash_startup_file<'a>(argv: &'a [String], env: &'a [(String, String)]) -> Opt
         .find(|(name, _)| name == "BASH_ENV")
         .map(|(_, value)| value.as_str())
         .filter(|path| !path.is_empty())
+}
+
+/// `make -f file` runs the tab recipes in that file. `make -n` only
+/// prints them. With no `-f`, GNU make reads `GNUmakefile`, then
+/// `makefile`, then `Makefile`.
+fn score_makefile<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = make_file(argv) else {
+        return;
+    };
+    let Some(loaded) = load_script_file(path) else {
+        return;
+    };
+    match loaded {
+        ScriptFile::Text(text) => {
+            let recipes: Vec<String> = text
+                .lines()
+                .filter_map(|line| {
+                    let line = line.strip_prefix('\t')?.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        None
+                    } else {
+                        Some(line.replace("$$", "$"))
+                    }
+                })
+                .collect();
+            scan_isolated(policy, tool_name, &recipes, depth, local, git, best);
+        }
+        ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
+    }
+}
+
+fn make_file(argv: &[String]) -> Option<&str> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("make") && !base.eq_ignore_ascii_case("gmake") {
+        return None;
+    }
+    let mut file: Option<&str> = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            break;
+        }
+        if matches!(
+            token.as_str(),
+            "-n" | "--dry-run" | "--just-print" | "--recon"
+        ) {
+            return None;
+        }
+        if token == "-f" || token == "--file" || token == "--makefile" {
+            file = argv.get(index + 1).map(String::as_str);
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = token.strip_prefix("-f")
+            && !rest.is_empty()
+            && !token.starts_with("--")
+        {
+            file = Some(rest);
+            index += 1;
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.contains('n')
+        {
+            return None;
+        }
+        index += 1;
+    }
+    if let Some(path) = file.filter(|path| !path.is_empty()) {
+        return Some(path);
+    }
+    ["GNUmakefile", "makefile", "Makefile"]
+        .into_iter()
+        .find(|name| load_script_file(name).is_some())
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -19943,6 +20029,7 @@ mod tests {
             for name in names {
                 std::fs::write(dir.join(name), body).expect(name);
             }
+            std::fs::write(dir.join("payload.mk"), "all:\n\tgit push origin main\n").expect("mk");
             let spaced = dir.join("Program Files");
             std::fs::create_dir_all(&spaced).expect("spaced");
             std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
@@ -19962,6 +20049,7 @@ mod tests {
             for name in names {
                 std::fs::write(dir.join(name), body).expect(name);
             }
+            std::fs::write(dir.join("payload.mk"), "all:\n\tgit push origin main\n").expect("mk");
             let spaced = dir.join("Program Files");
             std::fs::create_dir_all(&spaced).expect("spaced");
             std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
@@ -19980,6 +20068,7 @@ mod tests {
         let ps1 = path("payload.ps1");
         let bat = path("payload.bat");
         let cmd_file = path("payload.cmd");
+        let mk = path("payload.mk");
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
         let kind = |command: &str| -> &'static str {
             let id = matched_action(&policy, "Bash", Some(command))
@@ -19995,6 +20084,10 @@ mod tests {
         };
         let review = [
             format!("bash {sh}"),
+            format!("make -f {mk}"),
+            format!("make -f '{mk}' all"),
+            format!("gmake --file {mk}"),
+            format!("make -f{}", mk.replace('\\', "/")),
             format!("BASH_ENV='{sh}' bash -c 'echo hi'"),
             format!("bash --rcfile '{sh}' -ic 'echo hi'"),
             format!("bash --init-file '{sh}' -ic 'echo hi'"),
@@ -20066,6 +20159,9 @@ mod tests {
         }
         let quiet = [
             format!("bash {sh}.missing"),
+            format!("make -f {mk}.missing"),
+            format!("make -n -f {mk}"),
+            format!("make -f {mk} -n"),
             format!("bash < '{sh}.missing'"),
             format!("bash -s < '{sh}.missing'"),
             format!("source < '{sh}'"),
