@@ -1062,6 +1062,26 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_pytest(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ansible_playbook(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_exec(
                 policy,
@@ -11049,6 +11069,124 @@ fn strip_lua_comments(text: &str) -> String {
         index += 1;
     }
     out
+}
+
+/// `pytest file.py` and `python3 -m pytest file.py` run that file.
+/// `ansible-playbook file.yml` runs `command:` and `shell:` tasks.
+/// A debug task does not.
+#[allow(clippy::too_many_arguments)]
+fn score_pytest<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for path in pytest_files(argv, dir) {
+        let Some(text) = load_text(&path) else {
+            continue;
+        };
+        commands.extend(interpreter_commands(HostLang::Python, &text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_ansible_playbook<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new()))
+        .eq_ignore_ascii_case("ansible-playbook")
+    {
+        return;
+    }
+    let Some(text) = script_positionals(argv)
+        .into_iter()
+        .find(|word| word.ends_with(".yml") || word.ends_with(".yaml"))
+        .and_then(|word| load_text(&shell_path(&word, dir)))
+    else {
+        return;
+    };
+    let commands = playbook_tasks(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn pytest_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    let selected = if base.eq_ignore_ascii_case("pytest") {
+        true
+    } else {
+        host_lang(base).is_some_and(|lang| matches!(lang, HostLang::Python))
+            && python_module_is(argv, "pytest")
+    };
+    if !selected {
+        return Vec::new();
+    }
+    script_positionals(argv)
+        .into_iter()
+        .filter(|word| word.ends_with(".py"))
+        .map(|word| shell_path(&word, dir))
+        .collect()
+}
+
+fn python_module_is(argv: &[String], module: &str) -> bool {
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index] == "-m" {
+            return argv.get(index + 1).is_some_and(|name| name == module);
+        }
+        index += 1;
+    }
+    false
+}
+
+fn playbook_tasks(text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let body = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        let Some(value) = body
+            .strip_prefix("command:")
+            .or_else(|| body.strip_prefix("shell:"))
+        else {
+            continue;
+        };
+        let value = yaml_scalar(value.trim());
+        if value.is_empty() || value == "|" || value == ">" {
+            continue;
+        }
+        commands.push(value);
+    }
+    commands
+}
+
+fn yaml_scalar(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -25946,6 +26084,63 @@ mod tests {
             (format!("ldc2 -run {root_s}/p.d"), Some("git.push")),
             (format!("ldc2 -run {root_s}/quiet.d"), None),
             (format!("ldc2 {root_s}/p.d"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `pytest file.py` and `python3 -m pytest file.py` run that file.
+    /// `ansible-playbook` runs `command:` and `shell:` tasks. A debug
+    /// task does not.
+    #[test]
+    fn pytest_and_playbook_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-pyplay-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        let write = |name: &str, body: &str| {
+            std::fs::write(root.join(name), body).expect(name);
+        };
+        write(
+            "test_h.py",
+            "import os\ndef test_h():\n    os.system(\"git push origin main\")\n",
+        );
+        write(
+            "test_quiet.py",
+            "def test_h():\n    print(\"git push origin main\")\n",
+        );
+        write(
+            "run.yml",
+            "- hosts: localhost\n  tasks:\n    - command: git push origin main\n",
+        );
+        write(
+            "shell.yml",
+            "- hosts: localhost\n  tasks:\n    - shell: git push origin main\n",
+        );
+        write(
+            "debug.yml",
+            "- hosts: localhost\n  tasks:\n    - debug:\n        msg: git push origin main\n",
+        );
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let cases = [
+            (format!("cd {root_s} && pytest test_h.py"), Some("git.push")),
+            (
+                format!("cd {root_s} && python3 -m pytest test_h.py"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && pytest test_quiet.py"), None),
+            (
+                format!("cd {root_s} && ansible-playbook run.yml"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && ansible-playbook shell.yml"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && ansible-playbook debug.yml"), None),
         ];
         for (command, want) in cases {
             assert_eq!(kind(&command), want, "{command}");
