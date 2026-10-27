@@ -6707,20 +6707,29 @@ fn env_preload_commands(
             commands.extend(ruby_lib_files(argv, env, dir));
             commands
         }
-        Some(HostLang::Node) => env_option_files(
-            env,
-            "NODE_OPTIONS",
-            "node",
-            dir,
-            HostLang::Node,
-            node_preloads,
-        ),
+        Some(HostLang::Node) => {
+            let mut commands = env_option_files(
+                env,
+                "NODE_OPTIONS",
+                "node",
+                dir,
+                HostLang::Node,
+                node_preloads,
+            );
+            commands.extend(node_path_files(argv, env, dir));
+            commands
+        }
         Some(HostLang::Perl) => {
             let mut commands = perl_opt_files(env, dir);
             commands.extend(perl_lib_files(argv, env, dir));
             commands
         }
-        Some(HostLang::Python) => python_path_files(argv, env, dir),
+        Some(HostLang::Python) => {
+            let mut commands = python_path_files(argv, env, dir);
+            commands.extend(python_dash_m_files(argv, env, dir));
+            commands
+        }
+        Some(HostLang::Php) => php_include_path_files(argv, dir),
         Some(HostLang::Lua) => lua_path_files(argv, env, dir),
         _ => Vec::new(),
     }
@@ -6845,6 +6854,110 @@ fn python_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str
         names.extend(python_import_modules(&text));
     }
     library_scripts(value, &names, dir, HostLang::Python)
+}
+
+fn python_dash_m_files(
+    argv: &[String],
+    env: &[(String, String)],
+    dir: Option<&str>,
+) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PYTHONPATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-m" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(name.clone());
+            }
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(entry);
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            shell_dir(dir).join(root)
+        };
+        for name in &names {
+            let Some(path) = module_file_in(&root, name) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(interpreter_commands(HostLang::Python, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn module_file_in(root: &std::path::Path, name: &str) -> Option<String> {
+    if name.is_empty() || name.split('.').any(|part| part.is_empty() || part == "..") {
+        return None;
+    }
+    let rel = name.replace('.', "/");
+    let main = root.join(&rel).join("__main__.py");
+    if main.is_file() {
+        return Some(main.display().to_string());
+    }
+    let file = root.join(format!("{rel}.py"));
+    if file.is_file() {
+        return Some(file.display().to_string());
+    }
+    None
+}
+
+fn node_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "NODE_PATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Node, argv) {
+        for raw in call_strings(&text, "require") {
+            if raw.contains('/') || raw.contains('\\') || raw.starts_with('.') {
+                continue;
+            }
+            names.push(format!("{raw}.js"));
+        }
+    }
+    library_scripts(value, &names, dir, HostLang::Node)
+}
+
+fn php_include_path_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        let spec = if arg == "-d" {
+            index += 1;
+            argv.get(index).map(String::as_str)
+        } else {
+            arg.strip_prefix("-d")
+        };
+        if let Some(path) = spec.and_then(|item| item.strip_prefix("include_path="))
+            && !path.is_empty()
+        {
+            dirs.push(path.to_string());
+        }
+        index += 1;
+    }
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Php, argv) {
+        for word in ["include", "include_once", "require", "require_once"] {
+            names.extend(call_strings(&text, word));
+        }
+    }
+    library_scripts(&dirs.join(":"), &names, dir, HostLang::Php)
 }
 
 fn ruby_lib_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
@@ -24161,6 +24274,11 @@ mod tests {
             format!("PYTHONPATH='{show}' python3 -c 'import push'"),
             format!("RUBYLIB='{show}' ruby -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l push -e '0'"),
+            format!("cd {show}/empty-lib && PYTHONPATH='{show}' python3 -m push"),
+            format!("cd {show}/empty-lib && NODE_PATH='{show}' node -e 'require(\"push\")'"),
+            format!(
+                "cd {show}/empty-lib && php -d include_path='{show}' -r 'include \"push.php\";'"
+            ),
             format!(
                 "cd {show} && python3 -c 'exec(compile(open(\"push.py\").read(), \"push.py\", \"exec\"))'"
             ),
@@ -24249,6 +24367,13 @@ mod tests {
             format!("PYTHONPATH='{show}/empty-lib' python3 -c 'import push'"),
             format!("RUBYLIB='{show}/empty-lib' ruby -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l missing -e '0'"),
+            format!("cd {show}/empty-lib && PYTHONPATH='{show}/empty-lib' python3 -m push"),
+            format!(
+                "cd {show}/empty-lib && NODE_PATH='{show}/empty-lib' node -e 'require(\"push\")'"
+            ),
+            format!(
+                "cd {show}/empty-lib && php -d include_path='{show}/empty-lib' -r 'include \"missing.php\";'"
+            ),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
