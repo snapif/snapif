@@ -9622,6 +9622,12 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
 /// directory. `pnpm --dir` wins over `--prefix`. `bun` uses `--cwd`.
 /// `npm ci` does this when a lock file is present. `pnpm ci` does too.
 /// `npm rebuild` skips `prepare`. `pnpm rebuild` does not.
+/// `npm pack`, `pnpm pack`, and `bun pm pack` run `prepare`,
+/// `prepack`, and `postpack`. `npm version`, `pnpm version`, and
+/// `bun pm version` run the version scripts when a version is given.
+/// `npm publish` also runs `prepublishOnly`. `pnpm publish` runs the
+/// publish scripts too. `npm pack` and `npm publish` stay in the
+/// working directory. `npm version` honors `--prefix`.
 #[allow(clippy::too_many_arguments)]
 fn score_install_scripts<'a>(
     policy: &'a Policy,
@@ -9652,21 +9658,65 @@ fn install_script_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
         return Vec::new();
     };
     let packages = &words[2..];
-    let root = install_package_dir(argv, dir);
+    if tool == PackageTool::Bun && sub == "pm" {
+        return bun_pm_bodies(&words, &install_package_dir(argv, dir));
+    }
+    let root = if matches!((tool, sub), (PackageTool::Npm, "pack" | "publish")) {
+        shell_dir(dir)
+    } else {
+        install_package_dir(argv, dir)
+    };
+    let manifest = root.join("package.json");
     match (tool, sub) {
         (PackageTool::Npm | PackageTool::Pnpm | PackageTool::Bun, "install") => {
             install_bodies(tool, packages, &root, dir)
         }
         (PackageTool::Npm, "ci") if packages.is_empty() && npm_ci_has_lock(&root) => {
-            package_lifecycle(&root.join("package.json"), true)
+            package_lifecycle(&manifest, INSTALL_SCRIPT_KEYS)
         }
         (PackageTool::Pnpm, "ci") if packages.is_empty() => {
-            package_lifecycle(&root.join("package.json"), true)
+            package_lifecycle(&manifest, INSTALL_SCRIPT_KEYS)
         }
         (PackageTool::Npm, "rebuild") => npm_rebuild_bodies(packages, &root),
         (PackageTool::Pnpm, "rebuild") if packages.is_empty() => {
-            package_lifecycle(&root.join("package.json"), true)
+            package_lifecycle(&manifest, INSTALL_SCRIPT_KEYS)
         }
+        (PackageTool::Npm | PackageTool::Pnpm, "pack") if packages.is_empty() => {
+            package_lifecycle(&manifest, PACK_SCRIPT_KEYS)
+        }
+        (PackageTool::Npm, "publish") if packages.is_empty() => {
+            package_lifecycle(&manifest, NPM_PUBLISH_SCRIPT_KEYS)
+        }
+        (PackageTool::Pnpm, "publish") if packages.is_empty() => {
+            package_lifecycle(&manifest, PNPM_PUBLISH_SCRIPT_KEYS)
+        }
+        (PackageTool::Npm | PackageTool::Pnpm, "version") if !packages.is_empty() => {
+            package_lifecycle(&manifest, VERSION_SCRIPT_KEYS)
+        }
+        _ => Vec::new(),
+    }
+}
+
+const INSTALL_SCRIPT_KEYS: &[&str] = &["preinstall", "install", "postinstall", "prepare"];
+const REBUILD_SCRIPT_KEYS: &[&str] = &["preinstall", "install", "postinstall"];
+const PACK_SCRIPT_KEYS: &[&str] = &["prepare", "prepack", "postpack"];
+const VERSION_SCRIPT_KEYS: &[&str] = &["preversion", "version", "postversion"];
+const NPM_PUBLISH_SCRIPT_KEYS: &[&str] = &["prepare", "prepack", "postpack", "prepublishOnly"];
+const PNPM_PUBLISH_SCRIPT_KEYS: &[&str] = &[
+    "prepare",
+    "prepack",
+    "postpack",
+    "prepublishOnly",
+    "prepublish",
+    "publish",
+    "postpublish",
+];
+
+fn bun_pm_bodies(words: &[String], root: &std::path::Path) -> Vec<String> {
+    let manifest = root.join("package.json");
+    match words.get(2).map(String::as_str) {
+        Some("pack") if words.len() == 3 => package_lifecycle(&manifest, PACK_SCRIPT_KEYS),
+        Some("version") if words.len() > 3 => package_lifecycle(&manifest, VERSION_SCRIPT_KEYS),
         _ => Vec::new(),
     }
 }
@@ -9678,7 +9728,7 @@ fn install_bodies(
     dir: Option<&str>,
 ) -> Vec<String> {
     if packages.is_empty() || tool == PackageTool::Bun {
-        return package_lifecycle(&root.join("package.json"), true);
+        return package_lifecycle(&root.join("package.json"), INSTALL_SCRIPT_KEYS);
     }
     if tool != PackageTool::Npm {
         return Vec::new();
@@ -9687,7 +9737,7 @@ fn install_bodies(
     for arg in packages {
         if npm_local_spec(arg) {
             let path = std::path::PathBuf::from(shell_path(arg, dir)).join("package.json");
-            bodies.extend(package_lifecycle(&path, true));
+            bodies.extend(package_lifecycle(&path, INSTALL_SCRIPT_KEYS));
         }
     }
     bodies
@@ -9695,12 +9745,12 @@ fn install_bodies(
 
 fn npm_rebuild_bodies(packages: &[String], root: &std::path::Path) -> Vec<String> {
     if packages.is_empty() {
-        return package_lifecycle(&root.join("package.json"), false);
+        return package_lifecycle(&root.join("package.json"), REBUILD_SCRIPT_KEYS);
     }
     let mut bodies = Vec::new();
     for name in packages {
         if let Some(path) = npm_rebuild_manifest(root, name) {
-            bodies.extend(package_lifecycle(&path, false));
+            bodies.extend(package_lifecycle(&path, REBUILD_SCRIPT_KEYS));
         }
     }
     bodies
@@ -9727,7 +9777,7 @@ fn npm_ci_has_lock(dir: &std::path::Path) -> bool {
     dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file()
 }
 
-fn package_lifecycle(path: &std::path::Path, prepare: bool) -> Vec<String> {
+fn package_lifecycle(path: &std::path::Path, keys: &[&str]) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -9736,11 +9786,6 @@ fn package_lifecycle(path: &std::path::Path, prepare: bool) -> Vec<String> {
     };
     let Some(scripts) = value.get("scripts").and_then(|item| item.as_object()) else {
         return Vec::new();
-    };
-    let keys: &[&str] = if prepare {
-        &["preinstall", "install", "postinstall", "prepare"]
-    } else {
-        &["preinstall", "install", "postinstall"]
     };
     let mut bodies = Vec::new();
     for key in keys {
@@ -28023,6 +28068,139 @@ mod tests {
         );
         write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
         assert_eq!(kind(&format!("cd {pkg_s} && bun rebuild")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `pack` runs `prepare`, `prepack`, and `postpack`. `version`
+    /// runs the version scripts only when a version is given.
+    /// `npm publish` also runs `prepublishOnly`. `pnpm publish` runs
+    /// the publish scripts. `npm pack` and `npm publish` ignore
+    /// `--prefix`. `npm version` uses it.
+    #[test]
+    fn pack_and_version_score_the_scripts_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-pack-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let other = root.join("other");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::create_dir_all(&other).expect("other");
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::write(dir.join("package.json"), body).expect("package.json");
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let pkg_s = pkg.display().to_string();
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"echo other"}}"#);
+        for command in [
+            format!("cd {pkg_s} && npm pack"),
+            format!("cd {pkg_s} && pnpm pack"),
+            format!("cd {pkg_s} && bun pm pack"),
+            format!("cd {pkg_s} && npm publish --dry-run"),
+            format!("cd {root_s} && pnpm pack --dir pkg"),
+            format!("cd {root_s} && bun pm pack --cwd pkg"),
+        ] {
+            assert_eq!(kind(&command), Some("git.push"), "{command}");
+        }
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm pack --prefix {}",
+                other.display()
+            )),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"echo cwd"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm pack --prefix other")),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm publish --dry-run --prefix other"
+            )),
+            None
+        );
+        write(
+            &pkg,
+            r#"{"scripts":{"prepublishOnly":"git push origin main","prepare":"echo prep"}}"#,
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm pack")), None);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm publish --dry-run")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"publish":"git push origin main"}}"#);
+        assert_eq!(kind(&format!("cd {pkg_s} && npm publish --dry-run")), None);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && pnpm publish --dry-run")),
+            Some("git.push")
+        );
+        write(&other, r#"{"scripts":{"publish":"git push origin main"}}"#);
+        write(&pkg, r#"{"scripts":{"publish":"echo cwd"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && pnpm publish --dry-run --dir other"
+            )),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm version patch --no-git-tag-version"
+            )),
+            None
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm version")), None);
+        write(&pkg, r#"{"scripts":{"preversion":"git push origin main"}}"#);
+        write(&other, r#"{"scripts":{"preversion":"echo other"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm version patch --no-git-tag-version"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm version patch --prefix other --no-git-tag-version"
+            )),
+            None
+        );
+        write(
+            &other,
+            r#"{"scripts":{"preversion":"git push origin main"}}"#,
+        );
+        write(&pkg, r#"{"scripts":{"preversion":"echo cwd"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm version patch --prefix other --no-git-tag-version"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && pnpm version patch --dir other")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && bun pm version patch --cwd other")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && bun pm version")), None);
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"git push origin main","preversion":"git push origin main","prepublishOnly":"git push origin main","publish":"git push origin main"}}"#,
+        );
+        for command in [
+            format!("cd {pkg_s} && npm pack --ignore-scripts"),
+            format!("cd {pkg_s} && npm publish --dry-run --ignore-scripts"),
+            format!("cd {pkg_s} && pnpm publish --dry-run --ignore-scripts"),
+            format!("cd {pkg_s} && bun pm pack --ignore-scripts"),
+            format!("cd {pkg_s} && npm version patch --ignore-scripts"),
+        ] {
+            assert_eq!(kind(&command), None, "{command}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
