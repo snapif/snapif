@@ -992,6 +992,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_ansible(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_groovy(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_exec(
                 policy,
@@ -10526,6 +10536,113 @@ fn score_ansible<'a>(
         git,
         best,
     );
+}
+
+/// `groovy -e '"cmd".execute()'` and `groovy file.groovy` run `cmd`.
+/// `println("cmd")` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_groovy<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("groovy") {
+        return;
+    }
+    let mut code = None;
+    let mut script = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "-e" {
+            index += 1;
+            code = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if script.is_none() {
+            script = Some(shell_path(token, dir));
+        }
+        index += 1;
+    }
+    let commands = if let Some(code) = code {
+        groovy_executes(&code)
+    } else if let Some(path) = script
+        && let Some(ScriptFile::Text(text)) = load_script_file(&path)
+    {
+        groovy_executes(&text)
+    } else {
+        Vec::new()
+    };
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn groovy_executes(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if chars[index] == '"' || chars[index] == '\'' {
+            let quote = chars[index];
+            index += 1;
+            let mut body = String::new();
+            while index < chars.len() && chars[index] != quote {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    body.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                body.push(chars[index]);
+                index += 1;
+            }
+            if index < chars.len() {
+                index += 1;
+            }
+            let mut next = index;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if groovy_execute_at(&chars, next) && !body.is_empty() {
+                commands.push(body);
+            }
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn groovy_execute_at(chars: &[char], index: usize) -> bool {
+    let method = ['.', 'e', 'x', 'e', 'c', 'u', 't', 'e'];
+    if chars.get(index..index + method.len()) != Some(&method) {
+        return false;
+    }
+    chars
+        .get(index + method.len())
+        .is_none_or(|ch| !ch.is_ascii_alphanumeric() && *ch != '_')
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -25298,6 +25415,39 @@ mod tests {
             Some("git.push")
         );
         assert_eq!(kind("ansible localhost -m ping"), None);
+    }
+
+    /// `groovy -e '"cmd".execute()'` and a `.groovy` file run `cmd`.
+    /// `println("cmd")` does not.
+    #[test]
+    fn groovy_execute_scores_the_string() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-groovy-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(
+            root.join("p.groovy"),
+            "\"git push origin main\".execute()\n",
+        )
+        .expect("groovy");
+        std::fs::write(
+            root.join("quiet.groovy"),
+            "println(\"git push origin main\")\n",
+        )
+        .expect("quiet");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let run = "groovy -e '\"git push origin main\".execute()'";
+        assert_eq!(kind(run), Some("git.push"), "{run}");
+        let printed = "groovy -e 'println(\"git push origin main\")'";
+        assert_eq!(kind(printed), None, "{printed}");
+        let comment = "groovy -e '// \"git push origin main\".execute()'";
+        assert_eq!(kind(comment), None, "{comment}");
+        let file = format!("cd {root_s} && groovy p.groovy");
+        assert_eq!(kind(&file), Some("git.push"), "{file}");
+        let quiet = format!("cd {root_s} && groovy quiet.groovy");
+        assert_eq!(kind(&quiet), None, "{quiet}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The host ran these interpreters and package scripts. A file that
