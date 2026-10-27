@@ -972,7 +972,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_just_recipe(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_awk_program(
@@ -1023,7 +1032,16 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &preloaded, depth, local, git, best);
             let awk_path = awk_path_commands(&executed.argv, local, host_dir);
             scan_isolated(policy, tool_name, &awk_path, depth, local, git, best);
-            score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_cmake_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
@@ -5360,6 +5378,7 @@ fn strip_swift_line_comments(source: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_just_recipe<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5367,9 +5386,10 @@ fn score_just_recipe<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(body) = just_recipe_body(argv) else {
+    let Some(body) = just_recipe_body(argv, dir) else {
         return;
     };
     scan_isolated(
@@ -5383,7 +5403,7 @@ fn score_just_recipe<'a>(
     );
 }
 
-fn just_recipe_body(argv: &[String]) -> Option<String> {
+fn just_recipe_body(argv: &[String], dir: Option<&str>) -> Option<String> {
     if !command_basename(argv.first()?).eq_ignore_ascii_case("just") {
         return None;
     }
@@ -5420,12 +5440,12 @@ fn just_recipe_body(argv: &[String]) -> Option<String> {
     }
     let recipe = words.get(1)?.clone();
     let path = if let Some(path) = file {
-        std::path::PathBuf::from(path)
+        shell_path(&path, dir)
     } else {
         ["justfile", "Justfile", ".justfile"]
             .into_iter()
-            .map(std::path::PathBuf::from)
-            .find(|candidate| candidate.is_file())?
+            .map(|name| shell_path(name, dir))
+            .find(|candidate| std::path::Path::new(candidate).is_file())?
     };
     let text = std::fs::read_to_string(path).ok()?;
     let mut body = Vec::new();
@@ -7795,6 +7815,7 @@ fn rust_string_list(inner: &str) -> Vec<String> {
     words
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_cmake_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -7802,16 +7823,17 @@ fn score_cmake_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
-    for text in cmake_scripts(argv) {
+    for text in cmake_scripts(argv, dir) {
         commands.extend(cmake_commands(&text));
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn cmake_scripts(argv: &[String]) -> Vec<String> {
+fn cmake_scripts(argv: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
@@ -7825,7 +7847,7 @@ fn cmake_scripts(argv: &[String]) -> Vec<String> {
         if arg == "-P" {
             index += 1;
             if let Some(path) = argv.get(index)
-                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+                && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir))
             {
                 scripts.push(text);
             }
@@ -24427,6 +24449,8 @@ mod tests {
             "Rscript --vanilla -e 'system(\"git push origin main\")'".to_string(),
             format!("awk -f{show}/run.awk"),
             format!("just -f {show}/justfile push"),
+            format!("cd {show}/empty-lib && just -f ../justfile push"),
+            format!("cd {show}/empty-lib && cmake -P ../run.cmake"),
             "sqlite3 :memory: '.shell git push origin main'".to_string(),
             "octave --quiet --eval 'system(\"git push origin main\");'".to_string(),
             "julia --startup-file=no -e 'run(`git push origin main`)'".to_string(),
@@ -24546,6 +24570,8 @@ mod tests {
             "erl -noshell -eval 'halt().'".to_string(),
             format!("awk -f{show}/print.awk"),
             format!("just -f {show}/justfile absent"),
+            format!("cd {show}/empty-lib && just -f ../missing.just push"),
+            format!("cd {show}/empty-lib && cmake -P ../missing.cmake"),
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
             format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
