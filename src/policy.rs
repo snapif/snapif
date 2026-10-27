@@ -813,6 +813,9 @@ fn consider_segment<'a>(
     };
     // `$(...)` does not see a prefix assignment. A child process does.
     let local = &executed.env;
+    if let Some(path) = cd_target(&executed.argv) {
+        scope.dir = Some(path);
+    }
     // Non-interactive bash runs `BASH_ENV`. An interactive bash runs
     // `--rcfile` or `--init-file`. The other combination does not.
     if let Some(path) = bash_startup_file(&executed.argv, &executed.env) {
@@ -948,14 +951,511 @@ fn consider_segment<'a>(
             // `bash script` starts a new process. `source script` is handled
             // below, in this shell. `cat`, `head`, and `tail` score the text
             // they would print.
-            score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_makefile(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_shell_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_makefile(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ninja(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_vim(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ansible(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_groovy(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_crystal(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_nim(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_dart_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ocaml_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_escript(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_pandoc_filter(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ldc_run(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_pytest(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_node_test(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_go_test_package(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_rake(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            let expanded = cargo_alias_argv(&executed.argv, scope.dir.as_deref());
+            let cargo_args = expanded.as_deref().unwrap_or(&executed.argv);
+            score_cargo_build_script(
+                policy,
+                tool_name,
+                cargo_args,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_cargo_runner(
+                policy,
+                tool_name,
+                cargo_args,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_cargo_rust_tests(
+                policy,
+                tool_name,
+                cargo_args,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_cargo_benches(
+                policy,
+                tool_name,
+                cargo_args,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_unittest(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_doctest(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_bundle_rake(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_terraform_apply(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ansible_playbook(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_awk_program(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_osascript(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_install_scripts(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_npm_explore(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_maven(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_sbt(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_brew_ruby(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_xcodebuild(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_package_exec(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_just_recipe(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_uv_run(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_swift_test(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_swift_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_awk_program(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_osascript(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_bun_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_expect_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_tcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_sqlite_shell(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_octave_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_julia_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_elixir_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_erlang_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_go_run(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_cargo_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_coffee_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_haskell_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_mix_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_mix_shell(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_clojure_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            let host_dir = scope.dir.as_deref();
+            let node_run = node_run_bodies(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &node_run, depth, local, git, best);
+            let bun_tests = bun_test_sources(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &bun_tests, depth, local, git, best);
+            let java_main = java_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &java_main, depth, local, git, best);
+            let kotlin = kotlin_commands(&executed.argv, scope.dir.as_deref());
+            scan_isolated(policy, tool_name, &kotlin, depth, local, git, best);
+            let lua_modules = lua_module_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &lua_modules, depth, local, git, best);
+            let loaded = inline_loaded_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &loaded, depth, local, git, best);
+            let julia_includes = julia_include_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &julia_includes, depth, local, git, best);
+            let octave_sources = octave_source_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &octave_sources, depth, local, git, best);
+            let generated = go_generate_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &generated, depth, local, git, best);
+            let preloaded = env_preload_commands(&executed.argv, local, host_dir);
+            scan_isolated(policy, tool_name, &preloaded, depth, local, git, best);
+            let awk_path = awk_path_commands(&executed.argv, local, host_dir);
+            scan_isolated(policy, tool_name, &awk_path, depth, local, git, best);
+            score_cmake_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
                 tool_name,
@@ -966,6 +1466,7 @@ fn consider_segment<'a>(
                 depth,
                 local,
                 git,
+                host_dir,
                 best,
             );
             score_printed_file(
@@ -1000,7 +1501,7 @@ fn consider_segment<'a>(
                 trap_scripts(&executed.argv)
             };
             scan_isolated(policy, tool_name, &traps, depth, local, git, best);
-            let found = git_alias_scripts(&executed.argv, local, git);
+            let found = git_alias_scripts(&executed.argv, local, git, scope.dir.as_deref());
             scan_isolated(policy, tool_name, &found.commands, depth, local, git, best);
             for body in &found.shells {
                 let mut child = Functions::new();
@@ -1198,6 +1699,8 @@ fn export_drop_flag(token: &str) -> Option<bool> {
 /// array at that depth.
 #[derive(Clone, Default)]
 struct ShellScope {
+    /// Directory set by `cd` for a later command in this shell.
+    dir: Option<String>,
     global: Vec<(String, String)>,
     locals: Vec<Vec<(String, String)>>,
     alts: Vec<ShellAlt>,
@@ -2256,6 +2759,7 @@ fn score_ps_input<'a>(
 }
 
 /// `bash path` and `sh path` run that file in a new process.
+#[allow(clippy::too_many_arguments)]
 fn score_shell_file<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -2263,12 +2767,13 @@ fn score_shell_file<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(path) = shell_file_operand(argv) else {
         return;
     };
-    let Some(loaded) = load_script_file(path) else {
+    let Some(loaded) = load_script_file(&shell_path(path, dir)) else {
         return;
     };
     match loaded {
@@ -3818,7 +4323,9 @@ fn bare_parameter(text: &str) -> Option<&str> {
 }
 
 fn is_shell_name(name: &str) -> bool {
-    const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "fish"];
+    const SHELLS: &[&str] = &[
+        "sh", "bash", "dash", "zsh", "ksh", "ash", "fish", "csh", "tcsh",
+    ];
     SHELLS.iter().any(|shell| name.eq_ignore_ascii_case(shell))
 }
 
@@ -4795,6 +5302,7 @@ fn git_alias_scripts(
     argv: &[String],
     env: &[(String, String)],
     inherited: &GitBindings,
+    dir: Option<&str>,
 ) -> GitScripts {
     let bindings = inherited.clone();
     let Some(first) = argv.first() else {
@@ -4847,7 +5355,7 @@ fn git_alias_scripts(
     }
     let mut commands = Vec::new();
     let mut shells = Vec::new();
-    seen.collect(argv, env, 0, &mut commands, &mut shells);
+    seen.collect(argv, env, dir, 0, &mut commands, &mut shells);
     GitScripts {
         commands,
         shells,
@@ -4922,6 +5430,15 @@ impl GitBindings {
         }
     }
 
+    /// An explicit `core.hooksPath` wins, including an empty one.
+    /// Otherwise git uses the repository's `.git/hooks`.
+    fn hook_directory(&self, argv: &[String], dir: Option<&str>) -> Option<String> {
+        if self.hooks.is_some() {
+            return self.hooks.clone();
+        }
+        default_hook_directory(argv, dir)
+    }
+
     fn note_env(&mut self, spec: &str, env: &[(String, String)]) {
         let Some((key, var)) = spec.rsplit_once('=') else {
             return;
@@ -4940,6 +5457,7 @@ impl GitBindings {
         &self,
         argv: &[String],
         env: &[(String, String)],
+        dir: Option<&str>,
         depth: u32,
         commands: &mut Vec<String>,
         shells: &mut Vec<String>,
@@ -4973,7 +5491,11 @@ impl GitBindings {
             push_selected_tool(commands, argv, &self.merge_tool, &self.mergetools);
         }
         commands.extend(ssh_scripts(&self.ssh, argv, env));
-        shells.extend(git_hook_scripts(self.hooks.as_deref(), subcommand, argv));
+        shells.extend(git_hook_scripts(
+            self.hook_directory(argv, dir).as_deref(),
+            subcommand,
+            argv,
+        ));
         if subcommand == "credential" {
             commands.extend(self.helpers.iter().cloned());
         }
@@ -4998,7 +5520,7 @@ impl GitBindings {
                     // Quote so a later rescan sees the same words git executes.
                     // A bare join would turn the argument `a;rm` into a shell.
                     commands.push(quote_argv(&child));
-                    self.collect(&child, env, depth + 1, commands, shells);
+                    self.collect(&child, env, dir, depth + 1, commands, shells);
                 }
             }
         }
@@ -5166,6 +5688,60 @@ enum ExecKind {
     ExecArgs,
 }
 
+/// `swift test` runs `Process` in `Tests/**/*.swift`.
+#[allow(clippy::too_many_arguments)]
+fn score_swift_test<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("swift") {
+        return;
+    }
+    if script_positionals(argv).first().map(String::as_str) != Some("test") {
+        return;
+    }
+    let mut files = Vec::new();
+    swift_test_walk(&shell_dir(dir).join("Tests"), &mut files, 0);
+    let mut commands = Vec::new();
+    for path in files {
+        if let Some(text) = load_text(&path) {
+            commands.extend(swift_process_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn swift_test_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".git" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            swift_test_walk(&path, found, depth + 1);
+            continue;
+        }
+        if name.ends_with(".swift") {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn score_swift_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5173,12 +5749,18 @@ fn score_swift_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
+    if let Some(text) = swift_inline(argv) {
+        let commands = swift_process_commands(&text);
+        scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        return;
+    }
     let Some(path) = swift_script_path(argv) else {
         return;
     };
-    match load_script_file(&path) {
+    match load_script_file(&shell_path(&path, dir)) {
         Some(ScriptFile::Text(text)) => {
             let commands = swift_process_commands(&text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5186,6 +5768,23 @@ fn score_swift_script<'a>(
         Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
         None => {}
     }
+}
+
+fn swift_inline(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("swift"))
+    {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-e" {
+            return argv.get(index + 1).cloned();
+        }
+        index += 1;
+    }
+    None
 }
 
 fn swift_script_path(argv: &[String]) -> Option<String> {
@@ -5262,6 +5861,7 @@ fn strip_swift_line_comments(source: &str) -> String {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_just_recipe<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5269,9 +5869,10 @@ fn score_just_recipe<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(body) = just_recipe_body(argv) else {
+    let Some(body) = just_recipe_body(argv, dir) else {
         return;
     };
     scan_isolated(
@@ -5285,7 +5886,7 @@ fn score_just_recipe<'a>(
     );
 }
 
-fn just_recipe_body(argv: &[String]) -> Option<String> {
+fn just_recipe_body(argv: &[String], dir: Option<&str>) -> Option<String> {
     if !command_basename(argv.first()?).eq_ignore_ascii_case("just") {
         return None;
     }
@@ -5307,6 +5908,12 @@ fn just_recipe_body(argv: &[String]) -> Option<String> {
             index += 1;
             continue;
         }
+        if arg == "-f" {
+            index += 1;
+            file = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
         if arg.starts_with('-') {
             index += 1;
             continue;
@@ -5316,12 +5923,12 @@ fn just_recipe_body(argv: &[String]) -> Option<String> {
     }
     let recipe = words.get(1)?.clone();
     let path = if let Some(path) = file {
-        std::path::PathBuf::from(path)
+        shell_path(&path, dir)
     } else {
         ["justfile", "Justfile", ".justfile"]
             .into_iter()
-            .map(std::path::PathBuf::from)
-            .find(|candidate| candidate.is_file())?
+            .map(|name| shell_path(name, dir))
+            .find(|candidate| std::path::Path::new(candidate).is_file())?
     };
     let text = std::fs::read_to_string(path).ok()?;
     let mut body = Vec::new();
@@ -5354,6 +5961,7 @@ fn just_recipe_body(argv: &[String]) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_uv_run<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5361,12 +5969,13 @@ fn score_uv_run<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(path) = uv_python_script(argv) else {
         return;
     };
-    match load_script_file(&path) {
+    match load_script_file(&shell_path(&path, dir)) {
         Some(ScriptFile::Text(text)) => {
             let commands = interpreter_commands(HostLang::Python, &text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5410,6 +6019,315 @@ fn score_package_scripts<'a>(
     scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecTool {
+    Npx,
+    Npm,
+    Pnpm,
+    Bunx,
+}
+
+/// `npx`, `npm exec`, `npm x`, `pnpm exec`, `bunx`, and `bun x` run a
+/// command. `npm` and `npx` prefer a `PATH` program over
+/// `node_modules/.bin`. `pnpm` and `bunx` prefer the local bin. A bin
+/// that is not executable does not run. `pnpm` runs nothing unless a
+/// `package.json` is at that directory or a parent. `npm exec -c` and
+/// `--call` run that string.
+#[allow(clippy::too_many_arguments)]
+fn score_package_exec<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(parsed) = package_exec(argv, dir) else {
+        return;
+    };
+    if let Some(call) = parsed.call {
+        scan_isolated(
+            policy,
+            tool_name,
+            std::slice::from_ref(&call),
+            depth,
+            local,
+            git,
+            best,
+        );
+        return;
+    }
+    let Some(name) = parsed.command.first() else {
+        return;
+    };
+    if name.is_empty() {
+        return;
+    }
+    let on_path = command_on_path(name, local);
+    let walk = !matches!(parsed.tool, ExecTool::Pnpm);
+    let bin = local_bin(&parsed.start, name, walk);
+    let script = bin.as_deref().filter(|path| hook_executable(path));
+    match parsed.tool {
+        ExecTool::Npx | ExecTool::Npm => {
+            if on_path {
+                score_exec_command(policy, tool_name, &parsed.command, depth, local, git, best);
+            } else if let Some(path) = script {
+                score_exec_file(policy, tool_name, path, depth, local, git, best);
+            }
+        }
+        ExecTool::Pnpm => {
+            if !package_json_above(&parsed.start) {
+                return;
+            }
+            if let Some(path) = script {
+                score_exec_file(policy, tool_name, path, depth, local, git, best);
+            } else if bin.is_none() && on_path {
+                score_exec_command(policy, tool_name, &parsed.command, depth, local, git, best);
+            }
+        }
+        ExecTool::Bunx => {
+            if let Some(path) = script {
+                score_exec_file(policy, tool_name, path, depth, local, git, best);
+            } else if bin.is_none() && on_path {
+                score_exec_command(policy, tool_name, &parsed.command, depth, local, git, best);
+            }
+        }
+    }
+}
+
+struct PackageExec {
+    tool: ExecTool,
+    start: std::path::PathBuf,
+    call: Option<String>,
+    command: Vec<String>,
+}
+
+fn package_exec(argv: &[String], dir: Option<&str>) -> Option<PackageExec> {
+    let base = command_basename(argv.first()?).to_ascii_lowercase();
+    let mode = match base.as_str() {
+        "npx" => ExecTool::Npx,
+        "bunx" => ExecTool::Bunx,
+        "npm" => ExecTool::Npm,
+        "pnpm" => ExecTool::Pnpm,
+        "bun" => ExecTool::Bunx,
+        _ => return None,
+    };
+    let direct = matches!(base.as_str(), "npx" | "bunx");
+    let mut start = shell_dir(dir);
+    let mut call = None;
+    let mut positionals = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            index += 1;
+            positionals.extend(argv[index..].iter().cloned());
+            break;
+        }
+        if let Some(value) = exec_flag_value(mode, arg) {
+            apply_exec_flag(mode, dir, &mut start, &mut call, value.0, value.1)?;
+            index += 1;
+            continue;
+        }
+        if exec_flag_takes_value(mode, arg) {
+            index += 1;
+            let value = argv.get(index)?.as_str();
+            apply_exec_flag(mode, dir, &mut start, &mut call, arg, value)?;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            if exec_bool_flag(arg) {
+                index += 1;
+                continue;
+            }
+            return None;
+        }
+        positionals.push(arg.to_string());
+        index += 1;
+    }
+    if !direct {
+        let sub = positionals.first()?.as_str();
+        let ok = match base.as_str() {
+            "npm" => sub == "exec" || sub == "x",
+            "pnpm" => sub == "exec",
+            "bun" => sub == "x",
+            _ => false,
+        };
+        if !ok {
+            return None;
+        }
+        positionals.remove(0);
+    }
+    if matches!(mode, ExecTool::Pnpm) {
+        call = None;
+    }
+    Some(PackageExec {
+        tool: mode,
+        start,
+        call,
+        command: positionals,
+    })
+}
+
+fn exec_bool_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--offline" | "--no-install" | "--bun" | "--yes" | "-y" | "--silent" | "--verbose"
+    )
+}
+
+fn exec_flag_takes_value(mode: ExecTool, flag: &str) -> bool {
+    match flag {
+        "--prefix" => matches!(mode, ExecTool::Npx | ExecTool::Npm),
+        "--dir" => mode == ExecTool::Pnpm,
+        "--cwd" => mode == ExecTool::Bunx,
+        "-c" | "--call" => matches!(mode, ExecTool::Npx | ExecTool::Npm),
+        _ => false,
+    }
+}
+
+fn exec_flag_value(mode: ExecTool, flag: &str) -> Option<(&str, &str)> {
+    let (name, value) = if let Some(value) = flag.strip_prefix("--prefix=") {
+        ("--prefix", value)
+    } else if let Some(value) = flag.strip_prefix("--dir=") {
+        ("--dir", value)
+    } else if let Some(value) = flag.strip_prefix("--cwd=") {
+        ("--cwd", value)
+    } else if let Some(value) = flag.strip_prefix("--call=") {
+        ("--call", value)
+    } else {
+        return None;
+    };
+    if value.is_empty() || !exec_flag_takes_value(mode, name) {
+        return None;
+    }
+    Some((name, value))
+}
+
+fn apply_exec_flag(
+    mode: ExecTool,
+    dir: Option<&str>,
+    start: &mut std::path::PathBuf,
+    call: &mut Option<String>,
+    name: &str,
+    value: &str,
+) -> Option<()> {
+    if !exec_flag_takes_value(mode, name) {
+        return None;
+    }
+    match name {
+        "--prefix" | "--dir" | "--cwd" => {
+            *start = std::path::PathBuf::from(shell_path(value, dir));
+        }
+        "-c" | "--call" => {
+            *call = Some(value.to_string());
+        }
+        _ => return None,
+    }
+    Some(())
+}
+
+fn command_on_path(name: &str, env: &[(String, String)]) -> bool {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    let owned;
+    let path_var = if let Some(value) = last_assignment(env, "PATH") {
+        value
+    } else if let Ok(value) = std::env::var("PATH") {
+        owned = value;
+        owned.as_str()
+    } else {
+        return false;
+    };
+    std::env::split_paths(path_var).any(|dir| {
+        let candidate = dir.join(name);
+        candidate.is_file() && hook_executable(&candidate)
+    })
+}
+
+fn local_bin(start: &std::path::Path, name: &str, walk: bool) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    let mut dir = start.to_path_buf();
+    loop {
+        let candidate = dir.join("node_modules").join(".bin").join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !walk || !dir.pop() {
+            return None;
+        }
+    }
+}
+
+fn package_json_above(start: &std::path::Path) -> bool {
+    let mut dir = start.to_path_buf();
+    loop {
+        if dir.join("package.json").is_file() {
+            return true;
+        }
+        if !dir.pop() {
+            return false;
+        }
+    }
+}
+
+fn score_exec_command<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    command: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    if command.is_empty() {
+        return;
+    }
+    let text = quote_argv(command);
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&text),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+fn score_exec_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    path: &std::path::Path,
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    match load_script_file(&path.display().to_string()) {
+        Some(ScriptFile::Text(text)) => {
+            scan_isolated(
+                policy,
+                tool_name,
+                std::slice::from_ref(&text),
+                depth,
+                local,
+                git,
+                best,
+            );
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn score_interpreter<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5417,12 +6335,13 @@ fn score_interpreter<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(lang) = source.argv.first().and_then(|word| host_lang(word)) else {
         return;
     };
-    match interpreter_program(lang, &source) {
+    match interpreter_program(lang, &source, dir) {
         Some(LoadedProgram::Text(text)) => {
             let commands = interpreter_commands(lang, &text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5431,7 +6350,7 @@ fn score_interpreter<'a>(
         None => {}
     }
     for path in preload_files(lang, source.argv) {
-        match load_script_file(&path) {
+        match load_script_file(&shell_path(&path, dir)) {
             Some(ScriptFile::Text(text)) => {
                 let commands = interpreter_commands(lang, &text);
                 scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5446,6 +6365,8 @@ fn preload_files(lang: HostLang, argv: &[String]) -> Vec<String> {
     match lang {
         HostLang::Node => node_preloads(argv),
         HostLang::Ruby => ruby_requires(argv),
+        HostLang::Perl => perl_module_files(argv),
+        HostLang::Python => python_module_files(argv),
         _ => Vec::new(),
     }
 }
@@ -5455,12 +6376,14 @@ fn node_preloads(argv: &[String]) -> Vec<String> {
     let mut index = 1usize;
     while index < argv.len() {
         let arg = argv[index].as_str();
-        if arg == "-r" || arg == "--require" {
+        if arg == "-r" || arg == "--require" || arg == "--import" {
             index += 1;
             if let Some(path) = argv.get(index) {
                 paths.push(path.clone());
             }
-        } else if let Some(path) = arg.strip_prefix("--require=")
+        } else if let Some(path) = arg
+            .strip_prefix("--require=")
+            .or_else(|| arg.strip_prefix("--import="))
             && !path.is_empty()
         {
             paths.push(path.to_string());
@@ -5490,7 +6413,213 @@ fn ruby_requires(argv: &[String]) -> Vec<String> {
     paths
 }
 
-fn score_awk_program<'a>(
+fn python_module_files(argv: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-m" {
+            index += 1;
+            if let Some(name) = argv.get(index)
+                && let Some(path) = python_module_path(name)
+            {
+                files.push(path);
+            }
+        }
+        index += 1;
+    }
+    files
+}
+
+fn python_module_path(name: &str) -> Option<String> {
+    if name.is_empty() || name.split('.').any(|part| part.is_empty() || part == "..") {
+        return None;
+    }
+    let rel = name.replace('.', "/");
+    let main = format!("{rel}/__main__.py");
+    if std::path::Path::new(&main).is_file() {
+        return Some(main);
+    }
+    let file = format!("{rel}.py");
+    if std::path::Path::new(&file).is_file() {
+        return Some(file);
+    }
+    None
+}
+
+fn perl_module_files(argv: &[String]) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(dir) = argv.get(index) {
+                dirs.push(dir.clone());
+            }
+        } else if let Some(dir) = arg.strip_prefix("-I")
+            && !dir.is_empty()
+        {
+            dirs.push(dir.to_string());
+        } else if arg == "-M" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(perl_module_name(name));
+            }
+        } else if let Some(name) = arg.strip_prefix("-M")
+            && !name.is_empty()
+        {
+            names.push(perl_module_name(name));
+        }
+        index += 1;
+    }
+    let mut files = Vec::new();
+    for name in names {
+        let rel = name.replace("::", "/");
+        for dir in &dirs {
+            let path = std::path::Path::new(dir).join(format!("{rel}.pm"));
+            if path.is_file() {
+                files.push(path.display().to_string());
+                break;
+            }
+        }
+    }
+    files
+}
+
+fn perl_module_name(raw: &str) -> String {
+    raw.split(['=', ' ']).next().unwrap_or(raw).to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_bun_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = bun_script_path(argv) else {
+        return;
+    };
+    match load_script_file(&shell_path(&path, dir)) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = interpreter_commands(HostLang::Node, &text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn bun_script_path(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("bun") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            index += 1;
+            let path = argv.get(index)?;
+            return script_extension(path).then(|| path.clone());
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg.eq_ignore_ascii_case("run") {
+            index += 1;
+            continue;
+        }
+        return script_extension(arg).then(|| arg.to_string());
+    }
+    None
+}
+
+fn script_extension(path: &str) -> bool {
+    [".js", ".mjs", ".cjs", ".ts", ".mts", ".tsx", ".jsx"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_expect_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let programs = expect_programs(argv, dir);
+    if programs.is_empty() {
+        return;
+    }
+    let mut commands = Vec::new();
+    for text in &programs {
+        commands.extend(expect_spawns(text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn expect_programs(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("expect"))
+    {
+        return Vec::new();
+    }
+    let mut programs = Vec::new();
+    let mut index = 1usize;
+    let mut saw_inline = false;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-c" {
+            saw_inline = true;
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                programs.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !saw_inline && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir))
+        {
+            programs.push(text);
+        }
+        break;
+    }
+    programs
+}
+
+fn expect_spawns(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let rest = line.strip_prefix("spawn ")?.trim();
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            }
+        })
+        .collect()
+}
+
+fn score_tcl_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
     argv: &[String],
@@ -5499,7 +6628,2720 @@ fn score_awk_program<'a>(
     git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
-    let programs = awk_programs(argv);
+    let Some(text) = tcl_program(argv) else {
+        return;
+    };
+    let commands = tcl_execs(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn tcl_program(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("tclsh") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return match load_script_file(arg) {
+            Some(ScriptFile::Text(text)) => Some(text),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn tcl_execs(text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut index = 0usize;
+        while index + 4 <= chars.len() {
+            let word = chars[index..index + 4].iter().collect::<String>();
+            let before = index == 0 || !chars[index - 1].is_ascii_alphanumeric();
+            let after = index + 4 == chars.len() || !chars[index + 4].is_ascii_alphanumeric();
+            if before && after && word == "exec" && tcl_command_position(&chars, index) {
+                let command: String = chars[index + 4..]
+                    .iter()
+                    .take_while(|ch| **ch != ']' && **ch != ';')
+                    .collect();
+                let command = command.trim();
+                if !command.is_empty() {
+                    commands.push(command.to_string());
+                }
+                index += 4;
+                continue;
+            }
+            index += 1;
+        }
+    }
+    commands
+}
+
+fn tcl_command_position(chars: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    cursor == 0 || matches!(chars[cursor - 1], '[' | ';')
+}
+
+fn score_sqlite_shell<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let commands = sqlite_shells(argv);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn sqlite_shells(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("sqlite3") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut saw_db = false;
+    for arg in argv.iter().skip(1) {
+        if !saw_db {
+            if !arg.starts_with('-') {
+                saw_db = true;
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        sqlite_text(&mut commands, arg, 0);
+    }
+    commands
+}
+
+fn sqlite_text(commands: &mut Vec<String>, text: &str, depth: u32) {
+    if depth > 2 {
+        return;
+    }
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(".shell ") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                commands.push(rest.to_string());
+            }
+            continue;
+        }
+        if let Some(path) = line.strip_prefix(".read ")
+            && let Some(ScriptFile::Text(body)) = load_script_file(path.trim())
+        {
+            sqlite_text(commands, &body, depth + 1);
+        }
+    }
+}
+
+fn score_octave_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in octave_programs(argv) {
+        commands.extend(quoted_call(&text, "system", &['%', '#']));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn octave_programs(argv: &[String]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("octave"))
+    {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--eval" {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+            texts.push(text);
+        }
+        break;
+    }
+    texts
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_julia_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    let inline = flag_programs(argv, "julia", &["-e", "--eval"]);
+    if inline.is_empty() {
+        if let Some(text) = positional_script(argv, "julia", dir) {
+            commands.extend(julia_commands(&text));
+        }
+    } else {
+        for text in &inline {
+            commands.extend(julia_commands(text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn julia_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if matches!(chars[index], '"' | '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if chars[index] == '`' {
+            let start = index + 1;
+            let end = chars[start..]
+                .iter()
+                .position(|ch| *ch == '`')
+                .map_or(chars.len(), |offset| start + offset);
+            let command: String = chars[start..end].iter().collect();
+            let command = command.trim();
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+            index = if end < chars.len() { end + 1 } else { end };
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_elixir_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    let inline = flag_programs(argv, "elixir", &["-e", "--eval"]);
+    if inline.is_empty() {
+        if let Some(text) = positional_script(argv, "elixir", dir) {
+            commands.extend(elixir_commands(&text));
+        }
+    } else {
+        for text in &inline {
+            commands.extend(elixir_commands(text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn elixir_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        let name = if starts_with(&chars, index, "System.shell") {
+            Some("System.shell")
+        } else if starts_with(&chars, index, "System.cmd") {
+            Some("System.cmd")
+        } else {
+            None
+        };
+        if let Some(name) = name
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + name.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                if let Some(command) = elixir_invocation(name, &inner) {
+                    commands.push(command);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn elixir_invocation(name: &str, inner: &str) -> Option<String> {
+    let parts = split_args(inner);
+    let program = arg_string(parts.first()?)?;
+    if name == "System.shell" {
+        return (!program.is_empty()).then_some(program);
+    }
+    let mut words = vec![program];
+    if let Some(args) = parts.get(1).and_then(|part| arg_list(part)) {
+        words.extend(args);
+    }
+    let command = words.join(" ");
+    (!command.is_empty()).then_some(command)
+}
+
+fn score_erlang_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "erl", &["-eval"]) {
+        commands.extend(quoted_call(&text, "os:cmd", &['%']));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_go_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in go_sources(argv, dir) {
+        commands.extend(go_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn go_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("go") {
+        return Vec::new();
+    }
+    let mut sources = Vec::new();
+    let mut running = false;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if !running {
+            if arg == "run" {
+                running = true;
+            } else {
+                return Vec::new();
+            }
+            continue;
+        }
+        if arg.ends_with(".go")
+            && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir))
+        {
+            sources.push(text);
+        }
+    }
+    sources
+}
+
+fn go_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, "Command(")
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let open = index + "Command".len();
+            if let Some((inner, end)) = balanced(&chars, open, '(', ')') {
+                let mut words = Vec::new();
+                for part in split_args(&inner) {
+                    let Some(word) = arg_string(&part) else {
+                        break;
+                    };
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    commands.push(words.join(" "));
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn cd_target(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cd"))
+    {
+        return None;
+    }
+    let mut path = None;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        path = Some(arg.clone());
+    }
+    path
+}
+
+fn shell_dir(dir: Option<&str>) -> std::path::PathBuf {
+    dir.map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from)
+}
+
+fn shell_path(path: &str, dir: Option<&str>) -> String {
+    let normalized = openable_path(path);
+    let path = normalized.as_ref();
+    let file = std::path::Path::new(path);
+    if file.is_absolute() || dir.is_none() {
+        path.to_string()
+    } else {
+        shell_dir(dir).join(file).display().to_string()
+    }
+}
+
+fn node_run_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("node"))
+    {
+        return Vec::new();
+    }
+    let Some(name) = node_run_name(argv) else {
+        return Vec::new();
+    };
+    let path = shell_dir(dir).join("package.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .get("scripts")
+        .and_then(|item| item.get(&name))
+        .and_then(|item| item.as_str())
+        .filter(|body| !body.is_empty())
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
+
+fn node_run_name(argv: &[String]) -> Option<String> {
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--run" {
+            return argv.get(index + 1).cloned();
+        }
+        if let Some(name) = arg.strip_prefix("--run=").filter(|name| !name.is_empty()) {
+            return Some(name.to_string());
+        }
+        index += 1;
+    }
+    None
+}
+
+fn bun_test_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("bun"))
+    {
+        return Vec::new();
+    }
+    let mut saw_test = false;
+    let mut paths = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !saw_test {
+            if arg == "test" {
+                saw_test = true;
+            } else {
+                return Vec::new();
+            }
+            index += 1;
+            continue;
+        }
+        paths.push(arg.to_string());
+        index += 1;
+    }
+    if !saw_test {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut files = paths;
+    if files.is_empty() {
+        bun_test_walk(&shell_dir(dir), &mut files, 0);
+    }
+    for path in files {
+        if let Some(ScriptFile::Text(text)) = load_script_file(&path) {
+            texts.extend(interpreter_commands(HostLang::Node, &text));
+        }
+    }
+    texts
+}
+
+fn bun_test_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "node_modules" || name == ".git" || name == "target" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            bun_test_walk(&path, found, depth + 1);
+            continue;
+        }
+        if bun_test_name(&name) {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+fn bun_test_name(name: &str) -> bool {
+    name.ends_with(".test.js")
+        || name.ends_with(".spec.js")
+        || name.ends_with("_test.js")
+        || name.ends_with("_spec.js")
+}
+
+fn java_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("java"))
+    {
+        return Vec::new();
+    }
+    if argv.iter().any(|arg| arg == "-jar") {
+        return Vec::new();
+    }
+    let mut class = None;
+    for arg in argv.iter().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        class = Some(arg.as_str());
+    }
+    let Some(class) = class else {
+        return Vec::new();
+    };
+    if class.contains('.') || class.contains('/') || class.contains('\\') {
+        return Vec::new();
+    }
+    let path = shell_dir(dir).join(format!("{class}.java"));
+    let Some(ScriptFile::Text(text)) = load_script_file(&path.display().to_string()) else {
+        return Vec::new();
+    };
+    process_builder_commands(&text)
+}
+
+fn lua_module_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !matches!(host_lang(first), Some(HostLang::Lua)) {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    for name in lua_module_names(argv) {
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains('.') {
+            continue;
+        }
+        let path = shell_dir(dir).join(format!("{name}.lua"));
+        if let Some(ScriptFile::Text(text)) = load_script_file(&path.display().to_string()) {
+            commands.extend(interpreter_commands(HostLang::Lua, &text));
+        }
+    }
+    commands
+}
+
+fn inline_loaded_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let Some(lang) = host_lang(first) else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    for text in inline_code(lang, argv) {
+        for raw in load_paths(lang, &text) {
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(interpreter_commands(lang, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn inline_code(lang: HostLang, argv: &[String]) -> Vec<String> {
+    let flags: &[&str] = match lang {
+        HostLang::Python => &["-c"],
+        HostLang::Php => &["-r"],
+        HostLang::Node | HostLang::Ruby | HostLang::Perl | HostLang::Lua | HostLang::R => &["-e"],
+    };
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if flags.contains(&arg) {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(lang, HostLang::Node)
+            && let Some(code) = arg.strip_prefix("--eval=").filter(|code| !code.is_empty())
+        {
+            texts.push(code.to_string());
+        }
+        index += 1;
+    }
+    texts
+}
+
+fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
+    match lang {
+        HostLang::Lua => call_strings(text, "dofile"),
+        HostLang::Ruby => {
+            let mut paths = call_strings(text, "load");
+            paths.extend(call_strings(text, "require_relative"));
+            paths.extend(
+                call_strings(text, "require")
+                    .into_iter()
+                    .filter(|path| path.contains('/') || path.contains('\\')),
+            );
+            paths
+        }
+        HostLang::Node => call_strings(text, "require")
+            .into_iter()
+            .filter(|path| path.contains('/') || path.contains('\\'))
+            .collect(),
+        HostLang::Python => {
+            let mut paths = python_exec_opens(text);
+            paths.extend(python_imports(text));
+            paths.extend(python_from_imports(text));
+            paths.extend(call_strings(text, "run_path"));
+            paths.extend(python_import_modules(text));
+            paths
+        }
+        HostLang::Php => {
+            let mut paths = call_strings(text, "include");
+            paths.extend(call_strings(text, "include_once"));
+            paths.extend(call_strings(text, "require"));
+            paths.extend(call_strings(text, "require_once"));
+            paths
+        }
+        HostLang::Perl => {
+            let mut paths = call_strings(text, "do");
+            paths.extend(call_strings(text, "require"));
+            paths
+                .into_iter()
+                .filter(|path| path.contains('/') || path.contains('\\'))
+                .collect()
+        }
+        HostLang::R => call_strings(text, "source"),
+    }
+}
+
+fn call_strings(text: &str, word: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, word) {
+            let mut cursor = index + word.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(') {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+            }
+            if let Some((path, _)) = read_quoted(&chars, cursor)
+                && !path.is_empty()
+            {
+                paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn python_import_modules(text: &str) -> Vec<String> {
+    call_strings(text, "import_module")
+        .into_iter()
+        .filter(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+        .map(|name| format!("{name}.py"))
+        .collect()
+}
+
+fn python_from_imports(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "from") {
+            let mut cursor = index + "from".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            let start = cursor;
+            if cursor < chars.len() && (chars[cursor].is_ascii_alphabetic() || chars[cursor] == '_')
+            {
+                cursor += 1;
+                while cursor < chars.len()
+                    && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+                {
+                    cursor += 1;
+                }
+                let name: String = chars[start..cursor].iter().collect();
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+                if haskell_word(&chars, cursor, "import") {
+                    paths.push(format!("{name}.py"));
+                }
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn python_imports(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "import") {
+            let mut cursor = index + "import".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            let start = cursor;
+            if cursor < chars.len() && (chars[cursor].is_ascii_alphabetic() || chars[cursor] == '_')
+            {
+                cursor += 1;
+                while cursor < chars.len()
+                    && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+                {
+                    cursor += 1;
+                }
+                let name: String = chars[start..cursor].iter().collect();
+                paths.push(format!("{name}.py"));
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn python_exec_opens(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "open") && exec_before_open(&chars, index) {
+            let mut cursor = index + "open".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(') {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+            }
+            if let Some((path, end)) = read_quoted(&chars, cursor)
+                && !path.is_empty()
+                && read_call_follows(&chars, end)
+            {
+                paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn exec_before_open(chars: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    loop {
+        while cursor > 0 && chars[cursor - 1].is_whitespace() {
+            cursor -= 1;
+        }
+        if cursor > 0 && chars[cursor - 1] == '(' {
+            cursor -= 1;
+            continue;
+        }
+        if cursor >= 7
+            && starts_with(chars, cursor - 7, "compile")
+            && (cursor == 7 || !chars[cursor - 8].is_ascii_alphanumeric())
+        {
+            cursor -= 7;
+            continue;
+        }
+        break;
+    }
+    cursor >= 4
+        && starts_with(chars, cursor - 4, "exec")
+        && (cursor == 4 || !chars[cursor - 5].is_ascii_alphanumeric())
+}
+
+fn read_call_follows(chars: &[char], mut index: usize) -> bool {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if chars.get(index) == Some(&')') {
+        index += 1;
+    }
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    starts_with(chars, index, ".read")
+}
+
+fn resolve_script_path(dir: Option<&str>, raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.split(['/', '\\']).any(|part| part == "..") {
+        return None;
+    }
+    let path = std::path::Path::new(raw);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        shell_dir(dir).join(path)
+    };
+    Some(full.display().to_string())
+}
+
+fn lua_module_names(argv: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-l" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(name.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("-l").filter(|name| !name.is_empty()) {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+    names
+}
+
+fn env_preload_commands(
+    argv: &[String],
+    env: &[(String, String)],
+    dir: Option<&str>,
+) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    match host_lang(first) {
+        Some(HostLang::Ruby) => {
+            let mut commands =
+                env_option_files(env, "RUBYOPT", "ruby", dir, HostLang::Ruby, ruby_requires);
+            commands.extend(ruby_lib_files(argv, env, dir));
+            commands.extend(ruby_inc_files(argv, dir));
+            commands
+        }
+        Some(HostLang::Node) => {
+            let mut commands = env_option_files(
+                env,
+                "NODE_OPTIONS",
+                "node",
+                dir,
+                HostLang::Node,
+                node_preloads,
+            );
+            commands.extend(node_path_files(argv, env, dir));
+            commands
+        }
+        Some(HostLang::Perl) => {
+            let mut commands = perl_opt_files(env, dir);
+            commands.extend(perl_lib_files(argv, env, dir));
+            commands.extend(perl_argv_inc_files(argv, dir));
+            commands
+        }
+        Some(HostLang::Python) => {
+            let mut commands = python_path_files(argv, env, dir);
+            commands.extend(python_dash_m_files(argv, env, dir));
+            commands
+        }
+        Some(HostLang::Php) => php_include_path_files(argv, dir),
+        Some(HostLang::Lua) => lua_path_files(argv, env, dir),
+        Some(HostLang::R) => r_profile_commands(argv, env, dir),
+        _ => Vec::new(),
+    }
+}
+
+fn env_option_files(
+    env: &[(String, String)],
+    name: &str,
+    command: &str,
+    dir: Option<&str>,
+    lang: HostLang,
+    paths: fn(&[String]) -> Vec<String>,
+) -> Vec<String> {
+    let Some(value) = last_assignment(env, name) else {
+        return Vec::new();
+    };
+    let mut argv = vec![command.to_string()];
+    argv.extend(value.split_whitespace().map(str::to_string));
+    let mut commands = Vec::new();
+    for raw in paths(&argv) {
+        let Some(path) = resolve_script_path(dir, &raw) else {
+            continue;
+        };
+        if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+            commands.extend(interpreter_commands(lang, &body));
+        }
+    }
+    commands
+}
+
+fn perl_opt_files(env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PERL5OPT") else {
+        return Vec::new();
+    };
+    let mut argv = vec!["perl".to_string()];
+    argv.extend(value.split_whitespace().map(str::to_string));
+    let mut dirs = Vec::new();
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(inc) = argv.get(index) {
+                dirs.push(inc.clone());
+            }
+        } else if let Some(inc) = arg.strip_prefix("-I")
+            && !inc.is_empty()
+        {
+            dirs.push(inc.to_string());
+        } else if arg == "-M" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(perl_module_name(name));
+            }
+        } else if let Some(name) = arg.strip_prefix("-M")
+            && !name.is_empty()
+        {
+            names.push(perl_module_name(name));
+        }
+        index += 1;
+    }
+    let base = shell_dir(dir);
+    let mut commands = Vec::new();
+    for name in names {
+        if name.is_empty() || name.contains("..") {
+            continue;
+        }
+        let rel = name.replace("::", "/");
+        for inc in &dirs {
+            let root = std::path::Path::new(inc);
+            let root = if root.is_absolute() {
+                root.to_path_buf()
+            } else {
+                base.join(root)
+            };
+            let path = root.join(format!("{rel}.pm"));
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
+                commands.extend(interpreter_commands(HostLang::Perl, &body));
+                break;
+            }
+        }
+    }
+    commands
+}
+
+fn resolved_inc(inc: &str, dir: Option<&str>) -> String {
+    let path = std::path::Path::new(inc);
+    if path.is_absolute() {
+        path.display().to_string()
+    } else {
+        shell_dir(dir).join(path).display().to_string()
+    }
+}
+
+fn perl_argv_inc_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut fake = vec!["perl".to_string()];
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(inc) = argv.get(index) {
+                fake.push(format!("-I{}", resolved_inc(inc, dir)));
+            }
+        } else if let Some(inc) = arg.strip_prefix("-I").filter(|inc| !inc.is_empty()) {
+            fake.push(format!("-I{}", resolved_inc(inc, dir)));
+        } else if arg == "-M" || arg.starts_with("-M") {
+            fake.push(arg.to_string());
+            if arg == "-M" {
+                index += 1;
+                if let Some(name) = argv.get(index) {
+                    fake.push(name.clone());
+                }
+            }
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for path in perl_module_files(&fake) {
+        if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+            commands.extend(interpreter_commands(HostLang::Perl, &body));
+        }
+    }
+    commands
+}
+
+fn ruby_inc_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(inc) = argv.get(index) {
+                dirs.push(resolved_inc(inc, dir));
+            }
+        } else if let Some(inc) = arg.strip_prefix("-I").filter(|inc| !inc.is_empty()) {
+            dirs.push(resolved_inc(inc, dir));
+        }
+        index += 1;
+    }
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Ruby, argv) {
+        for raw in call_strings(&text, "require") {
+            if raw.contains('/') || raw.contains('\\') {
+                continue;
+            }
+            if raw.ends_with(".rb") {
+                names.push(raw);
+            } else {
+                names.push(format!("{raw}.rb"));
+            }
+        }
+    }
+    library_scripts(&dirs.join(":"), &names, None, HostLang::Ruby)
+}
+
+fn awk_path_commands(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("awk") && !base.eq_ignore_ascii_case("gawk") {
+        return Vec::new();
+    }
+    let Some(value) = last_assignment(env, "AWKPATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" {
+            index += 1;
+            if let Some(name) = argv.get(index)
+                && !name.contains('/')
+                && !name.contains('\\')
+            {
+                names.push(name.clone());
+            }
+        } else if let Some(name) = arg.strip_prefix("-f").filter(|name| !name.is_empty())
+            && !name.contains('/')
+            && !name.contains('\\')
+        {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = resolved_inc(entry, dir);
+        for name in &names {
+            let path = std::path::Path::new(&root).join(name);
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
+                commands.extend(awk_systems(&body));
+            }
+        }
+    }
+    commands
+}
+
+fn perl_lib_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PERL5LIB") else {
+        return Vec::new();
+    };
+    let mut fake = vec!["perl".to_string()];
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(entry);
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            shell_dir(dir).join(root)
+        };
+        fake.push(format!("-I{}", root.display()));
+    }
+    fake.extend(argv.iter().skip(1).cloned());
+    let mut commands = Vec::new();
+    for path in perl_module_files(&fake) {
+        if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+            commands.extend(interpreter_commands(HostLang::Perl, &body));
+        }
+    }
+    commands
+}
+
+fn python_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PYTHONPATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Python, argv) {
+        names.extend(python_imports(&text));
+        names.extend(python_from_imports(&text));
+        names.extend(python_import_modules(&text));
+    }
+    library_scripts(value, &names, dir, HostLang::Python)
+}
+
+fn python_dash_m_files(
+    argv: &[String],
+    env: &[(String, String)],
+    dir: Option<&str>,
+) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PYTHONPATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-m" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(name.clone());
+            }
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(entry);
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            shell_dir(dir).join(root)
+        };
+        for name in &names {
+            let Some(path) = module_file_in(&root, name) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(interpreter_commands(HostLang::Python, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn module_file_in(root: &std::path::Path, name: &str) -> Option<String> {
+    if name.is_empty() || name.split('.').any(|part| part.is_empty() || part == "..") {
+        return None;
+    }
+    let rel = name.replace('.', "/");
+    let main = root.join(&rel).join("__main__.py");
+    if main.is_file() {
+        return Some(main.display().to_string());
+    }
+    let file = root.join(format!("{rel}.py"));
+    if file.is_file() {
+        return Some(file.display().to_string());
+    }
+    None
+}
+
+fn node_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "NODE_PATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Node, argv) {
+        for raw in call_strings(&text, "require") {
+            if raw.contains('/') || raw.contains('\\') || raw.starts_with('.') {
+                continue;
+            }
+            names.push(format!("{raw}.js"));
+        }
+    }
+    library_scripts(value, &names, dir, HostLang::Node)
+}
+
+fn php_include_path_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        let spec = if arg == "-d" {
+            index += 1;
+            argv.get(index).map(String::as_str)
+        } else {
+            arg.strip_prefix("-d")
+        };
+        if let Some(path) = spec.and_then(|item| item.strip_prefix("include_path="))
+            && !path.is_empty()
+        {
+            dirs.push(path.to_string());
+        }
+        index += 1;
+    }
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Php, argv) {
+        for word in ["include", "include_once", "require", "require_once"] {
+            names.extend(call_strings(&text, word));
+        }
+    }
+    library_scripts(&dirs.join(":"), &names, dir, HostLang::Php)
+}
+
+fn ruby_lib_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "RUBYLIB") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Ruby, argv) {
+        for raw in call_strings(&text, "require") {
+            if raw.contains('/') || raw.contains('\\') {
+                continue;
+            }
+            if raw.ends_with(".rb") {
+                names.push(raw);
+            } else {
+                names.push(format!("{raw}.rb"));
+            }
+        }
+    }
+    library_scripts(value, &names, dir, HostLang::Ruby)
+}
+
+fn r_profile_commands(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .iter()
+        .any(|arg| arg == "--vanilla" || arg == "--no-init-file")
+    {
+        return Vec::new();
+    }
+    let Some(value) = last_assignment(env, "R_PROFILE_USER") else {
+        return Vec::new();
+    };
+    let Some(ScriptFile::Text(body)) = load_script_file(&shell_path(value, dir)) else {
+        return Vec::new();
+    };
+    interpreter_commands(HostLang::R, &body)
+}
+
+fn lua_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "LUA_PATH") else {
+        return Vec::new();
+    };
+    let names = lua_module_names(argv);
+    let mut commands = Vec::new();
+    for template in value.split(';') {
+        if !template.contains('?') {
+            continue;
+        }
+        for name in &names {
+            if name.is_empty() || name.contains('.') || name.contains('/') || name.contains('\\') {
+                continue;
+            }
+            let raw = template.replace('?', name);
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(interpreter_commands(HostLang::Lua, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn library_scripts(
+    value: &str,
+    names: &[String],
+    dir: Option<&str>,
+    lang: HostLang,
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(entry);
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            shell_dir(dir).join(root)
+        };
+        for name in names {
+            let path = root.join(name);
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
+                commands.extend(interpreter_commands(lang, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn octave_source_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut commands = Vec::new();
+    for text in octave_programs(argv) {
+        for raw in call_strings(&text, "source") {
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(quoted_call(&body, "system", &['%', '#']));
+            }
+        }
+    }
+    commands
+}
+
+fn go_generate_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("go"))
+    {
+        return Vec::new();
+    }
+    let mut saw_generate = false;
+    let mut extra = false;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if !saw_generate && arg == "generate" {
+            saw_generate = true;
+            continue;
+        }
+        extra = true;
+    }
+    if !saw_generate || extra {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("go") {
+            continue;
+        }
+        let Some(ScriptFile::Text(text)) = load_script_file(&path.display().to_string()) else {
+            continue;
+        };
+        for line in text.lines() {
+            let Some(rest) = line.trim().strip_prefix("//go:generate") else {
+                continue;
+            };
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                commands.push(rest.to_string());
+            }
+        }
+    }
+    commands
+}
+
+fn julia_include_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "julia", &["-e", "--eval"]) {
+        for raw in call_strings(&text, "include") {
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(julia_commands(&body));
+            }
+        }
+    }
+    commands
+}
+
+fn kotlin_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("kotlinc"))
+    {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-script" {
+            index += 1;
+            if let Some(path) = argv.get(index)
+                && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir))
+            {
+                texts.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for text in &texts {
+        commands.extend(process_builder_commands(text));
+    }
+    commands
+}
+
+fn process_builder_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "ProcessBuilder";
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, marker)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + marker.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(')
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                let mut words = Vec::new();
+                for part in split_args(&inner) {
+                    let Some(word) = arg_string(&part) else {
+                        break;
+                    };
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    commands.push(words.join(" "));
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_coffee_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = coffee_program(argv, dir) else {
+        return;
+    };
+    let commands = interpreter_commands(HostLang::Node, &text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn coffee_program(argv: &[String], dir: Option<&str>) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("coffee"))
+    {
+        return None;
+    }
+    if argv.iter().any(|arg| arg == "-c" || arg == "--compile") {
+        return None;
+    }
+    for arg in argv.iter().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        if let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir)) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_haskell_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for command in ["ghci", "ghc"] {
+        for text in flag_programs(argv, command, &["-e"]) {
+            commands.extend(haskell_commands(&text));
+        }
+    }
+    for command in ["runghc", "runhaskell"] {
+        if let Some(text) = positional_script(argv, command, dir) {
+            commands.extend(haskell_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn haskell_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "{-") {
+            index = skip_haskell_block(&chars, index + 2);
+            continue;
+        }
+        if starts_with(&chars, index, "--") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "system") {
+            if let Some(command) = haskell_string_after(&chars, index + "system".len()) {
+                commands.push(command);
+            }
+        } else if haskell_word(&chars, index, "proc")
+            && let Some(command) = haskell_proc_after(&chars, index + "proc".len())
+        {
+            commands.push(command);
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn haskell_word(chars: &[char], index: usize, word: &str) -> bool {
+    starts_with(chars, index, word)
+        && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        && chars
+            .get(index + word.len())
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric())
+}
+
+fn haskell_string_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    let (text, _) = read_quoted(chars, index)?;
+    (!text.is_empty()).then_some(text)
+}
+
+fn haskell_proc_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    let (program, mut cursor) = read_quoted(chars, index)?;
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    let mut words = vec![program];
+    if chars.get(cursor) == Some(&'[')
+        && let Some((inner, _)) = balanced(chars, cursor, '[', ']')
+    {
+        let listed: Vec<char> = inner.chars().collect();
+        let mut listed_at = 0usize;
+        while listed_at < listed.len() {
+            while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+                listed_at += 1;
+            }
+            if listed.get(listed_at) == Some(&',') {
+                listed_at += 1;
+                continue;
+            }
+            let Some((word, end)) = read_quoted(&listed, listed_at) else {
+                break;
+            };
+            words.push(word);
+            listed_at = end;
+        }
+    }
+    let command = words.join(" ");
+    (!command.is_empty()).then_some(command)
+}
+
+fn skip_haskell_block(chars: &[char], index: usize) -> usize {
+    let mut cursor = index;
+    while cursor + 1 < chars.len() {
+        if chars[cursor] == '-' && chars[cursor + 1] == '}' {
+            return cursor + 2;
+        }
+        cursor += 1;
+    }
+    chars.len()
+}
+
+fn score_mix_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in mix_inline(argv) {
+        commands.extend(elixir_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn mix_inline(argv: &[String]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("mix"))
+    {
+        return Vec::new();
+    }
+    let mut running = false;
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-e" || arg == "--eval" {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "run" {
+            running = true;
+        }
+        index += 1;
+    }
+    if running { texts } else { Vec::new() }
+}
+
+/// `mix cmd command` runs that command. `mix name` runs an alias
+/// whose value starts with `cmd `. Loading the project runs top-level
+/// code in `mix.exs` and `project/0`. `mix -v` does not load it.
+/// `mix run` and `mix test` also run `config/runtime.exs`.
+/// `config/config.exs` runs on load, including `import_config`.
+/// A path dependency's `mix.exs` startup code runs too, including
+/// nested path dependencies. A cycle stops.
+#[allow(clippy::too_many_arguments)]
+fn score_mix_shell<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("mix"))
+    {
+        return;
+    }
+    if mix_version_only(argv) {
+        return;
+    }
+    let mut commands = Vec::new();
+    if let Some(command) = mix_cmd_line(argv) {
+        commands.push(command);
+    }
+    let root = shell_dir(dir);
+    if let Ok(text) = std::fs::read_to_string(root.join("mix.exs")) {
+        commands.extend(elixir_commands(&mix_startup_source(&text)));
+        if let Some(task) = mix_task(argv)
+            && let Some(command) = mix_alias_shell(&text, &task)
+        {
+            commands.push(command);
+        }
+        commands.extend(mix_path_dep_commands(&root, &mix_startup_source(&text)));
+    }
+    if mix_loads_runtime(argv)
+        && let Ok(text) = std::fs::read_to_string(root.join("config/runtime.exs"))
+    {
+        commands.extend(elixir_commands(&text));
+    }
+    commands.extend(mix_config_commands(&root, &mix_env_name(local)));
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn mix_env_name(local: &[(String, String)]) -> String {
+    local
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "MIX_ENV")
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
+fn mix_config_commands(root: &std::path::Path, env_name: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut seen = Vec::new();
+    mix_read_config(
+        &root.join("config/config.exs"),
+        env_name,
+        &mut seen,
+        &mut commands,
+        0,
+    );
+    commands
+}
+
+fn mix_read_config(
+    path: &std::path::Path,
+    env_name: &str,
+    seen: &mut Vec<std::path::PathBuf>,
+    commands: &mut Vec<String>,
+    depth: u32,
+) {
+    if depth > 8 || seen.iter().any(|item| item == path) {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    seen.push(path.to_path_buf());
+    commands.extend(elixir_commands(&text));
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    for name in mix_imported_configs(&text, env_name) {
+        mix_read_config(&dir.join(name), env_name, seen, commands, depth + 1);
+    }
+}
+
+fn mix_imported_configs(text: &str, env_name: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut names = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if mix_word_at(&chars, index, "import_config") {
+            index += "import_config".len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if let Some((value, end)) = read_quoted(&chars, index) {
+                if value == "#{config_env()}.exs" || value == "#{Mix.env()}.exs" {
+                    names.push(format!("{env_name}.exs"));
+                } else if mix_config_filename(&value) {
+                    names.push(value);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    names
+}
+
+fn mix_config_filename(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains("..")
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value.ends_with(".exs")
+}
+
+fn mix_version_only(argv: &[String]) -> bool {
+    mix_task(argv).is_none() && argv.iter().any(|arg| arg == "-v" || arg == "--version")
+}
+
+fn mix_loads_runtime(argv: &[String]) -> bool {
+    matches!(mix_task(argv).as_deref(), Some("run") | Some("test"))
+}
+
+fn mix_path_dep_commands(root: &std::path::Path, text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut seen = Vec::new();
+    mix_path_deps_into(root, text, &mut seen, &mut commands, 0);
+    commands
+}
+
+fn mix_path_deps_into(
+    root: &std::path::Path,
+    text: &str,
+    seen: &mut Vec<std::path::PathBuf>,
+    commands: &mut Vec<String>,
+    depth: u32,
+) {
+    if depth > 8 {
+        return;
+    }
+    for rel in mix_dep_paths(text) {
+        let path = std::path::Path::new(&rel);
+        let dep = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let manifest = dep.join("mix.exs");
+        let Ok(body) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let key = std::fs::canonicalize(&manifest).unwrap_or(manifest);
+        if seen.iter().any(|item| item == &key) {
+            continue;
+        }
+        seen.push(key);
+        let startup = mix_startup_source(&body);
+        commands.extend(elixir_commands(&startup));
+        mix_path_deps_into(&dep, &startup, seen, commands, depth + 1);
+    }
+}
+
+fn mix_dep_paths(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        let bounded =
+            index == 0 || (!chars[index - 1].is_ascii_alphanumeric() && chars[index - 1] != '_');
+        if bounded && mix_word_at(&chars, index, "path") {
+            index += "path".len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if chars.get(index) == Some(&':') {
+                index += 1;
+                while index < chars.len() && chars[index].is_whitespace() {
+                    index += 1;
+                }
+                if let Some((value, end)) = read_quoted(&chars, index) {
+                    if !value.is_empty() {
+                        paths.push(value);
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn mix_cmd_line(argv: &[String]) -> Option<String> {
+    let mut index = 1usize;
+    let mut command = false;
+    let mut words = Vec::new();
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if !command {
+            if arg == "cmd" {
+                command = true;
+            } else if !arg.starts_with('-') {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+fn mix_task(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .cloned()
+}
+
+fn mix_alias_shell(text: &str, task: &str) -> Option<String> {
+    let patterns = [format!("{task}: \""), format!("{task}:\"")];
+    for pattern in &patterns {
+        let Some(start) = text.find(pattern) else {
+            continue;
+        };
+        let rest = &text[start + pattern.len()..];
+        let end = rest.find('"')?;
+        if let Some(command) = rest[..end].strip_prefix("cmd ")
+            && !command.is_empty()
+        {
+            return Some(command.to_string());
+        }
+    }
+    let lists = [format!("{task}: [\""), format!("{task}:[\"")];
+    for pattern in &lists {
+        let Some(start) = text.find(pattern) else {
+            continue;
+        };
+        let rest = &text[start + pattern.len()..];
+        let Some(end) = rest.find('"') else {
+            continue;
+        };
+        if let Some(command) = rest[..end].strip_prefix("cmd ")
+            && !command.is_empty()
+        {
+            return Some(command.to_string());
+        }
+    }
+    None
+}
+
+fn mix_startup_source(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    let mut copying = true;
+    let mut stack: Vec<bool> = Vec::new();
+    while index < chars.len() {
+        if chars[index] == '#' {
+            let end = skip_line(&chars, index);
+            if copying {
+                out.extend(chars[index..end].iter());
+            }
+            index = end;
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            if copying {
+                out.extend(chars[index..end].iter());
+            }
+            index = end;
+            continue;
+        }
+        if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
+            let start = index;
+            let word = mix_ident(&chars, &mut index);
+            match word.as_str() {
+                "def" | "defp" => {
+                    let name = mix_next_ident(&chars, &mut index);
+                    if mix_consume_do(&chars, &mut index) {
+                        stack.push(copying);
+                        copying = name.as_deref() == Some("project");
+                    }
+                }
+                "defmodule" | "defprotocol" | "defimpl" => {
+                    if mix_consume_do(&chars, &mut index) {
+                        stack.push(copying);
+                        copying = false;
+                    }
+                }
+                "do" => {
+                    stack.push(copying);
+                    if copying {
+                        out.push_str("do");
+                    }
+                }
+                "end" => {
+                    if let Some(previous) = stack.pop() {
+                        copying = previous;
+                    }
+                    if copying {
+                        out.push_str("end");
+                    }
+                }
+                _ => {
+                    if copying {
+                        out.extend(chars[start..index].iter());
+                    }
+                }
+            }
+            continue;
+        }
+        if copying {
+            out.push(chars[index]);
+        }
+        index += 1;
+    }
+    out
+}
+
+fn mix_ident(chars: &[char], index: &mut usize) -> String {
+    let start = *index;
+    while *index < chars.len() && (chars[*index].is_ascii_alphanumeric() || chars[*index] == '_') {
+        *index += 1;
+    }
+    chars[start..*index].iter().collect()
+}
+
+fn mix_next_ident(chars: &[char], index: &mut usize) -> Option<String> {
+    while *index < chars.len() && chars[*index].is_whitespace() {
+        *index += 1;
+    }
+    if *index < chars.len() && (chars[*index].is_ascii_alphabetic() || chars[*index] == '_') {
+        Some(mix_ident(chars, index))
+    } else {
+        None
+    }
+}
+
+fn mix_consume_do(chars: &[char], index: &mut usize) -> bool {
+    let mut cursor = *index;
+    while cursor < chars.len() {
+        if chars[cursor] == '#' {
+            cursor = skip_line(chars, cursor);
+            continue;
+        }
+        if (chars[cursor] == '"' || chars[cursor] == '\'')
+            && let Some((_, end)) = read_quoted(chars, cursor)
+        {
+            cursor = end;
+            continue;
+        }
+        if mix_word_at(chars, cursor, "do") {
+            *index = cursor + 2;
+            return true;
+        }
+        if mix_word_at(chars, cursor, "end") {
+            return false;
+        }
+        cursor += 1;
+    }
+    false
+}
+
+fn mix_word_at(chars: &[char], index: usize, word: &str) -> bool {
+    let got: String = chars
+        .iter()
+        .skip(index)
+        .take(word.chars().count())
+        .collect();
+    got == word
+        && chars
+            .get(index + word.chars().count())
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric() && *ch != '_')
+}
+
+fn score_clojure_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for command in ["clj", "clojure"] {
+        for text in flag_programs(argv, command, &["-e"]) {
+            commands.extend(clojure_execs(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn clojure_execs(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == ';' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, ".exec")
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+            && let Some(command) = first_quoted_after(&chars, index + ".exec".len())
+        {
+            commands.push(command);
+            index += ".exec".len();
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn first_quoted_after(chars: &[char], mut index: usize) -> Option<String> {
+    let limit = index.saturating_add(200).min(chars.len());
+    while index < limit {
+        if let Some((text, _)) = read_quoted(chars, index)
+            && !text.is_empty()
+        {
+            return Some(text);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn score_cargo_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = cargo_main(argv) else {
+        return;
+    };
+    let commands = rust_commands(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cargo_main(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut manifest = None;
+    let mut running = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 1;
+            manifest = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=")
+            && !path.is_empty()
+        {
+            manifest = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "run" {
+            running = true;
+        }
+        index += 1;
+    }
+    if !running {
+        return None;
+    }
+    let manifest = manifest.unwrap_or_else(|| "Cargo.toml".to_string());
+    let main = std::path::Path::new(&manifest)
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join("src/main.rs");
+    match load_script_file(&main.display().to_string()) {
+        Some(ScriptFile::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn rust_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "Command::new";
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if matches!(chars[index], '"' | '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, marker)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+            && let Some((words, end)) = rust_command_at(&chars, index + marker.len())
+        {
+            if !words.is_empty() {
+                commands.push(words.join(" "));
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn rust_command_at(chars: &[char], mut cursor: usize) -> Option<(Vec<String>, usize)> {
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if chars.get(cursor) != Some(&'(') {
+        return None;
+    }
+    let (inner, mut end) = balanced(chars, cursor, '(', ')')?;
+    let mut words = Vec::new();
+    if let Some(program) = arg_string(inner.trim()) {
+        words.push(program);
+    }
+    cursor = end;
+    loop {
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if starts_with(chars, cursor, ".args") {
+            cursor += ".args".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(')
+                && let Some((args_inner, args_end)) = balanced(chars, cursor, '(', ')')
+            {
+                words.extend(rust_string_list(&args_inner));
+                cursor = args_end;
+                end = args_end;
+                continue;
+            }
+            break;
+        }
+        if starts_with(chars, cursor, ".arg") {
+            cursor += ".arg".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(')
+                && let Some((arg_inner, arg_end)) = balanced(chars, cursor, '(', ')')
+            {
+                if let Some(word) = arg_string(arg_inner.trim()) {
+                    words.push(word);
+                }
+                cursor = arg_end;
+                end = arg_end;
+                continue;
+            }
+            break;
+        }
+        break;
+    }
+    Some((words, end))
+}
+
+fn rust_string_list(inner: &str) -> Vec<String> {
+    let chars: Vec<char> = inner.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    let Some('[') = chars.get(index).copied() else {
+        return Vec::new();
+    };
+    let Some((list_inner, _)) = balanced(&chars, index, '[', ']') else {
+        return Vec::new();
+    };
+    let listed: Vec<char> = list_inner.chars().collect();
+    let mut words = Vec::new();
+    let mut listed_at = 0usize;
+    while listed_at < listed.len() {
+        while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+            listed_at += 1;
+        }
+        if listed.get(listed_at) == Some(&',') {
+            listed_at += 1;
+            continue;
+        }
+        let Some((word, end)) = read_quoted(&listed, listed_at) else {
+            break;
+        };
+        words.push(word);
+        listed_at = end;
+    }
+    words
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_cmake_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in cmake_scripts(argv, dir) {
+        commands.extend(cmake_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cmake_scripts(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("cmake") {
+        return Vec::new();
+    }
+    let mut scripts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-P" {
+            index += 1;
+            if let Some(path) = argv.get(index)
+                && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir))
+            {
+                scripts.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    scripts
+}
+
+fn cmake_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "execute_process") {
+            let mut cursor = index + "execute_process".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                commands.extend(cmake_process_commands(&inner));
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn cmake_process_commands(inner: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut words = Vec::new();
+    let mut in_command = false;
+    for raw in inner.split_whitespace() {
+        if raw == "COMMAND" {
+            if in_command && !words.is_empty() {
+                commands.push(words.join(" "));
+            }
+            words.clear();
+            in_command = true;
+            continue;
+        }
+        if in_command && cmake_keyword(raw) {
+            if !words.is_empty() {
+                commands.push(words.join(" "));
+            }
+            words.clear();
+            in_command = false;
+            continue;
+        }
+        if in_command {
+            words.push(raw.to_string());
+        }
+    }
+    if in_command && !words.is_empty() {
+        commands.push(words.join(" "));
+    }
+    commands
+}
+
+fn cmake_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "WORKING_DIRECTORY"
+            | "TIMEOUT"
+            | "OUTPUT_VARIABLE"
+            | "ERROR_VARIABLE"
+            | "RESULT_VARIABLE"
+            | "OUTPUT_FILE"
+            | "ERROR_FILE"
+            | "INPUT_FILE"
+            | "ENCODING"
+    )
+}
+
+fn score_sbcl_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "sbcl", &["--eval"]) {
+        commands.extend(sbcl_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn sbcl_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "sb-ext:run-program";
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == ';' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, marker)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + marker.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if let Some((program, end)) = read_quoted(&chars, cursor) {
+                cursor = end;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+                let mut words = vec![program];
+                if starts_with(&chars, cursor, "(list")
+                    && let Some((inner, _)) = balanced(&chars, cursor, '(', ')')
+                {
+                    let listed: Vec<char> = inner.chars().collect();
+                    let mut listed_at = 0usize;
+                    if starts_with(&listed, listed_at, "list") {
+                        listed_at += 4;
+                    }
+                    while listed_at < listed.len() {
+                        while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+                            listed_at += 1;
+                        }
+                        let Some((word, end)) = read_quoted(&listed, listed_at) else {
+                            break;
+                        };
+                        words.push(word);
+                        listed_at = end;
+                    }
+                }
+                let command = words.join(" ");
+                if !command.is_empty() {
+                    commands.push(command);
+                }
+                index = cursor;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn flag_programs(argv: &[String], command: &str, flags: &[&str]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
+    {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if flags.contains(&arg) {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    texts
+}
+
+fn quoted_call(text: &str, name: &str, comments: &[char]) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if comments.contains(&chars[index]) {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, name)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + name.chars().count();
+            if cursor < chars.len() && chars[cursor].is_ascii_alphanumeric() {
+                index += 1;
+                continue;
+            }
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                if let Some(command) = arg_string(inner.trim())
+                    && !command.is_empty()
+                {
+                    commands.push(command);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_awk_program<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let programs = awk_programs(argv, dir);
     let mut commands = Vec::new();
     for program in &programs {
         commands.extend(awk_systems(program));
@@ -5507,7 +9349,7 @@ fn score_awk_program<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn awk_programs(argv: &[String]) -> Vec<String> {
+fn awk_programs(argv: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
@@ -5527,8 +9369,16 @@ fn awk_programs(argv: &[String]) -> Vec<String> {
             saw_file = true;
             index += 1;
             if let Some(path) = argv.get(index)
-                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+                && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir))
             {
+                programs.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("-f").filter(|path| !path.is_empty()) {
+            saw_file = true;
+            if let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir)) {
                 programs.push(text);
             }
             index += 1;
@@ -5589,6 +9439,7 @@ fn awk_systems(text: &str) -> Vec<String> {
     commands
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_osascript<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5596,17 +9447,58 @@ fn score_osascript<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let texts = osascript_texts(argv);
+    let texts = osascript_texts(argv, dir);
+    let javascript = osascript_javascript(argv);
     let mut commands = Vec::new();
     for text in &texts {
         commands.extend(applescript_shells(text));
+        if javascript {
+            commands.extend(quoted_call(text, "system", &[]));
+        }
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn osascript_texts(argv: &[String]) -> Vec<String> {
+fn osascript_javascript(argv: &[String]) -> bool {
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-l" || arg == "--language" {
+            return argv
+                .get(index + 1)
+                .is_some_and(|lang| lang.eq_ignore_ascii_case("JavaScript"));
+        }
+        index += 1;
+    }
+    false
+}
+
+fn positional_script(argv: &[String], command: &str, dir: Option<&str>) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
+    {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return match load_script_file(&shell_path(arg, dir)) {
+            Some(ScriptFile::Text(text)) => Some(text),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
@@ -5633,7 +9525,7 @@ fn osascript_texts(argv: &[String]) -> Vec<String> {
             index += 1;
             continue;
         }
-        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+        if let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir)) {
             texts.push(text);
         }
         break;
@@ -5681,7 +9573,11 @@ fn host_lang(token: &str) -> Option<HostLang> {
     }
 }
 
-fn interpreter_program(lang: HostLang, source: &InterpSource<'_>) -> Option<LoadedProgram> {
+fn interpreter_program(
+    lang: HostLang,
+    source: &InterpSource<'_>,
+    dir: Option<&str>,
+) -> Option<LoadedProgram> {
     let mut index = 1usize;
     let mut inline = None;
     let mut file: Option<&str> = None;
@@ -5729,7 +9625,7 @@ fn interpreter_program(lang: HostLang, source: &InterpSource<'_>) -> Option<Load
         Some("-") | None => source.stdin_file,
         Some(path) => Some(path),
     }?;
-    match load_script_file(path) {
+    match load_script_file(&shell_path(path, dir)) {
         Some(ScriptFile::Text(text)) => Some(LoadedProgram::Text(text)),
         Some(ScriptFile::Unscanned) => Some(LoadedProgram::Unscanned),
         None => None,
@@ -5742,7 +9638,7 @@ fn takes_inline_arg(lang: HostLang, arg: &str) -> bool {
         HostLang::Node => arg == "-e" || arg == "--eval",
         HostLang::Ruby | HostLang::Perl => arg == "-e",
         HostLang::Php => arg == "-r",
-        HostLang::Lua | HostLang::R => false,
+        HostLang::Lua | HostLang::R => arg == "-e",
     }
 }
 
@@ -6009,11 +9905,30 @@ fn shell_enabled(arg: &str) -> bool {
     let Some(value) = compact.strip_prefix("shell=") else {
         return false;
     };
+    if let Some(text) = quoted_shell_flag(value) {
+        return !text.is_empty();
+    }
     match value {
         "True" => true,
         "False" | "0" | "None" => false,
         other => other.parse::<i64>().is_ok_and(|number| number != 0),
     }
+}
+
+fn quoted_shell_flag(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    let quote = chars.next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut text = String::new();
+    for ch in chars {
+        if ch == quote {
+            return Some(text);
+        }
+        text.push(ch);
+    }
+    None
 }
 
 fn arg_string(arg: &str) -> Option<String> {
@@ -6213,6 +10128,1486 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
     bodies
 }
 
+/// `mvn <phase>` runs antrun `<exec>` and the exec plugin bound to
+/// that phase or an earlier one. `command` is a shell string.
+/// `mvn exec:exec` runs the plugin configuration outside an execution.
+/// `mvn -v` and a run with no goal do not. `-f` selects the pom.
+#[allow(clippy::too_many_arguments)]
+fn score_maven<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("mvn"))
+    {
+        return;
+    }
+    let path = maven_pom_path(argv, dir);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut commands = maven_phase_reached(argv)
+        .map(|reached| maven_exec_commands(&text, reached))
+        .unwrap_or_default();
+    if maven_direct_exec(argv) {
+        commands.extend(maven_direct_exec_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn maven_direct_exec(argv: &[String]) -> bool {
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" || arg == "-P" || arg == "-pl" || arg == "-s" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "exec:exec" || (arg.contains("exec-maven-plugin") && arg.ends_with(":exec")) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn maven_direct_exec_commands(pom: &str) -> Vec<String> {
+    let text = strip_xml_comments(pom);
+    let text = strip_xml_element(&text, "profiles");
+    let text = strip_xml_element(&text, "pluginManagement");
+    let text = strip_xml_element(&text, "execution");
+    let mut commands = Vec::new();
+    for plugin in xml_blocks(&text, "plugin") {
+        if let Some(command) = maven_plugin_executable(plugin) {
+            commands.push(command);
+        }
+    }
+    commands
+}
+
+const MAVEN_PHASES: &[&str] = &[
+    "validate",
+    "initialize",
+    "generate-sources",
+    "process-sources",
+    "generate-resources",
+    "process-resources",
+    "compile",
+    "process-classes",
+    "generate-test-sources",
+    "process-test-sources",
+    "generate-test-resources",
+    "process-test-resources",
+    "test-compile",
+    "process-test-classes",
+    "test",
+    "prepare-package",
+    "package",
+    "pre-integration-test",
+    "integration-test",
+    "post-integration-test",
+    "verify",
+    "install",
+    "deploy",
+];
+
+fn maven_phase_reached(argv: &[String]) -> Option<usize> {
+    let mut reached = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" || arg == "-P" || arg == "-pl" || arg == "-s" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if let Some(phase) = MAVEN_PHASES.iter().position(|phase| *phase == arg) {
+            reached = Some(reached.map_or(phase, |earlier: usize| earlier.max(phase)));
+        }
+        index += 1;
+    }
+    reached
+}
+
+fn maven_pom_path(argv: &[String], dir: Option<&str>) -> std::path::PathBuf {
+    let mut chosen = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" {
+            if let Some(path) = argv.get(index + 1).filter(|path| !path.is_empty()) {
+                chosen = Some((*path).clone());
+                index += 2;
+                continue;
+            }
+        } else if let Some(path) = arg.strip_prefix("--file=").filter(|path| !path.is_empty()) {
+            chosen = Some(path.to_string());
+        }
+        index += 1;
+    }
+    match chosen {
+        Some(path) => std::path::PathBuf::from(shell_path(&path, dir)),
+        None => shell_dir(dir).join("pom.xml"),
+    }
+}
+
+fn maven_exec_commands(pom: &str, reached: usize) -> Vec<String> {
+    let text = strip_xml_comments(pom);
+    let text = strip_xml_element(&text, "profiles");
+    let text = strip_xml_element(&text, "pluginManagement");
+    let mut commands = Vec::new();
+    for execution in xml_blocks(&text, "execution") {
+        let Some(phase) = xml_element_text(execution, "phase") else {
+            continue;
+        };
+        let Some(index) = MAVEN_PHASES.iter().position(|name| *name == phase.trim()) else {
+            continue;
+        };
+        if index > reached {
+            continue;
+        }
+        for exec in xml_blocks(execution, "exec") {
+            if let Some(command) = maven_exec_command(exec) {
+                commands.push(command);
+            }
+        }
+        if let Some(command) = maven_plugin_executable(execution) {
+            commands.push(command);
+        }
+    }
+    commands
+}
+
+fn maven_exec_command(block: &str) -> Option<String> {
+    if let Some(executable) = xml_attr(block, "executable").filter(|item| !item.is_empty()) {
+        let mut words = vec![executable.to_string()];
+        words.extend(xml_arg_values(block));
+        return Some(words.join(" "));
+    }
+    xml_attr(block, "command")
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+}
+
+fn maven_plugin_executable(block: &str) -> Option<String> {
+    let executable = xml_element_text(block, "executable")?.trim().to_string();
+    if executable.is_empty() {
+        return None;
+    }
+    let mut words = vec![executable];
+    for argument in xml_blocks(block, "argument") {
+        if let Some(text) = xml_element_text(argument, "argument") {
+            let text = text.trim();
+            if !text.is_empty() {
+                words.push(text.to_string());
+            }
+        }
+    }
+    Some(words.join(" "))
+}
+
+fn xml_arg_values(block: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut rest = block;
+    while let Some(start) = rest.find("<arg") {
+        let after = &rest[start + 4..];
+        if !matches!(
+            after.chars().next(),
+            Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
+        ) {
+            rest = &rest[start + 4..];
+            continue;
+        }
+        let Some(end) = after.find('>') else {
+            break;
+        };
+        if let Some(value) = xml_attr(&after[..end], "value") {
+            values.push(value.to_string());
+        }
+        rest = &after[end + 1..];
+    }
+    values
+}
+
+fn xml_attr<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let double = format!("{name}=\"");
+    if let Some(start) = text.find(&double) {
+        let rest = &text[start + double.len()..];
+        let end = rest.find('"')?;
+        return Some(&rest[..end]);
+    }
+    let single = format!("{name}='");
+    if let Some(start) = text.find(&single) {
+        let rest = &text[start + single.len()..];
+        let end = rest.find('\'')?;
+        return Some(&rest[..end]);
+    }
+    None
+}
+
+fn xml_element_text<'a>(block: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = block.find(&open)? + open.len();
+    let end = block[start..].find(&close)? + start;
+    Some(block[start..end].trim())
+}
+
+fn xml_blocks<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut blocks = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let after_name = start + open.len();
+        if !matches!(
+            rest[after_name..].chars().next(),
+            Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
+        ) {
+            rest = &rest[after_name..];
+            continue;
+        }
+        let Some(gt) = rest[after_name..].find('>') else {
+            break;
+        };
+        let open_end = after_name + gt + 1;
+        if rest[..open_end].ends_with("/>") {
+            blocks.push(&rest[start..open_end]);
+            rest = &rest[open_end..];
+            continue;
+        }
+        let Some(rel) = rest[start..].find(&close) else {
+            break;
+        };
+        let end = start + rel + close.len();
+        blocks.push(&rest[start..end]);
+        rest = &rest[end..];
+    }
+    blocks
+}
+
+fn strip_xml_comments(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find("-->") {
+            rest = &rest[start + end + 3..];
+        } else {
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn strip_xml_element(text: &str, tag: &str) -> String {
+    let open = format!("<{tag}");
+    let close = format!("</{tag}>");
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let after = start + open.len();
+        if !matches!(
+            rest[after..].chars().next(),
+            Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
+        ) {
+            out.push_str(&rest[..after]);
+            rest = &rest[after..];
+            continue;
+        }
+        out.push_str(&rest[..start]);
+        if let Some(end) = rest[start..].find(&close) {
+            rest = &rest[start + end + close.len()..];
+        } else {
+            return out;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `sbt <task>` loads `build.sbt`. A top-level `cmd.!` runs on load.
+/// A `task := { cmd.! }` runs when that task is named. `sbt -V` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_sbt<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("sbt"))
+    {
+        return;
+    }
+    let tasks = sbt_positionals(argv);
+    if tasks.is_empty() {
+        return;
+    }
+    let path = shell_dir(dir).join("build.sbt");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let commands = sbt_shell_commands(&text)
+        .into_iter()
+        .filter_map(|(task, command)| match task {
+            None => Some(command),
+            Some(name) if tasks.iter().any(|task| task == &name) => Some(command),
+            Some(_) => None,
+        })
+        .collect::<Vec<_>>();
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn sbt_positionals(argv: &[String]) -> Vec<String> {
+    argv.iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .cloned()
+        .collect()
+}
+
+fn sbt_shell_commands(source: &str) -> Vec<(Option<String>, String)> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut index = 0usize;
+    let mut depth = 0i32;
+    let mut task: Option<String> = None;
+    let mut pending: Option<String> = None;
+    let mut commands = Vec::new();
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if chars[index] == '"' || chars[index] == '`' {
+            let quote = chars[index];
+            index += 1;
+            let mut body = String::new();
+            while index < chars.len() && chars[index] != quote {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    body.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                body.push(chars[index]);
+                index += 1;
+            }
+            if index < chars.len() {
+                index += 1;
+            }
+            let mut after = index;
+            while after < chars.len() && chars[after].is_whitespace() {
+                after += 1;
+            }
+            let bang_end =
+                if after + 1 < chars.len() && chars[after] == '.' && chars[after + 1] == '!' {
+                    Some(after + 2)
+                } else if chars.get(after) == Some(&'!') && chars.get(after + 1) != Some(&'=') {
+                    Some(after + 1)
+                } else {
+                    None
+                };
+            if let Some(end) = bang_end {
+                let owner = if depth == 0 {
+                    pending.clone()
+                } else {
+                    task.clone()
+                };
+                commands.push((owner, body));
+                index = end;
+            }
+            continue;
+        }
+        if chars[index] == '{' {
+            depth += 1;
+            if depth == 1 {
+                task = pending.take();
+            }
+            index += 1;
+            continue;
+        }
+        if chars[index] == '}' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                task = None;
+                pending = None;
+            }
+            index += 1;
+            continue;
+        }
+        if chars[index] == '\n' && depth == 0 {
+            pending = None;
+            index += 1;
+            continue;
+        }
+        if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            let ident: String = chars[start..index].iter().collect();
+            if ident == "Process"
+                && let Some((command, end)) = sbt_process_invocation(&chars, index)
+            {
+                let owner = if depth == 0 {
+                    pending.clone()
+                } else {
+                    task.clone()
+                };
+                commands.push((owner, command));
+                index = end;
+                continue;
+            }
+            let mut after = index;
+            while after < chars.len() && chars[after].is_whitespace() {
+                after += 1;
+            }
+            if after + 1 < chars.len() && chars[after] == ':' && chars[after + 1] == '=' {
+                pending = Some(ident);
+                index = after + 2;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn sbt_process_invocation(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+    index = sbt_skip_ws(chars, index);
+    if chars.get(index) != Some(&'(') {
+        return None;
+    }
+    index += 1;
+    index = sbt_skip_ws(chars, index);
+    let command = if matches!(chars.get(index), Some('"' | '`')) {
+        let (body, end) = sbt_quoted(chars, index)?;
+        index = end;
+        body
+    } else if sbt_word(chars, index, "Seq") {
+        index += 3;
+        index = sbt_skip_ws(chars, index);
+        if chars.get(index) != Some(&'(') {
+            return None;
+        }
+        index += 1;
+        let mut words = Vec::new();
+        loop {
+            index = sbt_skip_ws(chars, index);
+            match chars.get(index) {
+                Some(')') => {
+                    index += 1;
+                    break;
+                }
+                Some(',') => index += 1,
+                Some('"' | '`') => {
+                    let (word, end) = sbt_quoted(chars, index)?;
+                    if word.is_empty() {
+                        return None;
+                    }
+                    words.push(word);
+                    index = end;
+                }
+                _ => return None,
+            }
+        }
+        if words.is_empty() {
+            return None;
+        }
+        words.join(" ")
+    } else {
+        return None;
+    };
+    if command.is_empty() {
+        return None;
+    }
+    index = sbt_skip_ws(chars, index);
+    if chars.get(index) != Some(&')') {
+        return None;
+    }
+    index += 1;
+    index = sbt_skip_ws(chars, index);
+    if chars.get(index) == Some(&'.') && chars.get(index + 1) == Some(&'!') {
+        Some((command, index + 2))
+    } else {
+        None
+    }
+}
+
+fn sbt_skip_ws(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn sbt_word(chars: &[char], index: usize, word: &str) -> bool {
+    let got: String = chars
+        .iter()
+        .skip(index)
+        .take(word.chars().count())
+        .collect();
+    if got != word {
+        return false;
+    }
+    !chars
+        .get(index + word.chars().count())
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+}
+
+fn sbt_quoted(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+    let quote = *chars.get(index)?;
+    index += 1;
+    let mut body = String::new();
+    while index < chars.len() && chars[index] != quote {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            body.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        body.push(chars[index]);
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+    Some((body, index + 1))
+}
+
+/// `brew ruby -e` and `brew ruby file.rb` run that Ruby. `puts` does not
+/// run a shell command.
+#[allow(clippy::too_many_arguments)]
+fn score_brew_ruby<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let sources = brew_ruby_sources(argv, dir);
+    if sources.is_empty() {
+        return;
+    }
+    let mut commands = Vec::new();
+    for source in &sources {
+        commands.extend(interpreter_commands(HostLang::Ruby, source));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn brew_ruby_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("brew"))
+    {
+        return Vec::new();
+    }
+    let mut index = 1usize;
+    let mut ruby = false;
+    let mut sources = Vec::new();
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if !ruby {
+            if arg == "ruby" {
+                ruby = true;
+            } else if !arg.starts_with('-') {
+                return Vec::new();
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "-e" {
+            if let Some(code) = argv.get(index + 1) {
+                sources.push((*code).clone());
+                index += 2;
+                continue;
+            }
+        } else if let Some(code) = arg.strip_prefix("-e").filter(|code| !code.is_empty()) {
+            sources.push(code.to_string());
+        } else if !arg.starts_with('-')
+            && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir))
+        {
+            sources.push(text);
+        }
+        index += 1;
+    }
+    sources
+}
+
+/// `xcodebuild` runs each Run Script phase of the selected target.
+/// With no `-target`, that is the first target. `build`, `archive`,
+/// and a command with no action run the scripts. `clean`, `test`,
+/// and `-version` do not. A relative script is read next to the
+/// project, not from the shell's working directory.
+#[allow(clippy::too_many_arguments)]
+fn score_xcodebuild<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("xcodebuild"))
+    {
+        return;
+    }
+    if argv
+        .iter()
+        .any(|arg| arg == "-version" || arg == "--version")
+    {
+        return;
+    }
+    let positionals = xcode_positionals(argv);
+    if !xcode_runs_scripts(&positionals) {
+        return;
+    }
+    let Some(project) = xcode_project_dir(argv, dir) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(project.join("project.pbxproj")) else {
+        return;
+    };
+    let scripts = xcode_shell_scripts(&text, &xcode_target_names(argv));
+    let srcroot = project.parent().map(|path| path.display().to_string());
+    for script in scripts {
+        let script = if let Some(root) = srcroot.as_deref() {
+            xcode_expand_srcroot(&script, root)
+        } else {
+            script
+        };
+        let mut functions = Functions::new();
+        let mut env = local.to_vec();
+        let mut scope = ShellScope {
+            dir: srcroot.clone(),
+            ..ShellScope::default()
+        };
+        prefer(
+            policy,
+            best,
+            matched_in(
+                policy,
+                tool_name,
+                &script,
+                depth + 1,
+                &mut functions,
+                &mut env,
+                &mut scope,
+                git,
+            ),
+        );
+    }
+}
+
+fn xcode_expand_srcroot(script: &str, srcroot: &str) -> String {
+    let chars: Vec<char> = script.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '$'
+            && chars.get(index + 1) == Some(&'{')
+            && let Some(end) = chars[index + 2..].iter().position(|ch| *ch == '}')
+        {
+            let name: String = chars[index + 2..index + 2 + end].iter().collect();
+            if name == "SRCROOT" {
+                out.push_str(srcroot);
+                index += end + 3;
+                continue;
+            }
+        }
+        if chars[index] == '$' {
+            let mut end = index + 1;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[index + 1..end].iter().collect();
+            if name == "SRCROOT" {
+                out.push_str(srcroot);
+                index = end;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn xcode_runs_scripts(positionals: &[String]) -> bool {
+    if positionals
+        .iter()
+        .any(|word| word == "build" || word == "archive")
+    {
+        return true;
+    }
+    positionals.is_empty()
+}
+
+fn xcode_positionals(argv: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if matches!(
+            arg,
+            "-project"
+                | "-target"
+                | "-configuration"
+                | "-scheme"
+                | "-workspace"
+                | "-destination"
+                | "-sdk"
+                | "-arch"
+                | "-derivedDataPath"
+                | "-xcconfig"
+                | "-archivePath"
+                | "-exportPath"
+                | "-exportOptionsPlist"
+                | "-resultBundlePath"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    words
+}
+
+fn xcode_target_names(argv: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-target"
+            && let Some(name) = argv.get(index + 1)
+        {
+            names.push(name.clone());
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    names
+}
+
+fn xcode_project_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    let mut chosen = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-project"
+            && let Some(path) = argv.get(index + 1).filter(|path| !path.is_empty())
+        {
+            chosen = Some((*path).clone());
+            index += 2;
+            continue;
+        }
+        index += 1;
+    }
+    let path = std::path::PathBuf::from(shell_path(chosen.as_deref()?, dir));
+    if path.is_dir() { Some(path) } else { None }
+}
+
+fn xcode_shell_scripts(text: &str, targets: &[String]) -> Vec<String> {
+    let objects = xcode_object_bodies(text);
+    let ids = if targets.is_empty() {
+        xcode_first_target(&objects).into_iter().collect::<Vec<_>>()
+    } else {
+        objects
+            .iter()
+            .filter(|(_, body)| xcode_named_target(body, targets))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>()
+    };
+    let mut scripts = Vec::new();
+    for id in ids {
+        let Some(body) = objects
+            .iter()
+            .find(|(oid, _)| oid == &id)
+            .map(|(_, body)| body)
+        else {
+            continue;
+        };
+        for phase in xcode_id_list(body, "buildPhases") {
+            let Some(phase_body) = objects
+                .iter()
+                .find(|(oid, _)| oid == &phase)
+                .map(|(_, body)| body)
+            else {
+                continue;
+            };
+            if xcode_plain_field(phase_body, "isa").as_deref() != Some("PBXShellScriptBuildPhase") {
+                continue;
+            }
+            if let Some(script) = xcode_string_field(phase_body, "shellScript")
+                && !script.is_empty()
+            {
+                scripts.push(script);
+            }
+        }
+    }
+    scripts
+}
+
+fn xcode_named_target(body: &str, names: &[String]) -> bool {
+    let Some(isa) = xcode_plain_field(body, "isa") else {
+        return false;
+    };
+    if !matches!(
+        isa.as_str(),
+        "PBXAggregateTarget" | "PBXNativeTarget" | "PBXLegacyTarget"
+    ) {
+        return false;
+    }
+    xcode_plain_field(body, "name").is_some_and(|name| names.iter().any(|want| want == &name))
+}
+
+fn xcode_first_target(objects: &[(String, String)]) -> Option<String> {
+    let project = objects
+        .iter()
+        .find(|(_, body)| xcode_plain_field(body, "isa").as_deref() == Some("PBXProject"))?;
+    xcode_id_list(&project.1, "targets").into_iter().next()
+}
+
+fn xcode_object_bodies(text: &str) -> Vec<(String, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker: Vec<char> = "objects = {".chars().collect();
+    let Some(start) = xcode_find(&chars, &marker) else {
+        return Vec::new();
+    };
+    let mut index = start + marker.len();
+    let mut depth = 1i32;
+    let mut bodies = Vec::new();
+    while index < chars.len() && depth > 0 {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index = xcode_skip_comment(&chars, index);
+            continue;
+        }
+        if chars[index] == '"' {
+            index = xcode_skip_quoted(&chars, index);
+            continue;
+        }
+        if depth == 1 && (chars[index].is_ascii_alphanumeric() || chars[index] == '_') {
+            let id_start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_alphanumeric() || chars[index] == '_')
+            {
+                index += 1;
+            }
+            let id: String = chars[id_start..index].iter().collect();
+            index = xcode_skip_gap(&chars, index);
+            if chars.get(index) == Some(&'=') {
+                index = xcode_skip_gap(&chars, index + 1);
+                if chars.get(index) == Some(&'{') {
+                    let body_start = index;
+                    let mut inner = 0i32;
+                    while index < chars.len() {
+                        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+                            index = xcode_skip_comment(&chars, index);
+                            continue;
+                        }
+                        if chars[index] == '"' {
+                            index = xcode_skip_quoted(&chars, index);
+                            continue;
+                        }
+                        if chars[index] == '{' {
+                            inner += 1;
+                        }
+                        if chars[index] == '}' {
+                            inner -= 1;
+                            if inner == 0 {
+                                index += 1;
+                                break;
+                            }
+                        }
+                        index += 1;
+                    }
+                    let body: String = chars[body_start..index].iter().collect();
+                    bodies.push((id, body));
+                    continue;
+                }
+            }
+            continue;
+        }
+        if chars[index] == '{' {
+            depth += 1;
+        }
+        if chars[index] == '}' {
+            depth -= 1;
+        }
+        index += 1;
+    }
+    bodies
+}
+
+fn xcode_find(chars: &[char], needle: &[char]) -> Option<usize> {
+    chars
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn xcode_skip_comment(chars: &[char], mut index: usize) -> usize {
+    index += 2;
+    while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+        index += 1;
+    }
+    (index + 2).min(chars.len())
+}
+
+fn xcode_skip_quoted(chars: &[char], mut index: usize) -> usize {
+    index += 1;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            index += 2;
+            continue;
+        }
+        if chars[index] == '"' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+fn xcode_skip_gap(chars: &[char], mut index: usize) -> usize {
+    loop {
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+        if chars.get(index) == Some(&'/') && chars.get(index + 1) == Some(&'*') {
+            index = xcode_skip_comment(chars, index);
+            continue;
+        }
+        return index;
+    }
+}
+
+fn xcode_plain_field(body: &str, field: &str) -> Option<String> {
+    let key = format!("{field} = ");
+    let start = body.find(&key)? + key.len();
+    let rest = body[start..].trim_start();
+    if let Some(rest) = rest.strip_prefix('"') {
+        return xcode_unescape(rest);
+    }
+    let end = rest.find([';', '\n']).unwrap_or(rest.len());
+    let value = rest[..end].split("/*").next().unwrap_or("").trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn xcode_string_field(body: &str, field: &str) -> Option<String> {
+    let key = format!("{field} = \"");
+    let start = body.find(&key)? + key.len();
+    xcode_unescape(&body[start..])
+}
+
+fn xcode_unescape(text: &str) -> Option<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            match chars[index + 1] {
+                'n' => out.push('\n'),
+                't' => out.push('\t'),
+                'r' => out.push('\r'),
+                other => out.push(other),
+            }
+            index += 2;
+            continue;
+        }
+        if chars[index] == '"' {
+            break;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    Some(out)
+}
+
+fn xcode_id_list(body: &str, field: &str) -> Vec<String> {
+    let key = format!("{field} = (");
+    let Some(found) = body.find(&key) else {
+        return Vec::new();
+    };
+    let rest = &body[found + key.len()..];
+    let Some(end) = rest.find(')') else {
+        return Vec::new();
+    };
+    rest[..end]
+        .split(',')
+        .filter_map(|item| {
+            let item = item.split("/*").next().unwrap_or("").trim();
+            if item.is_empty() {
+                None
+            } else {
+                Some(item.to_string())
+            }
+        })
+        .collect()
+}
+
+/// `npm explore pkg -- command` runs `command` in `node_modules/pkg`.
+/// `--prefix` selects that install. A missing package runs nothing.
+#[allow(clippy::too_many_arguments)]
+fn score_npm_explore<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some((name, command)) = npm_explore_invocation(argv) else {
+        return;
+    };
+    let Some(pkg) = npm_explore_package(argv, dir, &name) else {
+        return;
+    };
+    if let Some(path) = explore_script_file(&command, &pkg) {
+        score_script_path(policy, tool_name, &path, depth, local, git, best);
+    }
+    let mut functions = Functions::new();
+    let mut env = local.to_vec();
+    let mut scope = ShellScope {
+        dir: Some(pkg.display().to_string()),
+        ..ShellScope::default()
+    };
+    prefer(
+        policy,
+        best,
+        matched_in(
+            policy,
+            tool_name,
+            &command,
+            depth + 1,
+            &mut functions,
+            &mut env,
+            &mut scope,
+            git,
+        ),
+    );
+}
+
+/// The first word of `npm explore pkg -- ./file` is a script in the
+/// package directory. `git push` has no file to read.
+fn explore_script_file(command: &str, pkg: &std::path::Path) -> Option<String> {
+    let first = command.split_whitespace().next()?;
+    if first.contains('=') {
+        return None;
+    }
+    let path = std::path::Path::new(first);
+    if !(path.is_absolute() || first.starts_with('.') || first.contains('/')) {
+        return None;
+    }
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        pkg.join(path)
+    };
+    full.is_file().then(|| full.display().to_string())
+}
+
+fn npm_explore_invocation(argv: &[String]) -> Option<(String, String)> {
+    if argv.first().and_then(|word| package_tool(word)) != Some(PackageTool::Npm) {
+        return None;
+    }
+    let mut index = 1usize;
+    let mut explore = false;
+    let mut name = None;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            let command = argv[index + 1..].join(" ");
+            if command.is_empty() {
+                return None;
+            }
+            return name.map(|pkg| (pkg, command));
+        }
+        if arg == "--prefix" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--prefix=") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !explore {
+            if arg == "explore" {
+                explore = true;
+            } else {
+                return None;
+            }
+        } else if name.is_none() {
+            name = Some(arg.to_string());
+        } else {
+            return None;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn npm_explore_package(
+    argv: &[String],
+    dir: Option<&str>,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.starts_with('.') || name.starts_with('-') || name.contains('\\') {
+        return None;
+    }
+    let rel = if let Some((scope, pkg)) = name.split_once('/') {
+        if !scope.starts_with('@') || pkg.is_empty() || pkg.contains('/') {
+            return None;
+        }
+        std::path::PathBuf::from(scope).join(pkg)
+    } else {
+        std::path::PathBuf::from(name)
+    };
+    let path = install_package_dir(argv, dir)
+        .join("node_modules")
+        .join(rel);
+    path.is_dir().then_some(path)
+}
+
+/// `npm install`, `pnpm install`, and `bun install` run `preinstall`,
+/// `install`, `postinstall`, and `prepare`. `--ignore-scripts` runs
+/// none of them. `npm install ./pkg` runs that directory. A bare
+/// package name does not. `bun install lodash` still runs the install
+/// directory. `pnpm --dir` wins over `--prefix`. `bun` uses `--cwd`.
+/// `npm ci` does this when a lock file is present. `pnpm ci` does too.
+/// `npm rebuild` skips `prepare`. `pnpm rebuild` does not.
+/// `npm pack`, `pnpm pack`, and `bun pm pack` run `prepare`,
+/// `prepack`, and `postpack`. `npm version`, `pnpm version`, and
+/// `bun pm version` run the version scripts when a version is given.
+/// `npm publish` also runs `prepublishOnly`. `pnpm publish` runs the
+/// publish scripts too. `npm pack` and `npm publish` stay in the
+/// working directory. `npm version` honors `--prefix`.
+#[allow(clippy::too_many_arguments)]
+fn score_install_scripts<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let scripts = install_script_bodies(argv, dir);
+    scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+}
+
+fn install_script_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .iter()
+        .any(|arg| arg == "--ignore-scripts" || arg == "--ignore-scripts=true")
+    {
+        return Vec::new();
+    }
+    let Some(tool) = argv.first().and_then(|word| package_tool(word)) else {
+        return Vec::new();
+    };
+    let words = install_command_words(argv);
+    let Some(sub) = words.get(1).map(String::as_str) else {
+        return Vec::new();
+    };
+    let packages = &words[2..];
+    if tool == PackageTool::Bun && sub == "pm" {
+        return bun_pm_bodies(&words, &install_package_dir(argv, dir));
+    }
+    let root = if matches!((tool, sub), (PackageTool::Npm, "pack" | "publish")) {
+        shell_dir(dir)
+    } else {
+        install_package_dir(argv, dir)
+    };
+    let manifest = root.join("package.json");
+    match (tool, sub) {
+        (PackageTool::Npm | PackageTool::Pnpm | PackageTool::Bun, "install") => {
+            install_bodies(tool, packages, &root, dir)
+        }
+        (PackageTool::Npm, "ci") if packages.is_empty() && npm_ci_has_lock(&root) => {
+            package_lifecycle(&manifest, INSTALL_SCRIPT_KEYS)
+        }
+        (PackageTool::Pnpm, "ci") if packages.is_empty() => {
+            package_lifecycle(&manifest, INSTALL_SCRIPT_KEYS)
+        }
+        (PackageTool::Npm, "rebuild") => npm_rebuild_bodies(packages, &root),
+        (PackageTool::Pnpm, "rebuild") if packages.is_empty() => {
+            package_lifecycle(&manifest, INSTALL_SCRIPT_KEYS)
+        }
+        (PackageTool::Npm | PackageTool::Pnpm, "pack") if packages.is_empty() => {
+            package_lifecycle(&manifest, PACK_SCRIPT_KEYS)
+        }
+        (PackageTool::Npm, "publish") if packages.is_empty() => {
+            package_lifecycle(&manifest, NPM_PUBLISH_SCRIPT_KEYS)
+        }
+        (PackageTool::Pnpm, "publish") if packages.is_empty() => {
+            package_lifecycle(&manifest, PNPM_PUBLISH_SCRIPT_KEYS)
+        }
+        (PackageTool::Npm | PackageTool::Pnpm, "version") if !packages.is_empty() => {
+            package_lifecycle(&manifest, VERSION_SCRIPT_KEYS)
+        }
+        _ => Vec::new(),
+    }
+}
+
+const INSTALL_SCRIPT_KEYS: &[&str] = &["preinstall", "install", "postinstall", "prepare"];
+const REBUILD_SCRIPT_KEYS: &[&str] = &["preinstall", "install", "postinstall"];
+const PACK_SCRIPT_KEYS: &[&str] = &["prepare", "prepack", "postpack"];
+const VERSION_SCRIPT_KEYS: &[&str] = &["preversion", "version", "postversion"];
+const NPM_PUBLISH_SCRIPT_KEYS: &[&str] = &["prepare", "prepack", "postpack", "prepublishOnly"];
+const PNPM_PUBLISH_SCRIPT_KEYS: &[&str] = &[
+    "prepare",
+    "prepack",
+    "postpack",
+    "prepublishOnly",
+    "prepublish",
+    "publish",
+    "postpublish",
+];
+
+fn bun_pm_bodies(words: &[String], root: &std::path::Path) -> Vec<String> {
+    let manifest = root.join("package.json");
+    match words.get(2).map(String::as_str) {
+        Some("pack") if words.len() == 3 => package_lifecycle(&manifest, PACK_SCRIPT_KEYS),
+        Some("version") if words.len() > 3 => package_lifecycle(&manifest, VERSION_SCRIPT_KEYS),
+        _ => Vec::new(),
+    }
+}
+
+fn install_bodies(
+    tool: PackageTool,
+    packages: &[String],
+    root: &std::path::Path,
+    dir: Option<&str>,
+) -> Vec<String> {
+    if packages.is_empty() || tool == PackageTool::Bun {
+        return package_lifecycle(&root.join("package.json"), INSTALL_SCRIPT_KEYS);
+    }
+    if tool != PackageTool::Npm {
+        return Vec::new();
+    }
+    let mut bodies = Vec::new();
+    for arg in packages {
+        if npm_local_spec(arg) {
+            let path = std::path::PathBuf::from(shell_path(arg, dir)).join("package.json");
+            bodies.extend(package_lifecycle(&path, INSTALL_SCRIPT_KEYS));
+        }
+    }
+    bodies
+}
+
+fn npm_rebuild_bodies(packages: &[String], root: &std::path::Path) -> Vec<String> {
+    if packages.is_empty() {
+        return package_lifecycle(&root.join("package.json"), REBUILD_SCRIPT_KEYS);
+    }
+    let mut bodies = Vec::new();
+    for name in packages {
+        if let Some(path) = npm_rebuild_manifest(root, name) {
+            bodies.extend(package_lifecycle(&path, REBUILD_SCRIPT_KEYS));
+        }
+    }
+    bodies
+}
+
+/// `npm rebuild foo` reads `node_modules/foo`. A scoped name reads
+/// `node_modules/@scope/foo`. `prepare` does not run.
+fn npm_rebuild_manifest(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.starts_with('-') || name.starts_with('.') || name.contains('\\') {
+        return None;
+    }
+    let rel = if let Some((scope, pkg)) = name.split_once('/') {
+        if !scope.starts_with('@') || pkg.is_empty() || pkg.contains('/') {
+            return None;
+        }
+        std::path::PathBuf::from(scope).join(pkg)
+    } else {
+        std::path::PathBuf::from(name)
+    };
+    Some(root.join("node_modules").join(rel).join("package.json"))
+}
+
+fn npm_ci_has_lock(dir: &std::path::Path) -> bool {
+    dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file()
+}
+
+fn package_lifecycle(path: &std::path::Path, keys: &[&str]) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(scripts) = value.get("scripts").and_then(|item| item.as_object()) else {
+        return Vec::new();
+    };
+    let mut bodies = Vec::new();
+    for key in keys {
+        if let Some(body) = scripts.get(*key).and_then(|item| item.as_str())
+            && !body.is_empty()
+        {
+            bodies.push(body.to_string());
+        }
+    }
+    bodies
+}
+
+/// A local npm install spec. `./pkg`, `../pkg`, and an absolute path
+/// are directories. `@scope/name` and `lodash` are registry names.
+fn npm_local_spec(arg: &str) -> bool {
+    std::path::Path::new(arg).is_absolute() || arg.starts_with('.') || arg.starts_with('/')
+}
+
+fn install_package_dir(argv: &[String], dir: Option<&str>) -> std::path::PathBuf {
+    let tool = argv.first().and_then(|word| package_tool(word));
+    let chosen = match tool {
+        Some(PackageTool::Bun) => last_flag_path(argv, "--cwd"),
+        Some(PackageTool::Pnpm) => {
+            last_flag_path(argv, "--dir").or_else(|| last_flag_path(argv, "--prefix"))
+        }
+        _ => last_flag_path(argv, "--prefix"),
+    };
+    match chosen {
+        Some(path) => std::path::PathBuf::from(shell_path(&path, dir)),
+        None => shell_dir(dir),
+    }
+}
+
+fn last_flag_path(argv: &[String], name: &str) -> Option<String> {
+    let mut index = 0usize;
+    let mut found = None;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if let Some(skip) = flag_value_skip(arg, name) {
+            if skip == 2
+                && let Some(path) = argv.get(index + 1).filter(|path| !path.is_empty())
+            {
+                found = Some((*path).clone());
+            } else if skip == 1 {
+                let glued = format!("{name}=");
+                if let Some(path) = arg.strip_prefix(&glued)
+                    && !path.is_empty()
+                {
+                    found = Some(path.to_string());
+                }
+            }
+            index += skip;
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+fn install_command_words(argv: &[String]) -> Vec<String> {
+    let tool = argv.first().and_then(|word| package_tool(word));
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    let mut options = true;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if options && arg == "--" {
+            options = false;
+            index += 1;
+            continue;
+        }
+        if options && let Some(skip) = install_option_skip(tool, arg) {
+            index += skip;
+            continue;
+        }
+        if options && arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    words
+}
+
+fn install_option_skip(tool: Option<PackageTool>, arg: &str) -> Option<usize> {
+    if let Some(skip) = flag_value_skip(arg, "--prefix") {
+        return Some(skip);
+    }
+    match tool {
+        Some(PackageTool::Pnpm) => flag_value_skip(arg, "--dir"),
+        Some(PackageTool::Bun) => flag_value_skip(arg, "--cwd"),
+        _ => None,
+    }
+}
+
+fn flag_value_skip(arg: &str, name: &str) -> Option<usize> {
+    if arg == name {
+        return Some(2);
+    }
+    let glued = format!("{name}=");
+    if arg
+        .strip_prefix(&glued)
+        .is_some_and(|path| !path.is_empty())
+    {
+        Some(1)
+    } else {
+        None
+    }
+}
+
 fn package_tool(token: &str) -> Option<PackageTool> {
     match command_basename(token).to_ascii_lowercase().as_str() {
         "npm" => Some(PackageTool::Npm),
@@ -6290,8 +11685,10 @@ fn package_positionals(argv: &[String]) -> Vec<String> {
 }
 
 /// `git -c core.hooksPath=dir commit` runs the executable commit
-/// hooks. `merge` runs `pre-merge-commit`, `prepare-commit-msg`, and
-/// `post-merge`. `--no-verify` skips `pre-commit`, `commit-msg`, and
+/// hooks. With no `core.hooksPath`, git reads `.git/hooks` in the
+/// repository selected by `cd` and `-C`. `merge` runs
+/// `pre-merge-commit`, `prepare-commit-msg`, and `post-merge`.
+/// `--no-verify` skips `pre-commit`, `commit-msg`, and
 /// `pre-merge-commit`. `checkout`, `switch`, and `clone` run
 /// `post-checkout`. `clone -n` and `clone --no-checkout` do not.
 /// `cherry-pick` runs `prepare-commit-msg` and `post-commit`.
@@ -6300,6 +11697,38 @@ fn package_positionals(argv: &[String]) -> Vec<String> {
 /// also runs the merge commit hooks. `pull --rebase`, `pull -r`,
 /// and `pull --rebase=merges` run the rebase hooks. `pull
 /// --rebase=false` does not.
+/// `git -C path` uses `path` as the repository. A later relative `-C`
+/// joins the earlier one. `clone` runs `post-checkout` in the new
+/// repository, which is not this directory. A stuck `-Cpath` is not
+/// an option on this git.
+fn default_hook_directory(argv: &[String], dir: Option<&str>) -> Option<String> {
+    if git_subcommand(argv).is_none_or(|name| name == "clone") {
+        return None;
+    }
+    let mut tree = shell_dir(dir);
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        if token == "-C" {
+            index += 1;
+            if let Some(path) = argv.get(index) {
+                tree = tree.join(path.as_str());
+                index += 1;
+            }
+            continue;
+        }
+        let takes = !token.contains('=') && option_takes_value(token);
+        index += 1;
+        if takes && index < argv.len() {
+            index += 1;
+        }
+    }
+    Some(tree.join(".git").join("hooks").display().to_string())
+}
+
 fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec<String> {
     let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
         return Vec::new();
@@ -6912,9 +12341,11 @@ fn zsh_startup_file(argv: &[String], env: &[(String, String)]) -> Option<String>
     Some(format!("{dir}/.zshenv"))
 }
 
-/// `make -f file` runs the tab recipes in that file. `make -n` only
-/// prints them. With no `-f`, GNU make reads `GNUmakefile`, then
-/// `makefile`, then `Makefile`.
+/// `make -f file` runs the tab recipes in that file. `make -n` does
+/// not run those recipes. `$(shell ...)` runs while make reads the
+/// file, including with `-n`. With no `-f`, GNU make reads
+/// `GNUmakefile`, then `makefile`, then `Makefile`.
+#[allow(clippy::too_many_arguments)]
 fn score_makefile<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -6922,34 +12353,24 @@ fn score_makefile<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(path) = make_file(argv) else {
+    let Some(path) = make_file(argv, dir) else {
         return;
     };
-    let Some(loaded) = load_script_file(path) else {
-        return;
-    };
-    match loaded {
-        ScriptFile::Text(text) => {
-            let recipes: Vec<String> = text
-                .lines()
-                .filter_map(|line| {
-                    let line = line.strip_prefix('\t')?.trim();
-                    if line.is_empty() || line.starts_with('#') {
-                        None
-                    } else {
-                        Some(line.replace("$$", "$"))
-                    }
-                })
-                .collect();
-            scan_isolated(policy, tool_name, &recipes, depth, local, git, best);
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(_)) => {
+            let mut seen = Vec::new();
+            let commands = make_loaded(&path, make_dry(argv), &mut seen, 0);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
         }
-        ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
     }
 }
 
-fn make_file(argv: &[String]) -> Option<&str> {
+fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("make") && !base.eq_ignore_ascii_case("gmake") {
         return None;
@@ -6965,7 +12386,8 @@ fn make_file(argv: &[String]) -> Option<&str> {
             token.as_str(),
             "-n" | "--dry-run" | "--just-print" | "--recon"
         ) {
-            return None;
+            index += 1;
+            continue;
         }
         if token == "-f" || token == "--file" || token == "--makefile" {
             file = argv.get(index + 1).map(String::as_str);
@@ -6985,16 +12407,2633 @@ fn make_file(argv: &[String]) -> Option<&str> {
             && !flags.starts_with('-')
             && flags.contains('n')
         {
-            return None;
+            index += 1;
+            continue;
         }
         index += 1;
     }
+    let root = make_root(argv, dir).display().to_string();
     if let Some(path) = file.filter(|path| !path.is_empty()) {
-        return Some(path);
+        return Some(shell_path(path, Some(&root)));
     }
     ["GNUmakefile", "makefile", "Makefile"]
         .into_iter()
+        .map(|name| shell_path(name, Some(&root)))
         .find(|name| load_script_file(name).is_some())
+}
+
+fn make_root(argv: &[String], dir: Option<&str>) -> std::path::PathBuf {
+    let mut tree = shell_dir(dir);
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" {
+            break;
+        }
+        if token == "-C" {
+            index += 1;
+            if let Some(path) = argv.get(index) {
+                tree = tree.join(path.as_str());
+                index += 1;
+            }
+            continue;
+        }
+        if token == "-f" || token == "--file" || token == "--makefile" {
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = token.strip_prefix("-f")
+            && !rest.is_empty()
+            && !token.starts_with("--")
+        {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    tree
+}
+
+fn make_loaded(path: &str, dry: bool, seen: &mut Vec<String>, depth: u32) -> Vec<String> {
+    if depth > 4 || seen.iter().any(|have| have == path) {
+        return Vec::new();
+    }
+    seen.push(path.to_string());
+    let Some(ScriptFile::Text(text)) = load_script_file(path) else {
+        return Vec::new();
+    };
+    let mut commands = make_shell_commands(&text);
+    if !dry {
+        commands.extend(text.lines().filter_map(|line| {
+            let line = line.strip_prefix('\t')?.trim();
+            if line.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                Some(line.replace("$$", "$"))
+            }
+        }));
+    }
+    let parent = std::path::Path::new(path)
+        .parent()
+        .unwrap_or(std::path::Path::new(""));
+    for name in make_includes(&text) {
+        if name.contains('$') {
+            continue;
+        }
+        let included = if std::path::Path::new(&name).is_absolute() {
+            name
+        } else {
+            parent.join(name).display().to_string()
+        };
+        commands.extend(make_loaded(&included, dry, seen, depth + 1));
+    }
+    commands
+}
+
+fn make_includes(text: &str) -> Vec<String> {
+    let mut files = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed
+            .strip_prefix("include ")
+            .or_else(|| trimmed.strip_prefix("-include "))
+            .or_else(|| trimmed.strip_prefix("sinclude "))
+        else {
+            continue;
+        };
+        files.extend(
+            rest.split_whitespace()
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+        );
+    }
+    files
+}
+
+fn make_dry(argv: &[String]) -> bool {
+    argv.iter().skip(1).any(|token| {
+        if matches!(
+            token.as_str(),
+            "-n" | "--dry-run" | "--just-print" | "--recon"
+        ) {
+            return true;
+        }
+        let Some(flags) = token.strip_prefix('-') else {
+            return false;
+        };
+        if flags.is_empty() || token.starts_with("--") {
+            return false;
+        }
+        // `-fPATH` is a makefile name. A letter n inside that path is
+        // not the dry-run flag. `-nfPATH` still is.
+        for ch in flags.chars() {
+            if ch == 'f' {
+                return false;
+            }
+            if ch == 'n' {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+fn make_shell_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "$(shell")
+            && (index == 0 || chars[index - 1] != '$')
+            && let Some((inner, end)) = balanced(&chars, index + 1, '(', ')')
+        {
+            let command = inner.trim().strip_prefix("shell").unwrap_or("").trim();
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+/// `ninja` runs the `command` of each build it schedules. With no
+/// target, a `default` line chooses the roots; otherwise every build
+/// runs. A named target also runs the builds it depends on. `-n`
+/// only prints. An unknown target runs nothing.
+#[allow(clippy::too_many_arguments)]
+fn score_ninja<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(spec) = ninja_spec(argv, dir) else {
+        return;
+    };
+    if spec.dry {
+        return;
+    }
+    let Some(ScriptFile::Text(text)) = load_script_file(&spec.file) else {
+        return;
+    };
+    let file = parse_ninja(&text);
+    let targets = ninja_roots(&file, &spec.targets);
+    let Some(targets) = targets else {
+        return;
+    };
+    let commands = ninja_commands(&file, &targets);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+struct NinjaSpec {
+    file: String,
+    targets: Vec<String>,
+    dry: bool,
+}
+
+fn ninja_spec(argv: &[String], dir: Option<&str>) -> Option<NinjaSpec> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("ninja") {
+        return None;
+    }
+    let mut tree = shell_dir(dir);
+    let mut file = None;
+    let mut targets = Vec::new();
+    let mut dry = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" {
+            targets.extend(argv[index + 1..].iter().cloned());
+            break;
+        }
+        if token == "-n" || token == "--dry-run" {
+            dry = true;
+            index += 1;
+            continue;
+        }
+        if token == "-C" {
+            index += 1;
+            tree = tree.join(argv.get(index)?.as_str());
+            index += 1;
+            continue;
+        }
+        if token == "-f" {
+            index += 1;
+            file = Some(argv.get(index)?.as_str());
+            index += 1;
+            continue;
+        }
+        if matches!(token, "-t" | "-d" | "-j" | "-k" | "-w") {
+            if token == "-t" {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if token.starts_with("-j") && token.len() > 2 {
+            index += 1;
+            continue;
+        }
+        if token == "-v" || token == "--verbose" {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            return None;
+        }
+        targets.push(token.to_string());
+        index += 1;
+    }
+    let path = match file {
+        Some(name) => tree.join(name),
+        None => tree.join("build.ninja"),
+    };
+    Some(NinjaSpec {
+        file: path.display().to_string(),
+        targets,
+        dry,
+    })
+}
+
+struct NinjaFile {
+    rules: Vec<(String, String)>,
+    builds: Vec<NinjaEdge>,
+    defaults: Vec<String>,
+}
+
+struct NinjaEdge {
+    outputs: Vec<String>,
+    rule: String,
+    inputs: Vec<String>,
+}
+
+fn parse_ninja(text: &str) -> NinjaFile {
+    let mut rules: Vec<(String, String)> = Vec::new();
+    let mut builds: Vec<NinjaEdge> = Vec::new();
+    let mut defaults: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let name = current.clone();
+            let command = ninja_command(trimmed);
+            if let (Some(name), Some(command)) = (name, command)
+                && let Some(rule) = rules.iter_mut().rev().find(|rule| rule.0 == name)
+            {
+                rule.1 = command;
+            }
+            continue;
+        }
+        current = None;
+        if let Some(rest) = trimmed.strip_prefix("rule ") {
+            let Some(name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let name = name.to_string();
+            rules.push((name.clone(), String::new()));
+            current = Some(name);
+            continue;
+        }
+        if let Some(edge) = ninja_edge(trimmed) {
+            builds.push(edge);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("default ") {
+            defaults.extend(rest.split_whitespace().map(str::to_string));
+        }
+    }
+    NinjaFile {
+        rules,
+        builds,
+        defaults,
+    }
+}
+
+fn ninja_command(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("command")?;
+    let rest = rest.trim_start().strip_prefix('=')?;
+    Some(rest.trim().to_string())
+}
+
+fn ninja_edge(line: &str) -> Option<NinjaEdge> {
+    let rest = line.strip_prefix("build ")?;
+    let (outputs, right) = rest.split_once(':')?;
+    let outputs: Vec<String> = outputs.split_whitespace().map(str::to_string).collect();
+    if outputs.is_empty() {
+        return None;
+    }
+    let mut words = right
+        .split_whitespace()
+        .filter(|word| *word != "|" && *word != "||");
+    let rule = words.next()?.to_string();
+    let inputs = words.map(str::to_string).collect();
+    Some(NinjaEdge {
+        outputs,
+        rule,
+        inputs,
+    })
+}
+
+fn ninja_roots(file: &NinjaFile, requested: &[String]) -> Option<Vec<String>> {
+    let known = |name: &str| {
+        file.builds
+            .iter()
+            .any(|edge| edge.outputs.iter().any(|output| output == name))
+    };
+    if !requested.is_empty() {
+        if requested.iter().any(|name| !known(name)) {
+            return None;
+        }
+        return Some(requested.to_vec());
+    }
+    if !file.defaults.is_empty() {
+        return Some(file.defaults.clone());
+    }
+    let mut roots = Vec::new();
+    for edge in &file.builds {
+        for output in &edge.outputs {
+            if !roots.iter().any(|have| have == output) {
+                roots.push(output.clone());
+            }
+        }
+    }
+    Some(roots)
+}
+
+fn ninja_commands(file: &NinjaFile, roots: &[String]) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut seen = Vec::new();
+    for root in roots {
+        ninja_walk(file, root, &mut commands, &mut seen);
+    }
+    commands
+}
+
+fn ninja_walk(file: &NinjaFile, target: &str, commands: &mut Vec<String>, seen: &mut Vec<String>) {
+    if seen.iter().any(|name| name == target) {
+        return;
+    }
+    let Some((outputs, rule, inputs)) = file
+        .builds
+        .iter()
+        .find(|edge| edge.outputs.iter().any(|output| output == target))
+        .map(|edge| (edge.outputs.clone(), edge.rule.clone(), edge.inputs.clone()))
+    else {
+        seen.push(target.to_string());
+        return;
+    };
+    seen.extend(outputs);
+    for input in inputs {
+        ninja_walk(file, &input, commands, seen);
+    }
+    if let Some(command) = file
+        .rules
+        .iter()
+        .rev()
+        .find(|item| item.0 == rule)
+        .map(|item| item.1.clone())
+        .filter(|command| !command.is_empty())
+    {
+        commands.push(command);
+    }
+}
+
+/// `vim -c '!cmd'`, `--cmd '!cmd'`, `+!cmd`, and a `-S` script run
+/// `cmd` in a shell. `qa!` and `:echo` do not. A leading `:` is
+/// optional.
+#[allow(clippy::too_many_arguments)]
+fn score_vim<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("vim") {
+        return;
+    }
+    let mut commands = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "-c" || token == "--cmd" || token == "-S" {
+            index += 1;
+            let Some(value) = argv.get(index) else {
+                break;
+            };
+            if token == "-S" {
+                commands.extend(vim_script_shells(&shell_path(value, dir)));
+            } else if let Some(shell) = vim_shell(value) {
+                commands.push(shell);
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(shell) = token.strip_prefix('+').filter(|rest| !rest.is_empty())
+            && let Some(shell) = vim_shell(shell)
+        {
+            commands.push(shell);
+        }
+        index += 1;
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn vim_shell(command: &str) -> Option<String> {
+    let trimmed = command
+        .trim()
+        .strip_prefix(':')
+        .unwrap_or(command.trim())
+        .trim();
+    let rest = trimmed.strip_prefix('!')?.trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+fn vim_script_shells(path: &str) -> Vec<String> {
+    let Some(ScriptFile::Text(text)) = load_script_file(path) else {
+        return Vec::new();
+    };
+    text.lines().filter_map(vim_shell).collect()
+}
+
+/// `ansible -m command -a cmd` and `-m shell -a cmd` run `cmd`.
+/// `ansible -m ping` does not.
+fn score_ansible<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("ansible") {
+        return;
+    }
+    let mut module = None;
+    let mut args = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "-m" {
+            index += 1;
+            module = argv.get(index).map(String::as_str);
+            index += 1;
+            continue;
+        }
+        if token == "-a" {
+            index += 1;
+            args = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    let Some(module) = module else {
+        return;
+    };
+    if module != "command" && module != "shell" {
+        return;
+    }
+    let Some(args) = args.filter(|args| !args.is_empty()) else {
+        return;
+    };
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&args),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+/// `groovy -e '"cmd".execute()'` and `groovy file.groovy` run `cmd`.
+/// `println("cmd")` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_groovy<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("groovy") {
+        return;
+    }
+    let mut code = None;
+    let mut script = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "-e" {
+            index += 1;
+            code = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if script.is_none() {
+            script = Some(shell_path(token, dir));
+        }
+        index += 1;
+    }
+    let commands = if let Some(code) = code {
+        groovy_executes(&code)
+    } else if let Some(path) = script
+        && let Some(ScriptFile::Text(text)) = load_script_file(&path)
+    {
+        groovy_executes(&text)
+    } else {
+        Vec::new()
+    };
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn groovy_executes(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            continue;
+        }
+        if chars[index] == '"' || chars[index] == '\'' {
+            let quote = chars[index];
+            index += 1;
+            let mut body = String::new();
+            while index < chars.len() && chars[index] != quote {
+                if chars[index] == '\\' && index + 1 < chars.len() {
+                    body.push(chars[index + 1]);
+                    index += 2;
+                    continue;
+                }
+                body.push(chars[index]);
+                index += 1;
+            }
+            if index < chars.len() {
+                index += 1;
+            }
+            let mut next = index;
+            while next < chars.len() && chars[next].is_whitespace() {
+                next += 1;
+            }
+            if groovy_execute_at(&chars, next) && !body.is_empty() {
+                commands.push(body);
+            }
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn groovy_execute_at(chars: &[char], index: usize) -> bool {
+    let method = ['.', 'e', 'x', 'e', 'c', 'u', 't', 'e'];
+    if chars.get(index..index + method.len()) != Some(&method) {
+        return false;
+    }
+    chars
+        .get(index + method.len())
+        .is_none_or(|ch| !ch.is_ascii_alphanumeric() && *ch != '_')
+}
+
+/// `crystal eval` and `crystal run file.cr` run backtick commands.
+/// A quoted string does not.
+#[allow(clippy::too_many_arguments)]
+fn score_crystal<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("crystal") {
+        return;
+    }
+    let words = script_positionals(argv);
+    let commands = match words.first().map(String::as_str) {
+        Some("eval") => words
+            .get(1)
+            .map(|code| julia_commands(code))
+            .unwrap_or_default(),
+        Some("run") => words
+            .iter()
+            .skip(1)
+            .find(|word| word.ends_with(".cr"))
+            .and_then(|word| load_text(&shell_path(word, dir)))
+            .map(|text| julia_commands(&text))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `nim c -r`, `nim cpp -r`, and `nim r` run `execCmd`. `nim c` and
+/// `nim cpp` run `staticExec`
+/// while compiling and does not run `execCmd`. Every `config.nims`
+/// from the source file's directory up to the root runs `exec`.
+/// `name.nims` beside `name.nim` runs `exec` too.
+#[allow(clippy::too_many_arguments)]
+fn score_nim<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some((run, path)) = nim_script(argv, dir) else {
+        return;
+    };
+    let Some(text) = load_text(&path) else {
+        return;
+    };
+    let mut commands = nim_shells(&text, run);
+    commands.extend(nim_config_commands(&path));
+    commands.extend(nim_sibling_commands(&path));
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn nim_sibling_commands(nim_file: &str) -> Vec<String> {
+    let path = std::path::Path::new(nim_file);
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Vec::new();
+    };
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.nims"))) else {
+        return Vec::new();
+    };
+    nim_call_args(&text, "exec")
+}
+
+fn nim_config_commands(nim_file: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = match std::path::Path::new(nim_file).parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => return commands,
+    };
+    for _ in 0..32 {
+        if let Ok(text) = std::fs::read_to_string(current.join("config.nims")) {
+            commands.extend(nim_call_args(&text, "exec"));
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    commands
+}
+
+fn nim_script(argv: &[String], dir: Option<&str>) -> Option<(bool, String)> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("nim"))
+    {
+        return None;
+    }
+    let mut command = None;
+    let mut run_flag = false;
+    let mut file = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-r" || arg == "--run" {
+            run_flag = true;
+            index += 1;
+            continue;
+        }
+        if matches!(
+            arg,
+            "-o" | "--out"
+                | "--nimcache"
+                | "-d"
+                | "--define"
+                | "--path"
+                | "-p"
+                | "--hint"
+                | "--hints"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if command.is_none() {
+            command = Some(arg.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.ends_with(".nim") {
+            file = Some(arg.to_string());
+        }
+        index += 1;
+    }
+    let command = command?;
+    if command != "c" && command != "cpp" && command != "r" {
+        return None;
+    }
+    let file = file?;
+    Some((command == "r" || run_flag, shell_path(&file, dir)))
+}
+
+fn nim_shells(text: &str, run: bool) -> Vec<String> {
+    let mut commands = nim_call_args(text, "staticExec");
+    if run {
+        commands.extend(nim_call_args(text, "execCmd"));
+    }
+    commands
+}
+
+fn nim_call_args(text: &str, name: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if chars[index] == '"'
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        let bounded =
+            index == 0 || (!chars[index - 1].is_ascii_alphanumeric() && chars[index - 1] != '_');
+        if bounded && mix_word_at(&chars, index, name) {
+            index += name.len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if chars.get(index) == Some(&'(') {
+                index += 1;
+                while index < chars.len() && chars[index].is_whitespace() {
+                    index += 1;
+                }
+            }
+            if let Some((value, end)) = read_quoted(&chars, index) {
+                if !value.is_empty() {
+                    commands.push(value);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+/// `dart file.dart`, `dart run`, and `dart pub run` execute
+/// `Process.run` and `Process.runSync` when the argument list is
+/// present. A single string does not compile and does not run.
+#[allow(clippy::too_many_arguments)]
+fn score_dart_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = extension_script(argv, "dart", ".dart", dir) else {
+        return;
+    };
+    let commands = dart_processes(&strip_c_comments(&text));
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `ocaml file.ml` runs `Sys.command "cmd"`. `print_endline` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_ocaml_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = extension_script(argv, "ocaml", ".ml", dir) else {
+        return;
+    };
+    let commands = call_strings(&strip_ocaml_comments(&text), "Sys.command");
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `escript file.escript` runs `os:cmd("cmd")`. `io:format` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_escript<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = extension_script(argv, "escript", ".escript", dir) else {
+        return;
+    };
+    let commands = quoted_call(&text, "os:cmd", &['%']);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `pandoc --lua-filter=file` runs `io.popen` and `os.execute` in that file.
+#[allow(clippy::too_many_arguments)]
+fn score_pandoc_filter<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("pandoc") {
+        return;
+    }
+    let mut commands = Vec::new();
+    for filter in pandoc_filters(argv, dir) {
+        let Some(text) = load_text(&filter) else {
+            continue;
+        };
+        let text = strip_lua_comments(&text);
+        commands.extend(quoted_call(&text, "io.popen", &[]));
+        commands.extend(quoted_call(&text, "os.execute", &[]));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `ldc2 -run file.d` runs `executeShell("cmd")`. `writeln` does not.
+/// Without `-run` the file is not executed.
+#[allow(clippy::too_many_arguments)]
+fn score_ldc_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("ldc2") {
+        return;
+    }
+    if !argv.iter().any(|arg| arg == "-run") {
+        return;
+    }
+    let Some(text) = script_positionals(argv)
+        .into_iter()
+        .find(|word| word.ends_with(".d"))
+        .and_then(|word| load_text(&shell_path(&word, dir)))
+    else {
+        return;
+    };
+    let commands = quoted_call(&strip_c_comments(&text), "executeShell", &[]);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn script_positionals(argv: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        words.push(arg.clone());
+    }
+    words
+}
+
+fn extension_script(
+    argv: &[String],
+    command: &str,
+    ext: &str,
+    dir: Option<&str>,
+) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
+    {
+        return None;
+    }
+    script_positionals(argv)
+        .into_iter()
+        .find(|word| word.ends_with(ext))
+        .and_then(|word| load_text(&shell_path(&word, dir)))
+}
+
+fn load_text(path: &str) -> Option<String> {
+    match load_script_file(path) {
+        Some(ScriptFile::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn pandoc_filters(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut filters = Vec::new();
+    for arg in argv.iter().skip(1) {
+        if let Some(path) = arg.strip_prefix("--lua-filter=")
+            && !path.is_empty()
+        {
+            filters.push(shell_path(path, dir));
+        }
+    }
+    filters
+}
+
+fn dart_processes(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        let dart_call = if haskell_word(&chars, index, "Process.runSync") {
+            Some("Process.runSync")
+        } else if haskell_word(&chars, index, "Process.run") {
+            Some("Process.run")
+        } else {
+            None
+        };
+        if let Some(name) = dart_call
+            && let Some(command) = dart_run_after(&chars, index + name.len())
+        {
+            commands.push(command);
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn dart_run_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if chars.get(index) == Some(&'(') {
+        index += 1;
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+    }
+    let (program, mut cursor) = read_quoted(chars, index)?;
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if chars.get(cursor) == Some(&',') {
+        cursor += 1;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+    }
+    if chars.get(cursor) != Some(&'[') {
+        return None;
+    }
+    let mut words = vec![program];
+    if let Some((inner, _)) = balanced(chars, cursor, '[', ']') {
+        let listed: Vec<char> = inner.chars().collect();
+        let mut listed_at = 0usize;
+        while listed_at < listed.len() {
+            while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+                listed_at += 1;
+            }
+            if listed.get(listed_at) == Some(&',') {
+                listed_at += 1;
+                continue;
+            }
+            let Some((word, end)) = read_quoted(&listed, listed_at) else {
+                break;
+            };
+            words.push(word);
+            listed_at = end;
+        }
+    }
+    Some(quote_argv(&words))
+}
+
+fn strip_c_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            out.push(' ');
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn strip_ocaml_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '(' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == ')') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            out.push(' ');
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn strip_lua_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '-' && chars.get(index + 1) == Some(&'-') {
+            if chars.get(index + 2) == Some(&'[') && chars.get(index + 3) == Some(&'[') {
+                index += 4;
+                while index + 1 < chars.len() && !(chars[index] == ']' && chars[index + 1] == ']') {
+                    index += 1;
+                }
+                index = (index + 2).min(chars.len());
+                out.push(' ');
+                continue;
+            }
+            index = skip_line(&chars, index);
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// `pytest file.py` and `python3 -m pytest file.py` run that file.
+/// `ansible-playbook file.yml` runs `command:` and `shell:` tasks.
+/// A debug task does not.
+#[allow(clippy::too_many_arguments)]
+fn score_pytest<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for path in pytest_files(argv, dir) {
+        let Some(text) = load_text(&path) else {
+            continue;
+        };
+        commands.extend(interpreter_commands(HostLang::Python, &text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_ansible_playbook<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new()))
+        .eq_ignore_ascii_case("ansible-playbook")
+    {
+        return;
+    }
+    let Some(text) = script_positionals(argv)
+        .into_iter()
+        .find(|word| word.ends_with(".yml") || word.ends_with(".yaml"))
+        .and_then(|word| load_text(&shell_path(&word, dir)))
+    else {
+        return;
+    };
+    let commands = playbook_tasks(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn pytest_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    let selected = if base.eq_ignore_ascii_case("pytest") {
+        true
+    } else {
+        host_lang(base).is_some_and(|lang| matches!(lang, HostLang::Python))
+            && python_module_is(argv, "pytest")
+    };
+    if !selected {
+        return Vec::new();
+    }
+    let explicit: Vec<String> = script_positionals(argv)
+        .into_iter()
+        .filter(|word| word.ends_with(".py"))
+        .map(|word| shell_path(&word, dir))
+        .collect();
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let mut found = Vec::new();
+    pytest_walk(&shell_dir(dir), &mut found, 0);
+    found
+}
+
+fn pytest_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "node_modules"
+            || name == ".git"
+            || name == "__pycache__"
+            || name == ".pytest_cache"
+        {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            pytest_walk(&path, found, depth + 1);
+            continue;
+        }
+        if name.ends_with("_test.py") || (name.starts_with("test_") && name.ends_with(".py")) {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+fn python_module_is(argv: &[String], module: &str) -> bool {
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index] == "-m" {
+            return argv.get(index + 1).is_some_and(|name| name == module);
+        }
+        index += 1;
+    }
+    false
+}
+
+fn playbook_tasks(text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let body = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+        let Some(value) = body
+            .strip_prefix("command:")
+            .or_else(|| body.strip_prefix("shell:"))
+        else {
+            continue;
+        };
+        let value = yaml_scalar(value.trim());
+        if value.is_empty() || value == "|" || value == ">" {
+            continue;
+        }
+        commands.push(value);
+    }
+    commands
+}
+
+fn yaml_scalar(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+        {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
+}
+
+/// `node --test` runs `*.test.js`, `*_test.js`, `*-test.js`, `test-*.js`,
+/// and `test.js`, including in subdirectories. `node_modules` is skipped.
+/// `test_*.js` is not collected.
+#[allow(clippy::too_many_arguments)]
+fn score_node_test<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("node") {
+        return;
+    }
+    if !argv.iter().any(|arg| arg == "--test") {
+        return;
+    }
+    let mut files = Vec::new();
+    node_test_walk(&shell_dir(dir), &mut files, 0);
+    let mut commands = Vec::new();
+    for path in files {
+        if let Some(text) = load_text(&path) {
+            commands.extend(interpreter_commands(HostLang::Node, &text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn node_test_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "node_modules" || name == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            node_test_walk(&path, found, depth + 1);
+            continue;
+        }
+        if node_test_name(&name) {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+fn node_test_name(name: &str) -> bool {
+    name == "test.js"
+        || name.ends_with(".test.js")
+        || name.ends_with("_test.js")
+        || name.ends_with("-test.js")
+        || (name.starts_with("test-") && name.ends_with(".js"))
+}
+
+/// `go test` runs `exec.Command` in every `.go` file of the package,
+/// including `init`. `./sub` is that directory. `./...` walks packages
+/// under it. `vendor` is skipped.
+#[allow(clippy::too_many_arguments)]
+fn score_go_test_package<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("go") {
+        return;
+    }
+    if argv.iter().any(|arg| arg == "-c") {
+        return;
+    }
+    let words = script_positionals(argv);
+    if words.first().map(String::as_str) != Some("test") {
+        return;
+    }
+    let mut commands = Vec::new();
+    for package in go_test_dirs(&words[1..], dir) {
+        let Ok(entries) = std::fs::read_dir(&package) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".go") {
+                continue;
+            }
+            if let Some(text) = load_text(&entry.path().display().to_string()) {
+                commands.extend(go_commands(&text));
+            }
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn go_test_dirs(specs: &[String], dir: Option<&str>) -> Vec<std::path::PathBuf> {
+    let base = shell_dir(dir);
+    if specs.is_empty() {
+        return vec![base];
+    }
+    let mut dirs = Vec::new();
+    for spec in specs {
+        let Some((start, walk)) = go_package_spec(&base, spec) else {
+            continue;
+        };
+        if walk {
+            go_package_walk(&start, &mut dirs, 0);
+        } else if start.is_dir() {
+            dirs.push(start);
+        }
+    }
+    dirs
+}
+
+fn go_package_spec(base: &std::path::Path, spec: &str) -> Option<(std::path::PathBuf, bool)> {
+    if spec == "." {
+        return Some((base.to_path_buf(), false));
+    }
+    let walk = spec.ends_with("/...");
+    let path = spec.strip_suffix("/...").unwrap_or(spec);
+    if path == "." {
+        return Some((base.to_path_buf(), walk));
+    }
+    let rel = path.strip_prefix("./")?;
+    if rel.is_empty() || rel.split('/').any(|part| part.is_empty() || part == "..") {
+        return None;
+    }
+    Some((base.join(rel), walk))
+}
+
+fn go_package_walk(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut children = Vec::new();
+    let mut go_file = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "vendor" || name == ".git" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            children.push(path);
+        } else if name.ends_with(".go") {
+            go_file = true;
+        }
+    }
+    if go_file {
+        found.push(dir.to_path_buf());
+    }
+    for child in children {
+        go_package_walk(&child, found, depth + 1);
+    }
+}
+
+/// `rake` runs `sh` in the `default` task. `rake name` runs that task.
+/// A missing task runs nothing.
+#[allow(clippy::too_many_arguments)]
+fn score_rake<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("rake") {
+        return;
+    }
+    if argv.iter().skip(1).any(|arg| arg.starts_with('-')) {
+        return;
+    }
+    let words = script_positionals(argv);
+    let task = words.first().map(String::as_str).unwrap_or("default");
+    let path = shell_dir(dir).join("Rakefile");
+    let Some(text) = load_text(&path.display().to_string()) else {
+        return;
+    };
+    let Some(body) = rake_task_body(&text, task) else {
+        return;
+    };
+    let commands = call_strings(&strip_hash_comments(&body), "sh");
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn rake_task_body(text: &str, task: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut index = 0usize;
+    while index < lines.len() {
+        if let Some(name) = rake_task_name(lines[index]) {
+            index += 1;
+            let mut body = String::new();
+            while index < lines.len() && lines[index].trim() != "end" {
+                body.push_str(lines[index]);
+                body.push('\n');
+                index += 1;
+            }
+            if name == task {
+                return Some(body);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn rake_task_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return None;
+    }
+    let rest = line.strip_prefix("task ")?.trim();
+    let rest = rest.strip_prefix(':')?;
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn strip_hash_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// `cargo build`, `check`, `clippy`, `rustc`, `doc`, `bench`, `run`,
+/// and `test` run `build.rs`. `cargo install --path dir` runs that
+/// directory's `build.rs`. `cargo install` without `--path` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_build_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(package) = cargo_install_package(argv, dir).or_else(|| cargo_package_dir(argv, dir))
+    else {
+        return;
+    };
+    let Some(text) = load_text(&package.join("build.rs").display().to_string()) else {
+        return;
+    };
+    let commands = rust_commands(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `cargo run` and `cargo test` run the closest `cfg(unix)` `runner`.
+/// Cargo reads `.cargo/config` before `.cargo/config.toml`, then walks
+/// toward the filesystem root from the working directory. The manifest
+/// directory is not that walk. `cargo build` does not run it. `run`
+/// needs a bin. `test` needs a bin, a lib, or an integration test. A
+/// workspace with no root package uses its members.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_runner<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(run) = cargo_runner_kind(argv) else {
+        return;
+    };
+    let Some(package) = cargo_runner_package(argv, dir) else {
+        return;
+    };
+    if !cargo_runner_has_target(&package, run) {
+        return;
+    }
+    let Some(command) = cargo_runner_command(dir) else {
+        return;
+    };
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&command),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CargoInvoke {
+    Run,
+    Test,
+    Bench,
+}
+
+fn cargo_runner_kind(argv: &[String]) -> Option<CargoInvoke> {
+    match argv.get(cargo_first_positional(argv)?)?.as_str() {
+        "run" => Some(CargoInvoke::Run),
+        "test" => Some(CargoInvoke::Test),
+        "bench" => Some(CargoInvoke::Bench),
+        _ => None,
+    }
+}
+
+fn cargo_first_positional(argv: &[String]) -> Option<usize> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            return None;
+        }
+        if matches!(
+            arg,
+            "--manifest-path"
+                | "-p"
+                | "--package"
+                | "--bin"
+                | "--example"
+                | "--target"
+                | "--features"
+                | "-F"
+                | "--profile"
+                | "-j"
+                | "--jobs"
+                | "--color"
+                | "--config"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') || arg.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        return Some(index);
+    }
+    None
+}
+
+/// A `[alias]` string in `.cargo/config` replaces that subcommand.
+/// `.cargo/config` wins over `.cargo/config.toml`. The search walks
+/// from the working directory toward the root. The first definition
+/// wins.
+fn cargo_alias_argv(argv: &[String], dir: Option<&str>) -> Option<Vec<String>> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut current = argv.to_vec();
+    let mut seen = Vec::new();
+    let mut changed = false;
+    for _ in 0..4 {
+        let Some(index) = cargo_first_positional(&current) else {
+            break;
+        };
+        let name = current[index].clone();
+        if seen.iter().any(|item: &String| item == &name) {
+            break;
+        }
+        seen.push(name.clone());
+        let Some(words) = cargo_alias_words(&name, dir) else {
+            break;
+        };
+        current.splice(index..=index, words);
+        changed = true;
+    }
+    changed.then_some(current)
+}
+
+fn cargo_alias_words(name: &str, dir: Option<&str>) -> Option<Vec<String>> {
+    let mut current = shell_dir(dir);
+    for _ in 0..64 {
+        let plain = current.join(".cargo/config");
+        let toml = current.join(".cargo/config.toml");
+        let chosen = if plain.is_file() {
+            Some(plain)
+        } else if toml.is_file() {
+            Some(toml)
+        } else {
+            None
+        };
+        if let Some(path) = chosen
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(value) = cargo_alias_value(&text, name)
+        {
+            let words: Vec<String> = value.split_whitespace().map(str::to_string).collect();
+            if !words.is_empty() {
+                return Some(words);
+            }
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    None
+}
+
+fn cargo_alias_value(text: &str, name: &str) -> Option<String> {
+    let mut section = false;
+    let mut found = None;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            section = line == "[alias]";
+            continue;
+        }
+        if !section {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix(name) else {
+            continue;
+        };
+        if rest
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            continue;
+        }
+        let Some(rest) = rest.trim().strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim();
+        let Some(quote) = rest.chars().next() else {
+            continue;
+        };
+        if quote != '"' && quote != '\'' {
+            continue;
+        }
+        if !rest.ends_with(quote) || rest.chars().count() < 2 {
+            continue;
+        }
+        let body: String = rest
+            .chars()
+            .skip(1)
+            .take(rest.chars().count() - 2)
+            .collect();
+        if !body.is_empty() {
+            found = Some(body);
+        }
+    }
+    found
+}
+
+fn cargo_unix_runner(text: &str) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let mut section = false;
+    let mut runner = None;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            section = name == "target.'cfg(unix)'" || name == "target.\"cfg(unix)\"";
+            continue;
+        }
+        if !section {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("runner") else {
+            continue;
+        };
+        let rest = rest.trim().trim_start_matches('=').trim();
+        if let Some(command) = rest
+            .strip_prefix('"')
+            .and_then(|body| body.strip_suffix('"'))
+            && !command.is_empty()
+        {
+            runner = Some(command.to_string());
+        }
+    }
+    runner
+}
+
+fn cargo_runner_package(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if let Some(manifest) = cargo_manifest_path(argv) {
+        let path = std::path::PathBuf::from(shell_path(&manifest, dir));
+        if !path.is_file() {
+            return None;
+        }
+        return path.parent().map(std::path::Path::to_path_buf);
+    }
+    let root = shell_dir(dir);
+    root.join("Cargo.toml").is_file().then_some(root)
+}
+
+fn cargo_manifest_path(argv: &[String]) -> Option<String> {
+    let mut found = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 1;
+            found = argv.get(index).cloned().filter(|path| !path.is_empty());
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=")
+            && !path.is_empty()
+        {
+            found = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+fn cargo_runner_has_target(dir: &std::path::Path, kind: CargoInvoke) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    if kind == CargoInvoke::Bench {
+        return cargo_has_bench(dir, &text);
+    }
+    let run = kind == CargoInvoke::Run;
+    if cargo_named_package(&text) {
+        return cargo_dir_has_target(dir, run);
+    }
+    if !cargo_workspace_table(&text) {
+        return false;
+    }
+    cargo_workspace_members(&text).into_iter().any(|member| {
+        if member.contains('*') || member.contains('?') || member.contains('[') {
+            return false;
+        }
+        let member_dir = dir.join(&member);
+        let Ok(body) = std::fs::read_to_string(member_dir.join("Cargo.toml")) else {
+            return false;
+        };
+        cargo_named_package(&body) && cargo_dir_has_target(&member_dir, run)
+    })
+}
+
+fn cargo_has_bench(dir: &std::path::Path, text: &str) -> bool {
+    cargo_dir_has_rs(&dir.join("benches"))
+        || text.lines().any(|line| {
+            let line = line.split('#').next().unwrap_or("").trim();
+            line == "[[bench]]"
+        })
+}
+
+fn cargo_unharnessed_benches(dir: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    let mut in_bench = false;
+    let mut name = None;
+    let mut path = None;
+    let mut harness_false = false;
+    let flush = |in_bench: bool,
+                 name: &Option<String>,
+                 path: &Option<String>,
+                 harness_false: bool,
+                 files: &mut Vec<String>| {
+        if !in_bench || !harness_false {
+            return;
+        }
+        let file = if let Some(path) = path {
+            dir.join(path)
+        } else if let Some(name) = name {
+            dir.join("benches").join(format!("{name}.rs"))
+        } else {
+            return;
+        };
+        if file.is_file() {
+            files.push(file.display().to_string());
+        }
+    };
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            flush(in_bench, &name, &path, harness_false, &mut files);
+            in_bench = line == "[[bench]]";
+            name = None;
+            path = None;
+            harness_false = false;
+            continue;
+        }
+        if !in_bench {
+            continue;
+        }
+        if let Some(value) = cargo_toml_string(line, "name") {
+            name = Some(value);
+        } else if let Some(value) = cargo_toml_string(line, "path") {
+            path = Some(value);
+        } else if line.replace(' ', "") == "harness=false" {
+            harness_false = true;
+        }
+    }
+    flush(in_bench, &name, &path, harness_false, &mut files);
+    files
+}
+
+fn cargo_toml_string(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    let rest = rest.trim().strip_prefix('=')?.trim();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    if !rest.ends_with(quote) || rest.chars().count() < 2 {
+        return None;
+    }
+    let body: String = rest
+        .chars()
+        .skip(1)
+        .take(rest.chars().count() - 2)
+        .collect();
+    (!body.is_empty()).then_some(body)
+}
+
+fn cargo_named_package(text: &str) -> bool {
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package && cargo_toml_name(line) {
+            return true;
+        }
+    }
+    false
+}
+
+fn cargo_toml_name(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("name") else {
+        return false;
+    };
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return false;
+    }
+    let rest = rest.trim().strip_prefix('=').unwrap_or("").trim();
+    let quoted =
+        |quote: char| rest.starts_with(quote) && rest.ends_with(quote) && rest.chars().count() > 2;
+    quoted('"') || quoted('\'')
+}
+
+fn cargo_workspace_table(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or("").trim();
+        line == "[workspace]"
+    })
+}
+
+fn cargo_workspace_members(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut members = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        let bounded =
+            index == 0 || (!chars[index - 1].is_ascii_alphanumeric() && chars[index - 1] != '_');
+        if bounded && mix_word_at(&chars, index, "members") {
+            index += "members".len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if chars.get(index) != Some(&'=') {
+                continue;
+            }
+            index += 1;
+            while index < chars.len() && chars[index] != '[' && chars[index] != '\n' {
+                index += 1;
+            }
+            if chars.get(index) != Some(&'[') {
+                continue;
+            }
+            index += 1;
+            while index < chars.len() && chars[index] != ']' {
+                if chars[index] == '#' {
+                    index = skip_line(&chars, index);
+                    continue;
+                }
+                if let Some((value, end)) = read_quoted(&chars, index) {
+                    if !value.is_empty() {
+                        members.push(value);
+                    }
+                    index = end;
+                    continue;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    members
+}
+
+fn cargo_dir_has_target(dir: &std::path::Path, run: bool) -> bool {
+    if cargo_has_bin(dir) {
+        return true;
+    }
+    !run && (dir.join("src/lib.rs").is_file() || cargo_dir_has_rs(&dir.join("tests")))
+}
+
+fn cargo_has_bin(dir: &std::path::Path) -> bool {
+    dir.join("src/main.rs").is_file() || cargo_dir_has_rs(&dir.join("src/bin"))
+}
+
+fn cargo_dir_has_rs(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).ok().is_some_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        })
+    })
+}
+
+fn cargo_runner_command(dir: Option<&str>) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let mut current = shell_dir(dir);
+    for _ in 0..64 {
+        let plain = current.join(".cargo/config");
+        let toml = current.join(".cargo/config.toml");
+        let chosen = if plain.is_file() {
+            Some(plain)
+        } else if toml.is_file() {
+            Some(toml)
+        } else {
+            None
+        };
+        if let Some(path) = chosen
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(command) = cargo_unix_runner(&text)
+        {
+            return Some(command);
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    None
+}
+
+fn cargo_install_package(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut install = false;
+    let mut path = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--path" {
+            index += 1;
+            path = argv.get(index).cloned().filter(|value| !value.is_empty());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--path=")
+            && !value.is_empty()
+        {
+            path = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') || arg.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if arg == "install" {
+            install = true;
+        }
+        index += 1;
+    }
+    if !install {
+        return None;
+    }
+    let path = std::path::PathBuf::from(shell_path(&path?, dir));
+    path.join("Cargo.toml").is_file().then_some(path)
+}
+
+fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut manifest = None;
+    let mut builds = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 1;
+            manifest = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=")
+            && !path.is_empty()
+        {
+            manifest = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if matches!(
+            arg,
+            "bench" | "build" | "check" | "clippy" | "doc" | "run" | "rustc" | "test"
+        ) {
+            builds = true;
+        }
+        index += 1;
+    }
+    if !builds {
+        return None;
+    }
+    let manifest = shell_path(manifest.as_deref().unwrap_or("Cargo.toml"), dir);
+    Some(std::path::Path::new(&manifest).parent()?.to_path_buf())
+}
+
+/// `cargo bench` runs `fn main` in a `[[bench]]` with `harness = false`.
+/// The default harness does not run `main`.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_benches<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !matches!(cargo_runner_kind(argv), Some(CargoInvoke::Bench)) {
+        return;
+    }
+    let Some(package) = cargo_runner_package(argv, dir) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for path in cargo_unharnessed_benches(&package) {
+        if let Some(text) = load_text(&path) {
+            commands.extend(rust_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `cargo test` runs `#[test]` functions in `src/lib.rs` and
+/// `tests/*.rs`. `--lib` is only the library. `--test name` is only
+/// `tests/name.rs`. A helper that no test calls does not run.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_rust_tests<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for path in cargo_test_files(argv, dir) {
+        if let Some(text) = load_text(&path) {
+            commands.extend(rust_test_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cargo_test_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(package) = cargo_package_dir(argv, dir) else {
+        return Vec::new();
+    };
+    let mut lib_only = false;
+    let mut names = Vec::new();
+    let mut testing = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--manifest-path=") {
+            index += 1;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--test=") {
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "--test" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(name.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "--lib" {
+            lib_only = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "test" {
+            testing = true;
+        }
+        index += 1;
+    }
+    if !testing {
+        return Vec::new();
+    }
+    if !names.is_empty() {
+        return names
+            .into_iter()
+            .map(|name| {
+                if name.ends_with(".rs") {
+                    shell_path(&name, dir)
+                } else {
+                    package
+                        .join("tests")
+                        .join(format!("{name}.rs"))
+                        .display()
+                        .to_string()
+                }
+            })
+            .collect();
+    }
+    let mut files = Vec::new();
+    let lib = package.join("src").join("lib.rs");
+    if lib.is_file() {
+        files.push(lib.display().to_string());
+    }
+    if !lib_only {
+        let tests = package.join("tests");
+        if let Ok(entries) = std::fs::read_dir(&tests) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "rs") && path.is_file() {
+                    files.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    files
+}
+
+fn rust_test_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if matches!(chars[index], '"' | '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, "#[test]")
+            && let Some(body) = rust_fn_after(&chars, index + "#[test]".len())
+        {
+            commands.extend(rust_commands(&body));
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn rust_fn_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if !starts_with(chars, index, "fn") {
+        return None;
+    }
+    while index < chars.len() && chars[index] != '{' {
+        if matches!(chars[index], '"' | '\'') {
+            let (_, end) = read_quoted(chars, index)?;
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    let (inner, _) = balanced(chars, index, '{', '}')?;
+    Some(inner)
+}
+
+/// `python3 -m unittest` and `unittest discover` run top-level
+/// `test*.py` files. A nested file and `*_test.py` do not.
+#[allow(clippy::too_many_arguments)]
+fn score_unittest<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !python_module_is(argv, "unittest") {
+        return;
+    }
+    let extras: Vec<String> = script_positionals(argv)
+        .into_iter()
+        .filter(|word| word != "unittest" && word != "discover")
+        .collect();
+    if !extras.is_empty() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("test") && name.ends_with(".py")) {
+            continue;
+        }
+        if let Some(text) = load_text(&path.display().to_string()) {
+            commands.extend(interpreter_commands(HostLang::Python, &text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `python3 -m doctest file.py` runs `>>>` examples. Code outside
+/// an example does not run.
+#[allow(clippy::too_many_arguments)]
+fn score_doctest<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !python_module_is(argv, "doctest") {
+        return;
+    }
+    let mut commands = Vec::new();
+    for word in script_positionals(argv) {
+        if !word.ends_with(".py") {
+            continue;
+        }
+        let Some(text) = load_text(&shell_path(&word, dir)) else {
+            continue;
+        };
+        let source = doctest_examples(&text);
+        commands.extend(interpreter_commands(HostLang::Python, &source));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn doctest_examples(text: &str) -> String {
+    let mut source = String::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(code) = trimmed
+            .strip_prefix(">>> ")
+            .or_else(|| trimmed.strip_prefix("... "))
+        {
+            source.push_str(code);
+            source.push('\n');
+        }
+    }
+    source
+}
+
+/// `bundle exec rake` runs the Rakefile the same way `rake` does.
+#[allow(clippy::too_many_arguments)]
+fn score_bundle_rake<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("bundle") {
+        return;
+    }
+    let words = script_positionals(argv);
+    if words.first().map(String::as_str) != Some("exec")
+        || words.get(1).map(String::as_str) != Some("rake")
+    {
+        return;
+    }
+    let mut rake_argv = vec!["rake".to_string()];
+    rake_argv.extend(words.into_iter().skip(2));
+    score_rake(policy, tool_name, &rake_argv, depth, local, git, dir, best);
+}
+
+/// `terraform apply` and `tofu apply` run `local-exec` provisioners.
+/// `terraform plan` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_terraform_apply<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(first) = argv.first() else {
+        return;
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("terraform") && !base.eq_ignore_ascii_case("tofu") {
+        return;
+    }
+    if script_positionals(argv).first().map(String::as_str) != Some("apply") {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || path.extension().is_none_or(|ext| ext != "tf") {
+            continue;
+        }
+        if let Some(text) = load_text(&path.display().to_string()) {
+            commands.extend(terraform_local_exec(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn terraform_local_exec(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "local-exec") {
+            let mut cursor = index + "local-exec".len();
+            while cursor < chars.len() && chars[cursor] != '{' {
+                cursor += 1;
+            }
+            if let Some((inner, end)) = balanced(&chars, cursor, '{', '}') {
+                commands.extend(hcl_command_strings(&inner));
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn hcl_command_strings(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, "command")
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + "command".len();
+            if chars
+                .get(cursor)
+                .is_some_and(|ch| ch.is_ascii_alphanumeric())
+            {
+                index += 1;
+                continue;
+            }
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'=') {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+                if let Some((command, end)) = read_quoted(&chars, cursor)
+                    && !command.is_empty()
+                {
+                    commands.push(command);
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        index += 1;
+    }
+    commands
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -21473,6 +29512,2161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// With no `core.hooksPath`, `git checkout` runs the executable
+    /// `.git/hooks/post-checkout` of the repository `cd` or `-C`
+    /// selected. `git status` does not. An explicit `core.hooksPath`
+    /// replaces that directory. A stuck `-Cpath` does not select it.
+    #[test]
+    fn git_checkout_scores_the_default_hook_directory() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-defhook-{}", std::process::id()));
+        let repo = root.join("repo");
+        let other = root.join("other");
+        let empty = root.join("empty");
+        let hooks = repo.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).expect("hooks");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::create_dir_all(&empty).expect("empty");
+        let path = hooks.join("post-checkout");
+        std::fs::write(&path, "rm -rf /tmp/co\n").expect("hook");
+        let chmod = |mode: u32| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(mode);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
+            let _ = mode;
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let repo_s = repo.display().to_string();
+        let root_s = root.display().to_string();
+        let other_s = other.display().to_string();
+        let empty_s = empty.display().to_string();
+        let hooks_s = hooks.display().to_string();
+        let checkout = format!("git -C {repo_s} checkout side");
+        #[cfg(unix)]
+        {
+            chmod(0o644);
+            assert_eq!(kind(&checkout), None, "{checkout}");
+        }
+        chmod(0o755);
+        assert_eq!(kind(&checkout), Some("bash.rm"), "{checkout}");
+        let status = format!("git -C {repo_s} status");
+        assert_eq!(kind(&status), None, "{status}");
+        let from_cd = format!("cd {repo_s} && git checkout side");
+        assert_eq!(kind(&from_cd), Some("bash.rm"), "{from_cd}");
+        let relative = format!("cd {root_s} && git -C repo checkout side");
+        assert_eq!(kind(&relative), Some("bash.rm"), "{relative}");
+        let into_repo = format!("git -C {other_s} -C ../repo checkout side");
+        assert_eq!(kind(&into_repo), Some("bash.rm"), "{into_repo}");
+        let into_other = format!("git -C {repo_s} -C ../other checkout side");
+        assert_eq!(kind(&into_other), None, "{into_other}");
+        let forced = format!("git -C {repo_s} -c core.hooksPath={other_s} checkout side");
+        assert_eq!(kind(&forced), None, "{forced}");
+        let explicit = format!("git -c core.hooksPath={hooks_s} -C {other_s} checkout side");
+        assert_eq!(kind(&explicit), Some("bash.rm"), "{explicit}");
+        let stuck = format!("cd {empty_s} && git -C{repo_s} checkout side");
+        assert_eq!(kind(&stuck), None, "{stuck}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npx` and `npm exec` run a `PATH` program before a local bin.
+    /// `pnpm exec` and `bunx` run the local bin first. `pnpm` does
+    /// nothing without a `package.json`. `-c` and `--call` run that
+    /// string. A bin that is not executable does not run.
+    #[test]
+    fn package_exec_scores_the_command_the_host_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-exec-{}", std::process::id()));
+        let proj = root.join("proj");
+        let bins = proj.join("node_modules").join(".bin");
+        let sub = proj.join("sub");
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&bins).expect("bins");
+        std::fs::create_dir_all(&sub).expect("sub");
+        std::fs::create_dir_all(&empty).expect("empty");
+        std::fs::write(proj.join("package.json"), "{\"name\":\"p\"}\n").expect("pkg");
+        let write = |name: &str, mode: u32| {
+            let path = bins.join(name);
+            std::fs::write(&path, "#!/bin/sh\ngit push origin main\n").expect(name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(mode);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
+            let _ = mode;
+        };
+        write("hostprobe", 0o755);
+        write("echo", 0o755);
+        write("quiet", 0o644);
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let proj_s = proj.display().to_string();
+        let empty_s = empty.display().to_string();
+        let push = "git push origin main";
+        let cases = [
+            (
+                format!("cd {proj_s} && npx --no-install hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {proj_s}/sub && npx --no-install hostprobe"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && npx --no-install echo hi"), None),
+            (
+                format!("cd {empty_s} && npx --no-install {push}"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && npx --no-install quiet"), None),
+            (format!("cd {proj_s} && npx --no-install nosuchbin"), None),
+            (
+                format!("cd {proj_s} && npm exec --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {proj_s} && npm x --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm exec --prefix proj --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm exec --prefix=proj --offline -- hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {empty_s} && npm exec --offline -c '{push}'"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {empty_s} && npm exec --offline --call='{push}'"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {empty_s} && npx --no-install -c '{push}'"),
+                Some("git.push"),
+            ),
+            ("npm exec --offline".to_string(), None),
+            (
+                format!("cd {proj_s} && pnpm exec hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {proj_s} && pnpm exec echo hi"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && pnpm exec {push}"), Some("git.push")),
+            (format!("cd {proj_s}/sub && pnpm exec hostprobe"), None),
+            (
+                format!("cd {proj_s}/sub && pnpm exec {push}"),
+                Some("git.push"),
+            ),
+            (format!("cd {empty_s} && pnpm exec {push}"), None),
+            (format!("cd {proj_s} && pnpm exec quiet"), None),
+            (format!("cd {proj_s} && pnpm exec nosuchbin"), None),
+            (
+                format!("cd {root_s} && pnpm --dir proj exec hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm --dir=proj exec hostprobe"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && bunx hostprobe"), Some("git.push")),
+            (format!("cd {proj_s} && bun x hostprobe"), Some("git.push")),
+            (format!("cd {proj_s} && bunx echo hi"), Some("git.push")),
+            (format!("cd {proj_s}/sub && bunx echo hi"), Some("git.push")),
+            (format!("cd {empty_s} && bunx {push}"), Some("git.push")),
+            (
+                format!("cd {empty_s} && bunx --cwd {proj_s} hostprobe"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && bunx --cwd=proj hostprobe"),
+                Some("git.push"),
+            ),
+            (format!("cd {proj_s} && bunx quiet"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `ninja` runs each scheduled `command`. With no target, `default`
+    /// picks the roots; otherwise every build runs. A dependency runs
+    /// too. `-n` and an unknown target do not.
+    #[test]
+    fn ninja_scores_the_builds_it_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-ninja-{}", std::process::id()));
+        let proj = root.join("proj");
+        let alt = root.join("alt");
+        std::fs::create_dir_all(&proj).expect("proj");
+        std::fs::create_dir_all(&alt).expect("alt");
+        std::fs::write(
+            proj.join("build.ninja"),
+            "rule top\n  command = echo ok\nrule dep\n  command = git push origin main\nbuild mid: dep\nbuild out: top mid\nbuild other: top\n",
+        )
+        .expect("ninja");
+        std::fs::write(
+            alt.join("custom.ninja"),
+            "rule one\n  command = git push origin main\nbuild out: one\n",
+        )
+        .expect("custom");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let proj_s = proj.display().to_string();
+        let all = format!("cd {proj_s} && ninja");
+        assert_eq!(kind(&all), Some("git.push"), "{all}");
+        let named = format!("cd {proj_s} && ninja out");
+        assert_eq!(kind(&named), Some("git.push"), "{named}");
+        let only = format!("cd {proj_s} && ninja other");
+        assert_eq!(kind(&only), None, "{only}");
+        let dry = format!("cd {proj_s} && ninja -n");
+        assert_eq!(kind(&dry), None, "{dry}");
+        let missing = format!("cd {proj_s} && ninja absent");
+        assert_eq!(kind(&missing), None, "{missing}");
+        let switched = format!("cd {root_s} && ninja -C proj");
+        assert_eq!(kind(&switched), Some("git.push"), "{switched}");
+        let file = format!("cd {root_s} && ninja -f alt/custom.ninja");
+        assert_eq!(kind(&file), Some("git.push"), "{file}");
+        let both = format!("cd {root_s} && ninja -C alt -f custom.ninja");
+        assert_eq!(kind(&both), Some("git.push"), "{both}");
+        std::fs::write(
+            proj.join("build.ninja"),
+            "rule top\n  command = echo ok\nrule side\n  command = git push origin main\nbuild out: top\nbuild other: side\ndefault out\n# git push origin main\n",
+        )
+        .expect("default");
+        assert_eq!(kind(&all), None, "{all}");
+        let side = format!("cd {proj_s} && ninja other");
+        assert_eq!(kind(&side), Some("git.push"), "{side}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `vim -c '!cmd'`, `--cmd`, `+!cmd`, and `-S` run `cmd`. `qa!`
+    /// and `:echo` do not.
+    #[test]
+    fn vim_bang_scores_the_shell_command() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-vim-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(root.join("go.ex"), "!git push origin main\nqa!\n").expect("ex");
+        std::fs::write(root.join("quiet.ex"), "qa!\n").expect("quiet");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let push = "git push origin main";
+        let cases = [
+            (
+                format!("vim -n -es -c '!{push}' -c 'qa!'"),
+                Some("git.push"),
+            ),
+            (format!("vim -c ':!{push}' -c qa!"), Some("git.push")),
+            (format!("vim -c '  !{push}' -c qa!"), Some("git.push")),
+            (format!("vim -c 'echo {push}' -c qa!"), None),
+            ("vim -c qa!".to_string(), None),
+            (format!("vim --cmd '!{push}' -c qa!"), Some("git.push")),
+            (format!("vim '+!{push}' '+qa!'"), Some("git.push")),
+            (format!("cd {root_s} && vim -S go.ex"), Some("git.push")),
+            (format!("cd {root_s} && vim -S quiet.ex"), None),
+            (format!("cd {root_s} && vim -S missing.ex"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `ansible -m command -a` and `-m shell -a` run that string.
+    /// `ansible -m ping` does not.
+    #[test]
+    fn ansible_command_scores_the_module_args() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let push = "git push origin main";
+        assert_eq!(
+            kind(&format!(
+                "ansible localhost -i localhost, -c local -m command -a '{push}'"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("ansible localhost -m shell -a '{push}'")),
+            Some("git.push")
+        );
+        assert_eq!(kind("ansible localhost -m ping"), None);
+    }
+
+    /// `groovy -e '"cmd".execute()'` and a `.groovy` file run `cmd`.
+    /// `println("cmd")` does not.
+    #[test]
+    fn groovy_execute_scores_the_string() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-groovy-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(
+            root.join("p.groovy"),
+            "\"git push origin main\".execute()\n",
+        )
+        .expect("groovy");
+        std::fs::write(
+            root.join("quiet.groovy"),
+            "println(\"git push origin main\")\n",
+        )
+        .expect("quiet");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let run = "groovy -e '\"git push origin main\".execute()'";
+        assert_eq!(kind(run), Some("git.push"), "{run}");
+        let printed = "groovy -e 'println(\"git push origin main\")'";
+        assert_eq!(kind(printed), None, "{printed}");
+        let comment = "groovy -e '// \"git push origin main\".execute()'";
+        assert_eq!(kind(comment), None, "{comment}");
+        let file = format!("cd {root_s} && groovy p.groovy");
+        assert_eq!(kind(&file), Some("git.push"), "{file}");
+        let quiet = format!("cd {root_s} && groovy quiet.groovy");
+        assert_eq!(kind(&quiet), None, "{quiet}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Crystal backticks, Dart `Process.run`, OCaml `Sys.command`,
+    /// escript `os:cmd`, Pandoc Lua `io.popen` and `os.execute`, and
+    /// `ldc2 -run` `executeShell` run that command. A printed string
+    /// does not. `ldc2` without `-run` does not execute the file.
+    #[test]
+    fn later_hosts_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-later-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        let write = |name: &str, body: &str| {
+            std::fs::write(root.join(name), body).expect(name);
+        };
+        write("p.cr", "print `git push origin main`\n");
+        write("quiet.cr", "print \"git push origin main\"\n");
+        write(
+            "p.dart",
+            "import 'dart:io';\nvoid main() { Process.run(\"git\", [\"push\", \"origin\", \"main\"]); }\n",
+        );
+        write(
+            "quiet.dart",
+            "void main() { print(\"git push origin main\"); }\n",
+        );
+        write("p.ml", "let _ = Sys.command \"git push origin main\"\n");
+        write(
+            "quiet.ml",
+            "let _ = print_endline \"git push origin main\"\n",
+        );
+        write("note.ml", "(* Sys.command \"git push origin main\" *)\n");
+        write("p.escript", "os:cmd(\"git push origin main\").\n");
+        write("quiet.escript", "io:format(\"git push origin main\").\n");
+        write(
+            "f.lua",
+            "function Pandoc(doc)\n  os.execute(\"git push origin main\")\n  return doc\nend\n",
+        );
+        write(
+            "popen.lua",
+            "function Pandoc(doc)\n  io.popen(\"git push origin main\")\n  return doc\nend\n",
+        );
+        write(
+            "quiet.lua",
+            "function Pandoc(doc)\n  -- os.execute(\"git push origin main\")\n  return doc\nend\n",
+        );
+        write(
+            "p.d",
+            "void main(){ executeShell(\"git push origin main\"); }\n",
+        );
+        write(
+            "quiet.d",
+            "void main(){ writeln(\"git push origin main\"); }\n",
+        );
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let cases = [
+            (
+                "crystal eval 'print `git push origin main`'".to_string(),
+                Some("git.push"),
+            ),
+            (
+                "crystal eval 'print \"git push origin main\"'".to_string(),
+                None,
+            ),
+            (format!("cd {root_s} && crystal run p.cr"), Some("git.push")),
+            (format!("cd {root_s} && crystal run quiet.cr"), None),
+            (format!("cd {root_s} && dart p.dart"), Some("git.push")),
+            (format!("cd {root_s} && dart quiet.dart"), None),
+            (format!("cd {root_s} && ocaml p.ml"), Some("git.push")),
+            (format!("cd {root_s} && ocaml quiet.ml"), None),
+            (format!("cd {root_s} && ocaml note.ml"), None),
+            (
+                format!("cd {root_s} && escript p.escript"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && escript quiet.escript"), None),
+            (
+                format!("pandoc hi.md --lua-filter={root_s}/f.lua"),
+                Some("git.push"),
+            ),
+            (
+                format!("pandoc hi.md --lua-filter={root_s}/popen.lua"),
+                Some("git.push"),
+            ),
+            (
+                format!("pandoc hi.md --lua-filter={root_s}/quiet.lua"),
+                None,
+            ),
+            ("pandoc hi.md".to_string(), None),
+            (format!("ldc2 -run {root_s}/p.d"), Some("git.push")),
+            (format!("ldc2 -run {root_s}/quiet.d"), None),
+            (format!("ldc2 {root_s}/p.d"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `pytest file.py` and `python3 -m pytest file.py` run that file.
+    /// `ansible-playbook` runs `command:` and `shell:` tasks. A debug
+    /// task does not.
+    #[test]
+    fn pytest_and_playbook_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-pyplay-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        let write = |name: &str, body: &str| {
+            std::fs::write(root.join(name), body).expect(name);
+        };
+        write(
+            "test_h.py",
+            "import os\ndef test_h():\n    os.system(\"git push origin main\")\n",
+        );
+        write(
+            "test_quiet.py",
+            "def test_h():\n    print(\"git push origin main\")\n",
+        );
+        write(
+            "run.yml",
+            "- hosts: localhost\n  tasks:\n    - command: git push origin main\n",
+        );
+        write(
+            "shell.yml",
+            "- hosts: localhost\n  tasks:\n    - shell: git push origin main\n",
+        );
+        write(
+            "debug.yml",
+            "- hosts: localhost\n  tasks:\n    - debug:\n        msg: git push origin main\n",
+        );
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let cases = [
+            (format!("cd {root_s} && pytest test_h.py"), Some("git.push")),
+            (
+                format!("cd {root_s} && python3 -m pytest test_h.py"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && pytest test_quiet.py"), None),
+            (
+                format!("cd {root_s} && ansible-playbook run.yml"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && ansible-playbook shell.yml"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && ansible-playbook debug.yml"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no file argument, pytest, `python3 -m pytest`, and
+    /// `node --test` run the tests they discover. `go test` runs
+    /// `exec.Command` in the package directory. `rake` runs `sh` in
+    /// the named task, or `default`. `cargo build`, `check`, `clippy`,
+    /// `rustc`, `doc`, `run`, and `test` run `build.rs`.
+    /// `cargo install --path` runs that directory's `build.rs`.
+    #[test]
+    fn discovered_programs_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-disc-{}", std::process::id()));
+        let py = root.join("py");
+        let nested = py.join("sub");
+        let hidden = py.join("node_modules").join("pkg");
+        let js = root.join("js");
+        let js_hidden = js.join("node_modules").join("pkg");
+        let gomod = root.join("gomod");
+        let rk = root.join("rk");
+        let cg = root.join("cg");
+        for dir in [&py, &nested, &hidden, &js, &js_hidden, &gomod, &rk, &cg] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        let push = "import os\ndef test_h():\n    os.system(\"git push origin main\")\n";
+        let quiet = "def test_h():\n    print(\"git push origin main\")\n";
+        std::fs::write(py.join("test_quiet.py"), quiet).expect("py");
+        std::fs::write(py.join("plain.py"), push).expect("plain");
+        std::fs::write(hidden.join("test_hidden.py"), push).expect("hidden");
+        std::fs::write(nested.join("check_test.py"), push).expect("nest");
+        let js_push =
+            "require(\"child_process\").execFileSync(\"git\", [\"push\", \"origin\", \"main\"]);\n";
+        std::fs::write(
+            js.join("test.js"),
+            "console.log(\"git push origin main\")\n",
+        )
+        .expect("js");
+        std::fs::write(js.join("test_foo.js"), js_push).expect("underscored");
+        std::fs::write(js_hidden.join("hidden.test.js"), js_push).expect("nm");
+        std::fs::write(js.join("push.test.js"), js_push).expect("testjs");
+        std::fs::write(
+            gomod.join("plain.go"),
+            "package gomod\nimport \"os/exec\"\nfunc init() { exec.Command(\"git\", \"push\", \"origin\", \"main\").Run() }\n",
+        )
+        .expect("go");
+        std::fs::write(
+            gomod.join("plain_test.go"),
+            "package gomod\nimport \"testing\"\nfunc TestQuiet(t *testing.T) {}\n",
+        )
+        .expect("gotest");
+        std::fs::write(
+            rk.join("Rakefile"),
+            "task :default do\n  sh \"echo ok\"\nend\ntask :demo do\n  sh \"git push origin main\"\nend\n",
+        )
+        .expect("rake");
+        std::fs::write(
+            cg.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("build");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let py_s = py.display().to_string();
+        let js_s = js.display().to_string();
+        let go_s = gomod.display().to_string();
+        let rk_s = rk.display().to_string();
+        let cg_s = cg.display().to_string();
+        let cases = [
+            (format!("cd {py_s} && pytest -q"), Some("git.push")),
+            (
+                format!("cd {py_s} && python3 -m pytest -q"),
+                Some("git.push"),
+            ),
+            (format!("cd {js_s} && node --test"), Some("git.push")),
+            (format!("cd {go_s} && go test"), Some("git.push")),
+            (format!("cd {go_s} && go build"), None),
+            (format!("cd {rk_s} && rake"), None),
+            (format!("cd {rk_s} && rake demo"), Some("git.push")),
+            (format!("cd {rk_s} && rake missing"), None),
+            (format!("cd {cg_s} && cargo build -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo clippy -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo rustc -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo doc -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo check -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo test -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo run -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo metadata"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let py_only = root.join("pyonly");
+        let py_nm = py_only.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&py_nm).expect("pyonly");
+        std::fs::write(py_only.join("test_quiet.py"), quiet).expect("quiet");
+        std::fs::write(py_nm.join("test_hidden.py"), push).expect("hid");
+        let py_only_s = py_only.display().to_string();
+        let ignored = format!("cd {py_only_s} && pytest -q");
+        assert_eq!(kind(&ignored), None, "{ignored}");
+        std::fs::write(js.join("push.test.js"), "console.log(1)\n").expect("quietjs");
+        std::fs::write(js.join("test.js"), "console.log(1)\n").expect("quiettest");
+        let only_hidden = format!("cd {js_s} && node --test");
+        assert_eq!(kind(&only_hidden), None, "{only_hidden}");
+        let package = "[package]\nname = \"p\"\nversion = \"0.0.0\"\nedition = \"2021\"\n";
+        let runner = "[target.'cfg(unix)']\nrunner = \"git push origin main\"\n";
+        let runpkg = root.join("runpkg");
+        let away = root.join("away");
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        let lib = root.join("libonly");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(runpkg.join(".cargo")).expect("cargo cfg");
+        std::fs::create_dir_all(runpkg.join("src")).expect("src");
+        std::fs::create_dir_all(away.join(".cargo")).expect("away cfg");
+        std::fs::create_dir_all(parent.join(".cargo")).expect("parent cfg");
+        std::fs::create_dir_all(child.join("src")).expect("child src");
+        std::fs::create_dir_all(lib.join("src")).expect("lib src");
+        std::fs::create_dir_all(lib.join(".cargo")).expect("lib cfg");
+        std::fs::create_dir_all(ws.join(".cargo")).expect("ws cfg");
+        std::fs::create_dir_all(ws.join("member/src")).expect("member");
+        std::fs::write(runpkg.join("Cargo.toml"), package).expect("cargo toml");
+        std::fs::write(runpkg.join("src/main.rs"), "fn main() {}\n").expect("main");
+        std::fs::write(runpkg.join(".cargo/config.toml"), runner).expect("runner");
+        let run_s = runpkg.display().to_string();
+        let away_s = away.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo run -q")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo test -q")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {run_s} && cargo build -q")), None);
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo +stable run -q")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {run_s} && cargo +stable build -q")), None);
+        assert_eq!(
+            kind(&format!(
+                "cd {away_s} && cargo run -q --manifest-path {run_s}/Cargo.toml"
+            )),
+            None
+        );
+        std::fs::write(away.join(".cargo/config.toml"), runner).expect("away runner");
+        assert_eq!(
+            kind(&format!(
+                "cd {away_s} && cargo run -q --manifest-path {run_s}/Cargo.toml"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(child.join("Cargo.toml"), package).expect("child toml");
+        std::fs::write(child.join("src/main.rs"), "fn main() {}\n").expect("child main");
+        std::fs::write(parent.join(".cargo/config.toml"), runner).expect("parent runner");
+        let child_s = child.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {child_s} && cargo run -q")),
+            Some("git.push")
+        );
+        std::fs::create_dir_all(child.join(".cargo")).expect("child cfg");
+        std::fs::write(
+            child.join(".cargo/config.toml"),
+            "[target.'cfg(unix)']\nrunner = \"echo safe\"\n",
+        )
+        .expect("near runner");
+        assert_eq!(kind(&format!("cd {child_s} && cargo run -q")), None);
+        std::fs::write(
+            child.join(".cargo/config.toml"),
+            "[target.'cfg(windows)']\nrunner = \"git push origin main\"\n",
+        )
+        .expect("windows runner");
+        assert_eq!(
+            kind(&format!("cd {child_s} && cargo run -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            child.join(".cargo/config"),
+            "[target.'cfg(unix)']\nrunner = \"echo safe\"\n",
+        )
+        .expect("plain config");
+        assert_eq!(kind(&format!("cd {child_s} && cargo run -q")), None);
+        std::fs::remove_dir_all(child.join(".cargo")).expect("clear child cfg");
+        std::fs::write(lib.join("Cargo.toml"), package).expect("lib toml");
+        std::fs::write(lib.join("src/lib.rs"), "pub fn f() {}\n").expect("lib");
+        std::fs::write(lib.join(".cargo/config.toml"), runner).expect("lib runner");
+        let lib_s = lib.display().to_string();
+        assert_eq!(kind(&format!("cd {lib_s} && cargo run -q")), None);
+        assert_eq!(
+            kind(&format!("cd {lib_s} && cargo test -q")),
+            Some("git.push")
+        );
+        std::fs::write(lib.join("Cargo.toml"), "[package]\n").expect("nameless");
+        assert_eq!(kind(&format!("cd {lib_s} && cargo test -q")), None);
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .expect("workspace");
+        std::fs::write(ws.join("member/Cargo.toml"), package).expect("member toml");
+        std::fs::write(ws.join("member/src/main.rs"), "fn main() {}\n").expect("member main");
+        std::fs::write(ws.join(".cargo/config.toml"), runner).expect("ws runner");
+        let ws_s = ws.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {ws_s} && cargo run -q")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {ws_s} && cargo test -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"member\"]\n",
+        )
+        .expect("root lib workspace");
+        std::fs::create_dir_all(ws.join("src")).expect("ws src");
+        std::fs::write(ws.join("src/lib.rs"), "pub fn f() {}\n").expect("ws lib");
+        assert_eq!(kind(&format!("cd {ws_s} && cargo run -q")), None);
+        assert_eq!(
+            kind(&format!("cd {ws_s} && cargo test -q")),
+            Some("git.push")
+        );
+        let alias = root.join("aliaspkg");
+        std::fs::create_dir_all(alias.join("src")).expect("alias src");
+        std::fs::create_dir_all(alias.join(".cargo")).expect("alias cfg");
+        std::fs::write(alias.join("Cargo.toml"), package).expect("alias toml");
+        std::fs::write(alias.join("src/main.rs"), "fn main() {}\n").expect("alias main");
+        std::fs::write(
+            alias.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("alias build");
+        std::fs::write(
+            alias.join(".cargo/config.toml"),
+            "[alias]\npushy = \"run\"\nclip = \"clippy -q\"\n",
+        )
+        .expect("alias");
+        let alias_s = alias.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {alias_s} && cargo pushy -q")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {alias_s} && cargo clip")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {alias_s} && cargo nope")), None);
+        let palias = root.join("palias");
+        let pchild = palias.join("child");
+        std::fs::create_dir_all(pchild.join("src")).expect("pchild");
+        std::fs::create_dir_all(palias.join(".cargo")).expect("palias cfg");
+        std::fs::write(pchild.join("Cargo.toml"), package).expect("pchild toml");
+        std::fs::write(pchild.join("src/main.rs"), "fn main() {}\n").expect("pchild main");
+        std::fs::write(
+            pchild.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("pchild build");
+        std::fs::write(
+            palias.join(".cargo/config.toml"),
+            "[alias]\npushy = \"run\"\n",
+        )
+        .expect("parent alias");
+        let pchild_s = pchild.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {pchild_s} && cargo pushy -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            runpkg.join(".cargo/config.toml"),
+            "[target.'cfg(unix)']\nrunner = \"git push origin main\"\n[alias]\npushy = \"run\"\n",
+        )
+        .expect("runner alias");
+        std::fs::remove_file(runpkg.join("build.rs")).ok();
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo pushy -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            runpkg.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("install build");
+        let away_install = root.join("away-install");
+        std::fs::create_dir_all(away_install.join("src")).expect("away install");
+        std::fs::write(away_install.join("Cargo.toml"), package).expect("away toml");
+        std::fs::write(away_install.join("src/main.rs"), "fn main() {}\n").expect("away main");
+        std::fs::write(
+            away_install.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"echo\").arg(\"safe\").status().ok();\n}\n",
+        )
+        .expect("away build");
+        let away_install_s = away_install.display().to_string();
+        assert_eq!(
+            kind(&format!(
+                "cd {away_install_s} && cargo install --offline --path {run_s}"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo install --offline -q")),
+            None
+        );
+        std::fs::write(
+            runpkg.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"echo\").arg(\"safe\").status().ok();\n}\n",
+        )
+        .expect("quiet build");
+        assert_eq!(kind(&format!("cd {run_s} && cargo rustc -q")), None);
+        assert_eq!(kind(&format!("cd {run_s} && cargo doc -q")), None);
+        assert_eq!(
+            kind(&format!(
+                "cd {run_s} && cargo install --offline --path . -q"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo run -q")),
+            Some("git.push")
+        );
+        let bench = root.join("benchpkg");
+        std::fs::create_dir_all(bench.join("src")).expect("bench src");
+        std::fs::create_dir_all(bench.join("benches")).expect("benches");
+        std::fs::create_dir_all(bench.join(".cargo")).expect("bench cfg");
+        std::fs::write(
+            bench.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bench]]\nname = \"mark\"\nharness = false\n",
+        )
+        .expect("bench toml");
+        std::fs::write(bench.join("src/main.rs"), "fn main() {}\n").expect("bench main");
+        std::fs::write(
+            bench.join("benches/mark.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("mark");
+        let bench_s = bench.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {bench_s} && cargo bench -q")),
+            Some("git.push")
+        );
+        std::fs::write(bench.join("benches/mark.rs"), "fn main() {}\n").expect("quiet mark");
+        std::fs::write(
+            bench.join(".cargo/config.toml"),
+            "[target.'cfg(unix)']\nrunner = \"git push origin main\"\n",
+        )
+        .expect("bench runner");
+        assert_eq!(
+            kind(&format!("cd {bench_s} && cargo bench -q")),
+            Some("git.push")
+        );
+        let _ = std::fs::remove_file(bench.join(".cargo/config.toml"));
+        std::fs::write(
+            bench.join("benches/mark.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("default harness");
+        std::fs::write(bench.join("Cargo.toml"), package).expect("auto bench");
+        assert_eq!(kind(&format!("cd {bench_s} && cargo bench -q")), None);
+        std::fs::write(bench.join("Cargo.toml"), package).expect("no bench");
+        let _ = std::fs::remove_dir_all(bench.join("benches"));
+        let _ = std::fs::remove_file(bench.join(".cargo/config.toml"));
+        assert_eq!(kind(&format!("cd {bench_s} && cargo bench -q")), None);
+        let nim = root.join("run.nim");
+        std::fs::write(
+            &nim,
+            "import std/osproc\ndiscard execCmd(\"git push origin main\")\n",
+        )
+        .expect("nim");
+        let nim_s = nim.display().to_string();
+        assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim cpp -r {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim r {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim c {nim_s}")), None);
+        assert_eq!(kind(&format!("nim cpp {nim_s}")), None);
+        assert_eq!(kind(&format!("nim js -r {nim_s}")), None);
+        std::fs::write(
+            &nim,
+            "static:\n  echo staticExec(\"git push origin main\")\n",
+        )
+        .expect("static nim");
+        assert_eq!(kind(&format!("nim c {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim cpp {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
+        std::fs::write(
+            &nim,
+            "# discard execCmd(\"git push origin main\")\necho \"ok\"\n",
+        )
+        .expect("nim comment");
+        assert_eq!(kind(&format!("nim r {nim_s}")), None);
+        let proj = root.join("proj");
+        let sub = proj.join("sub");
+        std::fs::create_dir_all(&sub).expect("nim sub");
+        std::fs::write(sub.join("app.nim"), "echo \"ok\"\n").expect("app nim");
+        std::fs::write(proj.join("config.nims"), "exec \"git push origin main\"\n")
+            .expect("parent nims");
+        std::fs::write(sub.join("config.nims"), "exec \"echo safe\"\n").expect("sub nims");
+        let app_s = sub.join("app.nim").display().to_string();
+        assert_eq!(kind(&format!("nim c {app_s}")), Some("git.push"));
+        std::fs::write(
+            proj.join("config.nims"),
+            "# exec \"git push origin main\"\n",
+        )
+        .expect("quiet parent");
+        assert_eq!(kind(&format!("nim c {app_s}")), None);
+        std::fs::write(sub.join("app.nims"), "exec \"git push origin main\"\n").expect("app nims");
+        let _ = std::fs::remove_file(sub.join("config.nims"));
+        assert_eq!(kind(&format!("nim c {app_s}")), Some("git.push"));
+        let _ = std::fs::remove_file(sub.join("app.nims"));
+        std::fs::write(sub.join("project.nims"), "exec \"git push origin main\"\n")
+            .expect("project nims");
+        assert_eq!(kind(&format!("nim c {app_s}")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `cargo test` runs `#[test]` bodies in `src/lib.rs` and `tests/*.rs`.
+    /// `--lib` skips integration tests. `--test name` runs that file only.
+    /// A helper outside `#[test]` does not run. `python3 -m unittest`
+    /// runs top-level `test*.py`.
+    #[test]
+    fn cargo_and_unittest_score_the_tests_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-ctest-{}", std::process::id()));
+        let cg = root.join("cg");
+        let tests = cg.join("tests");
+        let src = cg.join("src");
+        let ut = root.join("ut");
+        let nested = ut.join("sub");
+        for dir in [&src, &tests, &ut, &nested] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        std::fs::write(
+            src.join("lib.rs"),
+            "fn unused() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n#[test]\nfn quiet() {\n    let _ = \"git push origin main\";\n}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            tests.join("push.rs"),
+            "#[test]\nfn pushes() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("push");
+        std::fs::write(
+            ut.join("test_h.py"),
+            "import os\nimport unittest\nclass H(unittest.TestCase):\n    def test_h(self):\n        os.system(\"git push origin main\")\n",
+        )
+        .expect("ut");
+        std::fs::write(
+            ut.join("check_test.py"),
+            "import os\nimport unittest\nclass H(unittest.TestCase):\n    def test_h(self):\n        os.system(\"git push origin main\")\n",
+        )
+        .expect("suf");
+        std::fs::write(
+            nested.join("test_nest.py"),
+            "import os\nimport unittest\nclass H(unittest.TestCase):\n    def test_h(self):\n        os.system(\"git push origin main\")\n",
+        )
+        .expect("nest");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let cg_s = cg.display().to_string();
+        let ut_s = ut.display().to_string();
+        let lib_only = format!("cd {cg_s} && cargo test -q --lib");
+        assert_eq!(kind(&lib_only), None, "{lib_only}");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#[test]\nfn pushes() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("lib2");
+        let cases = [
+            (
+                format!("cd {cg_s} && cargo test -q --lib"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {cg_s} && cargo test -q --test push"),
+                Some("git.push"),
+            ),
+            (format!("cd {cg_s} && cargo test -q"), Some("git.push")),
+            (
+                format!("cd {ut_s} && python3 -m unittest -q"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {ut_s} && python3 -m unittest discover -q"),
+                Some("git.push"),
+            ),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        std::fs::write(ut.join("test_h.py"), "print(\"git push origin main\")\n").expect("quiet");
+        let quiet = format!("cd {ut_s} && python3 -m unittest -q");
+        assert_eq!(kind(&quiet), None, "{quiet}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `go test ./sub` and `go test ./...` run that package.
+    /// `python3 -m doctest` runs `>>>` examples. `bundle exec rake`
+    /// runs the Rakefile. `terraform apply` runs `local-exec`.
+    /// `terraform plan` does not.
+    #[test]
+    fn package_paths_and_examples_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-paths-{}", std::process::id()));
+        let gomod = root.join("gomod");
+        let sub = gomod.join("sub");
+        let rk = root.join("rk");
+        let tf = root.join("tf");
+        for dir in [&gomod, &sub, &rk, &tf] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        std::fs::write(gomod.join("doc.go"), "package gomod\n").expect("doc");
+        std::fs::write(
+            sub.join("p_test.go"),
+            "package sub\nimport \"os/exec\"\nfunc TestP(t *testing.T) { exec.Command(\"git\", \"push\", \"origin\", \"main\").Run() }\n",
+        )
+        .expect("ptest");
+        std::fs::write(
+            root.join("body.py"),
+            "import os\ndef hidden():\n    os.system(\"git push origin main\")\n",
+        )
+        .expect("body");
+        std::fs::write(
+            root.join("ex.py"),
+            "def add():\n    \"\"\"\n    >>> import os\n    >>> os.system(\"git push origin main\")\n    \"\"\"\n",
+        )
+        .expect("ex");
+        std::fs::write(
+            rk.join("Rakefile"),
+            "task :default do\n  sh \"git push origin main\"\nend\n",
+        )
+        .expect("rake");
+        std::fs::write(
+            tf.join("main.tf"),
+            "resource \"null_resource\" \"p\" {\n  provisioner \"local-exec\" {\n    command = \"git push origin main\"\n  }\n}\n",
+        )
+        .expect("tf");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let go_s = gomod.display().to_string();
+        let rk_s = rk.display().to_string();
+        let tf_s = tf.display().to_string();
+        let root_s = root.display().to_string();
+        let cases = [
+            (format!("cd {go_s} && go test"), None),
+            (format!("cd {go_s} && go test ./sub"), Some("git.push")),
+            (format!("cd {go_s} && go test ./..."), Some("git.push")),
+            (format!("cd {root_s} && python3 -m doctest body.py"), None),
+            (
+                format!("cd {root_s} && python3 -m doctest ex.py"),
+                Some("git.push"),
+            ),
+            (format!("cd {rk_s} && bundle exec rake"), Some("git.push")),
+            (
+                format!("cd {tf_s} && terraform apply -auto-approve"),
+                Some("git.push"),
+            ),
+            (format!("cd {tf_s} && terraform plan"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `$(shell ...)` runs when make reads the file, including `make -n`.
+    /// `swift test` runs `Process` in `Tests`. `tofu apply` runs
+    /// `local-exec`.
+    #[test]
+    fn make_swift_and_tofu_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-mst-{}", std::process::id()));
+        let sw = root.join("sw").join("Tests").join("swTests");
+        let tf = root.join("tf");
+        std::fs::create_dir_all(&sw).expect("tests");
+        std::fs::create_dir_all(&tf).expect("tf");
+        std::fs::write(
+            root.join("Makefile"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("make");
+        std::fs::write(root.join("recipes.mk"), "all:\n\tgit push origin main\n").expect("recipes");
+        std::fs::write(
+            sw.join("P.swift"),
+            "import Foundation\nlet task = Process()\ntask.executableURL = URL(fileURLWithPath: \"/usr/bin/env\")\ntask.arguments = [\"git\", \"push\", \"origin\", \"main\"]\ntry? task.run()\ntask.waitUntilExit()\n",
+        )
+        .expect("swift");
+        std::fs::write(
+            tf.join("main.tf"),
+            "resource \"null_resource\" \"p\" {\n  provisioner \"local-exec\" {\n    command = \"git push origin main\"\n  }\n}\n",
+        )
+        .expect("tf");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let sw_s = root.join("sw").display().to_string();
+        let tf_s = tf.display().to_string();
+        let cases = [
+            (format!("cd {root_s} && make"), Some("git.push")),
+            (format!("cd {root_s} && make -n"), Some("git.push")),
+            (format!("make -n -f {root_s}/recipes.mk"), None),
+            (format!("cd {sw_s} && swift test -q"), Some("git.push")),
+            (
+                format!("cd {tf_s} && tofu apply -auto-approve"),
+                Some("git.push"),
+            ),
+            (format!("cd {tf_s} && tofu plan"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `make -C dir` reads the makefile in that directory. `include`
+    /// reads the named file. A makefile in the current directory does
+    /// not run when `-C` points somewhere else.
+    #[test]
+    fn make_directory_scores_the_makefile_it_reads() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-makec-{}", std::process::id()));
+        let sub = root.join("sub");
+        let inc = root.join("inc");
+        std::fs::create_dir_all(&sub).expect("sub");
+        std::fs::create_dir_all(&inc).expect("inc");
+        std::fs::write(
+            root.join("Makefile"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("parent");
+        std::fs::write(sub.join("Makefile"), "all:\n\t@true\n").expect("sub");
+        std::fs::write(
+            sub.join("extra.mk"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("extra");
+        std::fs::write(
+            inc.join("part.mk"),
+            "STAMP := $(shell git push origin main)\n",
+        )
+        .expect("part");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let wrong = format!("cd {root_s} && make -C sub");
+        assert_eq!(kind(&wrong), None, "{wrong}");
+        std::fs::write(
+            sub.join("Makefile"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("sub2");
+        std::fs::write(
+            root.join("Makefile"),
+            "include inc/part.mk\nall:\n\t@true\n",
+        )
+        .expect("include");
+        let cases = [
+            (format!("cd {root_s} && make -C sub"), Some("git.push")),
+            (
+                format!("cd {root_s} && make -C sub -f extra.mk"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && make"), Some("git.push")),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npm install`, `pnpm install`, and `bun install` run lifecycle
+    /// scripts. `npm install ./pkg` runs that directory. `bun install`
+    /// keeps running the install directory when a package name is
+    /// present. `--ignore-scripts` runs none.
+    #[test]
+    fn install_scripts_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-install-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let other = root.join("other");
+        let later = root.join("later");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::create_dir_all(&later).expect("later");
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::write(dir.join("package.json"), body).expect("package.json");
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let pkg_s = pkg.display().to_string();
+        let other_s = other.display().to_string();
+        write(
+            &pkg,
+            r#"{"scripts":{"preinstall":"git push origin main","test":"echo ok"}}"#,
+        );
+        for tool in ["npm", "pnpm", "bun"] {
+            let command = format!("cd {pkg_s} && {tool} install");
+            assert_eq!(kind(&command), Some("git.push"), "{command}");
+        }
+        write(
+            &pkg,
+            r#"{"scripts":{"preinstall":"echo a","install":"echo b","postinstall":"echo c","prepare":"git push origin main","test":"echo d"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm install")),
+            Some("git.push")
+        );
+        for tool in ["npm", "pnpm", "bun"] {
+            let command = format!("cd {pkg_s} && {tool} install --ignore-scripts");
+            assert_eq!(kind(&command), None, "{command}");
+            let command = format!("cd {pkg_s} && {tool} install --ignore-scripts=true");
+            assert_eq!(kind(&command), None, "{command}");
+        }
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm install --ignore-scripts=false")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm install lodash")), None);
+        assert_eq!(kind(&format!("cd {pkg_s} && pnpm install lodash")), None);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && bun install lodash")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"test":"git push origin main"}}"#);
+        assert_eq!(kind(&format!("cd {pkg_s} && npm install")), None);
+        write(&pkg, r#"{"scripts":{"prepare":"echo safe"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        write(&later, r#"{"scripts":{"prepare":"echo later"}}"#);
+        let cases = [
+            (
+                format!("cd {root_s} && npm install --prefix other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install --prefix=other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --prefix other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir=other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --prefix later --dir other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir later --prefix other"),
+                None,
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir later --dir other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && bun install --cwd other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && bun install --cwd=other lodash"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {pkg_s} && bun install --prefix {other_s}"),
+                None,
+            ),
+            (
+                format!("cd {root_s} && npm install ./other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install {other_s}"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install ./other ./later"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install ./other --ignore-scripts"),
+                None,
+            ),
+            (format!("cd {root_s} && npm install lodash"), None),
+            (format!("cd {root_s} && pnpm install ./other"), None),
+            (format!("cd {root_s} && bun install ./other"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && bun install ./other")),
+            Some("git.push")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npm ci` runs the lifecycle scripts when a lock file is present.
+    /// `pnpm ci` runs them too. `npm rebuild` skips `prepare` and can
+    /// target `node_modules/<name>`. `pnpm rebuild` includes `prepare`.
+    /// `bun rebuild` is not a command.
+    #[test]
+    fn ci_and_rebuild_score_the_scripts_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-ci-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let other = root.join("other");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::create_dir_all(other.join("node_modules/foo")).expect("foo");
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::write(dir.join("package.json"), body).expect("package.json");
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let pkg_s = pkg.display().to_string();
+        let other_s = other.display().to_string();
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"git push origin main","preinstall":"echo pre"}}"#,
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm ci")), None);
+        std::fs::write(pkg.join("package-lock.json"), "{}").expect("lock");
+        assert_eq!(kind(&format!("cd {pkg_s} && npm ci")), Some("git.push"));
+        std::fs::remove_file(pkg.join("package-lock.json")).expect("unlock");
+        std::fs::write(pkg.join("npm-shrinkwrap.json"), "{}").expect("shrink");
+        assert_eq!(kind(&format!("cd {pkg_s} && npm ci")), Some("git.push"));
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm ci --ignore-scripts")),
+            None
+        );
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        std::fs::write(other.join("package-lock.json"), "{}").expect("other lock");
+        assert_eq!(
+            kind(&format!("cd {root_s} && npm ci --prefix other")),
+            Some("git.push")
+        );
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"git push origin main","preinstall":"echo pre"}}"#,
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm rebuild")), None);
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"echo prep","preinstall":"git push origin main"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm rebuild")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm rebuild --ignore-scripts")),
+            None
+        );
+        write(
+            &other,
+            r#"{"scripts":{"preinstall":"git push origin main","prepare":"echo prep"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && npm rebuild --prefix other")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"preinstall":"echo app"}}"#);
+        write(
+            &other.join("node_modules/foo"),
+            r#"{"scripts":{"preinstall":"git push origin main","prepare":"echo prep"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {other_s} && npm rebuild foo")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {other_s} && npm rebuild missing")), None);
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && pnpm rebuild")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && pnpm rebuild foo")), None);
+        assert_eq!(kind(&format!("cd {pkg_s} && pnpm ci")), Some("git.push"));
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && pnpm ci --ignore-scripts")),
+            None
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"echo cwd"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {root_s} && pnpm ci --dir other")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(kind(&format!("cd {pkg_s} && bun rebuild")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `pack` runs `prepare`, `prepack`, and `postpack`. `version`
+    /// runs the version scripts only when a version is given.
+    /// `npm publish` also runs `prepublishOnly`. `pnpm publish` runs
+    /// the publish scripts. `npm pack` and `npm publish` ignore
+    /// `--prefix`. `npm version` uses it.
+    #[test]
+    fn pack_and_version_score_the_scripts_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-pack-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let other = root.join("other");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::create_dir_all(&other).expect("other");
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::write(dir.join("package.json"), body).expect("package.json");
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let pkg_s = pkg.display().to_string();
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"echo other"}}"#);
+        for command in [
+            format!("cd {pkg_s} && npm pack"),
+            format!("cd {pkg_s} && pnpm pack"),
+            format!("cd {pkg_s} && bun pm pack"),
+            format!("cd {pkg_s} && npm publish --dry-run"),
+            format!("cd {root_s} && pnpm pack --dir pkg"),
+            format!("cd {root_s} && bun pm pack --cwd pkg"),
+        ] {
+            assert_eq!(kind(&command), Some("git.push"), "{command}");
+        }
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm pack --prefix {}",
+                other.display()
+            )),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"echo cwd"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm pack --prefix other")),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm publish --dry-run --prefix other"
+            )),
+            None
+        );
+        write(
+            &pkg,
+            r#"{"scripts":{"prepublishOnly":"git push origin main","prepare":"echo prep"}}"#,
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm pack")), None);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm publish --dry-run")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"publish":"git push origin main"}}"#);
+        assert_eq!(kind(&format!("cd {pkg_s} && npm publish --dry-run")), None);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && pnpm publish --dry-run")),
+            Some("git.push")
+        );
+        write(&other, r#"{"scripts":{"publish":"git push origin main"}}"#);
+        write(&pkg, r#"{"scripts":{"publish":"echo cwd"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && pnpm publish --dry-run --dir other"
+            )),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm version patch --no-git-tag-version"
+            )),
+            None
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm version")), None);
+        write(&pkg, r#"{"scripts":{"preversion":"git push origin main"}}"#);
+        write(&other, r#"{"scripts":{"preversion":"echo other"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {pkg_s} && npm version patch --no-git-tag-version"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm version patch --prefix other --no-git-tag-version"
+            )),
+            None
+        );
+        write(
+            &other,
+            r#"{"scripts":{"preversion":"git push origin main"}}"#,
+        );
+        write(&pkg, r#"{"scripts":{"preversion":"echo cwd"}}"#);
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm version patch --prefix other --no-git-tag-version"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && pnpm version patch --dir other")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && bun pm version patch --cwd other")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && bun pm version")), None);
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"git push origin main","preversion":"git push origin main","prepublishOnly":"git push origin main","publish":"git push origin main"}}"#,
+        );
+        for command in [
+            format!("cd {pkg_s} && npm pack --ignore-scripts"),
+            format!("cd {pkg_s} && npm publish --dry-run --ignore-scripts"),
+            format!("cd {pkg_s} && pnpm publish --dry-run --ignore-scripts"),
+            format!("cd {pkg_s} && bun pm pack --ignore-scripts"),
+            format!("cd {pkg_s} && npm version patch --ignore-scripts"),
+        ] {
+            assert_eq!(kind(&command), None, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npm explore pkg -- command` runs that command in the installed
+    /// package. A relative script is read there, not from the working
+    /// directory. A missing package runs nothing.
+    #[test]
+    fn npm_explore_scores_the_command_it_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-explore-{}", std::process::id()));
+        let app = root.join("app");
+        let pkg = app.join("node_modules/p");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::write(app.join("run.sh"), "git push origin main\n").expect("decoy");
+        std::fs::write(pkg.join("run.sh"), "echo safe\n").expect("safe");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let app_s = app.display().to_string();
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm explore p -- git push origin main"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {app_s} && npm explore missing -- git push origin main"
+            )),
+            None
+        );
+        assert_eq!(kind(&format!("cd {app_s} && npm explore p")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && npm explore p -- ./run.sh")),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {app_s} && npm explore p -- git push origin main"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm explore --prefix app p -- git push origin main"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(pkg.join("run.sh"), "git push origin main\n").expect("push");
+        std::fs::write(app.join("run.sh"), "echo decoy\n").expect("decoy2");
+        assert_eq!(
+            kind(&format!("cd {app_s} && npm explore p -- ./run.sh")),
+            Some("git.push")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `mvn <phase>` runs antrun exec bound to that phase or earlier.
+    /// `sbt` loads `build.sbt` unless it is version-only. `brew ruby`
+    /// runs `system`. `puts` does not.
+    #[test]
+    fn build_tools_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-build-{}", std::process::id()));
+        let app = root.join("app");
+        let sub = root.join("sub");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&app).expect("app");
+        std::fs::create_dir_all(&sub).expect("sub");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let app_s = app.display().to_string();
+        let pom = |early: &str, late: &str| {
+            format!(
+                r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution><execution><id>l</id><phase>package</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="{late}"/></exec></target></configuration></execution></executions></plugin></plugins></build><profiles><profile><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>p</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="{early}-profile"/></exec></target></configuration></execution></executions></plugin></plugins></build></profile></profiles></project>"#,
+                late = late,
+                early = early
+            )
+        };
+        std::fs::write(app.join("pom.xml"), pom("early", "later")).expect("pom");
+        std::fs::write(
+            sub.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>s</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("sub pom");
+        std::fs::write(root.join("pom.xml"), pom("root", "root")).expect("root pom");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q validate")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {app_s} && mvn -v")), None);
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="early"/></exec></target></configuration></execution><execution><id>l</id><phase>package</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("late pom");
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q validate")), None);
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q compile")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q package")),
+            Some("git.push")
+        );
+        std::fs::write(root.join("pom.xml"), r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>r</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="root"/></exec></target></configuration></execution></executions></plugin></plugins></build></project>"#).expect("root echo");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mvn -q -f sub/pom.xml validate")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mvn -q validate")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>c</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec command="git push origin main"/></target></configuration></execution></executions></plugin><plugin><artifactId>exec-maven-plugin</artifactId><executions><execution><id>x</id><phase>package</phase><goals><goal>exec</goal></goals><configuration><executable>echo</executable><arguments><argument>later</argument></arguments></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("command pom");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q validate")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q package")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>exec-maven-plugin</artifactId><executions><execution><id>x</id><phase>validate</phase><goals><goal>exec</goal></goals><configuration><executable>git</executable><arguments><argument>push</argument><argument>origin</argument><argument>main</argument></arguments></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("exec pom");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q validate")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind("brew ruby -e '`git push origin main`'"),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build><profiles><profile><id>x</id><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>p</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></profile></profiles></project>"#,
+        )
+        .expect("profile pom");
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q validate")), None);
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"git push origin main\".!\nextra := { \"echo safe\".! }\n",
+        )
+        .expect("sbt");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -V")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"echo safe\".!\nextra := { \"git push origin main\".! }\n",
+        )
+        .expect("sbt2");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch extra")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind("brew ruby -e 'system(\"git push origin main\")'"),
+            Some("git.push")
+        );
+        assert_eq!(kind("brew ruby -e 'puts \"git push origin main\"'"), None);
+        std::fs::write(app.join("push.rb"), "system(\"git push origin main\")\n").expect("rb");
+        std::fs::write(app.join("puts.rb"), "puts \"git push origin main\"\n").expect("puts");
+        assert_eq!(
+            kind(&format!("cd {app_s} && brew ruby push.rb")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {app_s} && brew ruby puts.rb")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><configuration><executable>git</executable><arguments><argument>push</argument><argument>origin</argument><argument>main</argument></arguments></configuration></plugin></plugins></build></project>"#,
+        )
+        .expect("direct exec");
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q validate")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q exec:exec")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {app_s} && mvn -q org.codehaus.mojo:exec-maven-plugin:3.5.0:exec"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = Process(\"git push origin main\").!\n",
+        )
+        .expect("process");
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = Process(Seq(\"git\", \"push\", \"origin\", \"main\")).!\n",
+        )
+        .expect("seq");
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "extra := {\n  Process(\"git push origin main\").!\n}\n",
+        )
+        .expect("task process");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch extra")),
+            Some("git.push")
+        );
+        let project = root.join("Probe.xcodeproj");
+        std::fs::create_dir_all(&project).expect("xcodeproj");
+        std::fs::write(
+            project.join("project.pbxproj"),
+            r#"// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA00000000000000000000A1 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B1, );
+			name = Probe;
+		};
+		AA00000000000000000000A4 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B2, );
+			name = Other;
+		};
+		AA00000000000000000000A2 = {
+			isa = PBXProject;
+			targets = ( AA00000000000000000000A1, AA00000000000000000000A4, );
+		};
+		AA00000000000000000000B1 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "git push origin main";
+		};
+		AA00000000000000000000B2 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "echo other";
+		};
+	};
+	rootObject = AA00000000000000000000A2;
+}
+"#,
+        )
+        .expect("pbxproj");
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe build"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Other build"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe clean"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe test"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && xcodebuild -project Probe.xcodeproj -target Probe archive"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(kind("xcodebuild -version"), None);
+        std::fs::write(
+            project.join("project.pbxproj"),
+            r#"// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA00000000000000000000A1 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B1, );
+			name = Probe;
+		};
+		AA00000000000000000000A2 = {
+			isa = PBXProject;
+			targets = ( AA00000000000000000000A1, );
+		};
+		AA00000000000000000000B1 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "sh run.sh";
+		};
+	};
+	rootObject = AA00000000000000000000A2;
+}
+"#,
+        )
+        .expect("relative pbxproj");
+        std::fs::write(root.join("run.sh"), "git push origin main\n").expect("project script");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::fs::write(elsewhere.join("run.sh"), "echo decoy\n").expect("decoy script");
+        let project_s = project.display().to_string();
+        let elsewhere_s = elsewhere.display().to_string();
+        assert_eq!(
+            kind(&format!(
+                "cd {elsewhere_s} && xcodebuild -project {project_s} -target Probe build"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(root.join("run.sh"), "echo project\n").expect("safe project");
+        std::fs::write(elsewhere.join("run.sh"), "git push origin main\n").expect("decoy push");
+        assert_eq!(
+            kind(&format!(
+                "cd {elsewhere_s} && xcodebuild -project {project_s} -target Probe build"
+            )),
+            None
+        );
+        std::fs::write(
+            project.join("project.pbxproj"),
+            r#"// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA00000000000000000000A1 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B1, );
+			name = Probe;
+		};
+		AA00000000000000000000A2 = {
+			isa = PBXProject;
+			targets = ( AA00000000000000000000A1, );
+		};
+		AA00000000000000000000B1 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "sh \"${SRCROOT}/run.sh\"";
+		};
+	};
+	rootObject = AA00000000000000000000A2;
+}
+"#,
+        )
+        .expect("srcroot pbxproj");
+        std::fs::write(root.join("run.sh"), "git push origin main\n").expect("srcroot script");
+        assert_eq!(
+            kind(&format!(
+                "cd {elsewhere_s} && xcodebuild -project {project_s} -target Probe build"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"git push origin main\" !\n",
+        )
+        .expect("bang");
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"git push origin main\" != \"no\"\n",
+        )
+        .expect("not equal");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `mix cmd` runs the following command. `mix name` runs an alias
+    /// in `mix.exs` whose value starts with `cmd `.
+    #[test]
+    fn mix_commands_score_the_shell_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-mix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", aliases: [go: \"cmd git push origin main\", nope: \"cmd echo safe\"]]\n  end\nend\n",
+        )
+        .expect("mix.exs");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix cmd git push origin main")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix cmd")), None);
+        assert_eq!(kind(&format!("cd {root_s} && mix go")), Some("git.push"));
+        assert_eq!(kind(&format!("cd {root_s} && mix nope")), None);
+        assert_eq!(kind(&format!("cd {root_s} && mix missing")), None);
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", aliases: [go: [\"cmd git push origin main\"]]]\n  end\nend\n",
+        )
+        .expect("list alias");
+        assert_eq!(kind(&format!("cd {root_s} && mix go")), Some("git.push"));
+        std::fs::write(
+            root.join("tool.dart"),
+            "import 'dart:io';\nvoid main() { Process.runSync('git', ['push', 'origin', 'main']); }\n",
+        )
+        .expect("dart");
+        assert_eq!(
+            kind(&format!("cd {root_s} && dart run tool.dart")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && dart tool.dart")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && dart pub run tool.dart")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("tool.dart"),
+            "import 'dart:io';\nvoid main() { Process.runSync('git push origin main'); }\n",
+        )
+        .expect("one string");
+        assert_eq!(kind(&format!("cd {root_s} && dart run tool.dart")), None);
+        std::fs::write(
+            root.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"echo\", [\"safe\"])\n  end\nend\n",
+        )
+        .expect("top mix");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix -v")), None);
+        assert_eq!(kind(&format!("cd {root_s} && mix --version")), None);
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"echo\", [\"nope\"])\n  end\nend\n",
+        )
+        .expect("project mix");
+        assert_eq!(kind(&format!("cd {root_s} && mix help")), Some("git.push"));
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n  end\nend\n",
+        )
+        .expect("unused mix");
+        assert_eq!(kind(&format!("cd {root_s} && mix compile")), None);
+        std::fs::create_dir_all(root.join("config")).expect("config");
+        std::fs::write(
+            root.join("config/runtime.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("runtime");
+        assert_eq!(kind(&format!("cd {root_s} && mix compile")), None);
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix run -e '1'")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix test")), Some("git.push"));
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("quiet mix");
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nSystem.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("config");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix -v")), None);
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"extra.exs\"\n",
+        )
+        .expect("import literal");
+        std::fs::write(
+            root.join("config/extra.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("extra");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"#{config_env()}.exs\"\n",
+        )
+        .expect("import env");
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "System.cmd(\"echo\", [\"dev\"])\n",
+        )
+        .expect("dev");
+        std::fs::write(
+            root.join("config/test.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("test exs");
+        assert_eq!(kind(&format!("cd {root_s} && mix compile")), None);
+        assert_eq!(
+            kind(&format!("cd {root_s} && MIX_ENV=test mix compile")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"#{Mix.env()}.exs\"\n",
+        )
+        .expect("import mix env");
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("dev push");
+        assert_eq!(kind(&format!("cd {root_s} && mix help")), Some("git.push"));
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"dev.exs\"\n",
+        )
+        .expect("nest config");
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "import Config\nimport_config \"local.exs\"\n",
+        )
+        .expect("nest dev");
+        std::fs::write(
+            root.join("config/local.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("local");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "import Config\nSystem.cmd(\"git\", [\"push\", \"origin\", \"main\"])\nimport_config \"config.exs\"\n",
+        )
+        .expect("cycle");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        let app = root.join("app");
+        let other = root.join("other");
+        std::fs::create_dir_all(&app).expect("app");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::write(
+            other.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("other");
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", deps: [{:other, path: \"../other\"}]]\n  end\nend\n",
+        )
+        .expect("app");
+        let app_s = app.display().to_string();
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), Some("git.push"));
+        assert_eq!(
+            kind(&format!("cd {app_s} && mix compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {app_s} && mix -v")), None);
+        std::fs::write(
+            other.join("mix.exs"),
+            "defmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n  end\nend\n",
+        )
+        .expect("other unused");
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), None);
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    [path: \"../other\"]\n  end\nend\n",
+        )
+        .expect("unused path");
+        std::fs::write(
+            other.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("other top");
+        assert_eq!(kind(&format!("cd {app_s} && mix compile")), None);
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    # path: \"../other\"\n    [app: :p, version: \"0.0.0\", mypath: \"../other\"]\n  end\nend\n",
+        )
+        .expect("comment path");
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), None);
+        let deep = root.join("deep");
+        std::fs::create_dir_all(&deep).expect("deep");
+        std::fs::write(
+            deep.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule D.MixProject do\n  use Mix.Project\n  def project do\n    [app: :d, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("deep");
+        std::fs::write(
+            other.join("mix.exs"),
+            "defmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\", deps: [{:deep, path: \"../deep\"}]]\n  end\nend\n",
+        )
+        .expect("other nest");
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", deps: [{:other, path: \"../other\"}]]\n  end\nend\n",
+        )
+        .expect("app nest");
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), Some("git.push"));
+        assert_eq!(kind(&format!("cd {app_s} && mix -v")), None);
+        std::fs::write(
+            other.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\", deps: [{:app, path: \"../app\"}]]\n  end\nend\n",
+        )
+        .expect("cycle dep");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mix compile")),
+            Some("git.push")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The host ran these interpreters and package scripts. A file that
     /// only prints the same words does not run them. A missing file
     /// stays unmatched. `python3 -c` does not read a redirected file.
@@ -21584,8 +31778,135 @@ mod tests {
             "system(\"git\", \"push\", \"origin\", \"main\")\n",
         );
         write("run.awk", "BEGIN { system(\"git push origin main\") }\n");
+        write("push.awk", "BEGIN { system(\"git push origin main\") }\n");
+        write("push.sh", "git push origin main\n");
+        write("Makefile", "push:\n\tgit push origin main\n");
         write("print.awk", "BEGIN { print \"git push origin main\" }\n");
         write("run.scpt", "do shell script \"git push origin main\"\n");
+        write("mod.py", "import os\nos.system(\"git push origin main\")\n");
+        std::fs::create_dir_all(root.join("pkg")).expect("pkg");
+        write(
+            "pkg/__main__.py",
+            "import os\nos.system(\"git push origin main\")\n",
+        );
+        write("Need.pm", "system(\"git push origin main\");\n1;\n");
+        write("run.exp", "spawn git push origin main\nexpect eof\n");
+        write("eof.exp", "expect eof\n");
+        write("run.tcl", "exec git push origin main\n");
+        write("puts.tcl", "puts [exec git push origin main]\n");
+        write("hello.tcl", "puts hello\n");
+        write("args.tcl", "puts hello exec git push origin main\n");
+        write("push.csh", "git push origin main\n");
+        write(
+            "main.go",
+            "package main\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\nfunc main() {\n\tcmd := exec.Command(\"git\", \"push\", \"origin\", \"main\")\n\tcmd.Stdout = os.Stdout\n\t_ = cmd.Run()\n}\n",
+        );
+        write(
+            "print.go",
+            "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"git push origin main\") }\n",
+        );
+        write(
+            "run.cmake",
+            "execute_process(COMMAND git push origin main)\n",
+        );
+        write("quiet.cmake", "message(STATUS \"git push origin main\")\n");
+        let app = root.join("app/src");
+        std::fs::create_dir_all(&app).expect("app");
+        std::fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("toml");
+        std::fs::write(
+            app.join("main.rs"),
+            "fn main() {\n    let _ = std::process::Command::new(\"git\")\n        .args([\"push\", \"origin\", \"main\"])\n        .output();\n}\n",
+        )
+        .expect("cargo main");
+        write(
+            "Main.java",
+            "public class Main {\n  public static void main(String[] args) throws Exception {\n    Process p = new ProcessBuilder(\"git\", \"push\", \"origin\", \"main\").inheritIO().start();\n    p.waitFor();\n  }\n}\n",
+        );
+        write(
+            "run.kts",
+            "ProcessBuilder(\"git\", \"push\", \"origin\", \"main\").inheritIO().start().waitFor()\n",
+        );
+        std::fs::create_dir_all(root.join("pkg")).expect("pkg");
+        std::fs::create_dir_all(root.join("buntest")).expect("buntest");
+        std::fs::create_dir_all(root.join("bunquiet")).expect("bunquiet");
+        std::fs::write(
+            root.join("pkg/package.json"),
+            "{\"scripts\":{\"pretest\":\"rm -rf /tmp/x\",\"test\":\"git push origin main\"}}",
+        )
+        .expect("pkg json");
+        std::fs::write(
+            root.join("buntest/push.test.js"),
+            "require(\"child_process\").execSync(\"git push origin main\");\n",
+        )
+        .expect("bun test file");
+        std::fs::write(
+            root.join("buntest/other.js"),
+            "require(\"child_process\").execSync(\"rm -rf /tmp/x\");\n",
+        )
+        .expect("bun other");
+        std::fs::write(
+            root.join("bunquiet/other.js"),
+            "require(\"child_process\").execSync(\"git push origin main\");\n",
+        )
+        .expect("bun quiet");
+        write("run.m", "system(\"git push origin main\");\n");
+        write("quiet.m", "disp(1);\n");
+        write("run.jl", "run(`git push origin main`)\n");
+        write("quiet.jl", "println(1)\n");
+        write(
+            "run.exs",
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        );
+        write("quiet.exs", "IO.puts(\"git push origin main\")\n");
+        write("cmds.sql", ".shell git push origin main\n");
+        write("quiet.sql", "select 1;\n");
+        write(
+            "run.coffee",
+            "child_process = require('child_process')\nchild_process.execSync('git push origin main', {stdio: 'inherit'})\n",
+        );
+        write(
+            "Run.hs",
+            "import System.Process\nmain = do\n  out <- readCreateProcess (proc \"git\" [\"push\", \"origin\", \"main\"]) \"\"\n  putStr out\n",
+        );
+        write("quiet.hs", "main = putStrLn \"git push origin main\"\n");
+        write("push.lua", "os.execute(\"git push origin main\")\n");
+        write("push.rb", "system(\"git push origin main\")\n");
+        write(
+            "push.js",
+            "require(\"child_process\").execSync(\"git push origin main\", {stdio:\"inherit\"});\n",
+        );
+        write(
+            "push.py",
+            "import os\nos.system(\"git push origin main\")\n",
+        );
+        write("push.pl", "system(\"git push origin main\");\n");
+        write("Push.pm", "system(\"git push origin main\");\n1;\n");
+        write("push.php", "<?php\nsystem(\"git push origin main\");\n");
+        write("push.R", "system(\"git push origin main\")\n");
+        write("push.jl", "run(`git push origin main`)\n");
+        write("push.m", "system(\"git push origin main\");\n");
+        std::fs::create_dir_all(root.join("empty-lib")).expect("empty-lib");
+        std::fs::create_dir_all(root.join("gorun")).expect("gorun");
+        std::fs::write(
+            root.join("gorun/main.go"),
+            "package main\nimport \"os/exec\"\nfunc main() {\n\t_ = exec.Command(\"git\", \"push\", \"origin\", \"main\").Run()\n}\n",
+        )
+        .expect("gorun");
+        std::fs::create_dir_all(root.join("gogen")).expect("gogen");
+        std::fs::write(
+            root.join("gogen/main.go"),
+            "package main\n//go:generate git push origin main\nfunc main() {}\n",
+        )
+        .expect("gogen");
+        std::fs::write(
+            root.join("gogen/quiet.go"),
+            "package main\nfunc main() { println(\"//go:generate git push origin main\") }\n",
+        )
+        .expect("gogen quiet");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -21641,6 +31962,118 @@ mod tests {
             "awk 'BEGIN { system(\"git push origin main\") }'".to_string(),
             format!("osascript {show}/run.scpt"),
             "osascript -e 'do shell script \"git push origin main\"'".to_string(),
+            format!("bun {show}/preload.js"),
+            format!("bun run {show}/preload.js"),
+            format!("node --import {show}/preload.js -e '0'"),
+            format!("perl -I {show} -MNeed -e 0"),
+            format!("expect {show}/run.exp"),
+            "expect -c 'spawn git push origin main'".to_string(),
+            format!("tclsh {show}/run.tcl"),
+            format!("tclsh {show}/puts.tcl"),
+            "csh -c 'git push origin main'".to_string(),
+            "tcsh -c 'git push origin main'".to_string(),
+            format!("csh {show}/push.csh"),
+            format!("tcsh {show}/push.csh"),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"yes\")'"
+                .to_string(),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"False\")'"
+                .to_string(),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"0\")'"
+                .to_string(),
+            "lua -e 'os.execute(\"git push origin main\")'".to_string(),
+            "R --vanilla -e 'system(\"git push origin main\")'".to_string(),
+            "Rscript --vanilla -e 'system(\"git push origin main\")'".to_string(),
+            format!("awk -f{show}/run.awk"),
+            format!("just -f {show}/justfile push"),
+            format!("cd {show}/empty-lib && just -f ../justfile push"),
+            format!("cd {show}/empty-lib && cmake -P ../run.cmake"),
+            format!("cd {show}/empty-lib && swift ../run.swift"),
+            format!("cd {show}/empty-lib && kotlinc -script ../run.kts"),
+            format!("cd {show}/empty-lib && expect ../run.exp"),
+            format!("cd {show}/empty-lib && bun ../preload.js"),
+            format!("cd {show}/empty-lib && go run ../gorun/main.go"),
+            format!("cd {show}/empty-lib && coffee ../run.coffee"),
+            format!("cd {show}/empty-lib && runghc ../Run.hs"),
+            format!("cd {show}/empty-lib && uv run --no-project ../push.py"),
+            format!("cd {show}/empty-lib && julia --startup-file=no ../push.jl"),
+            format!("cd {show}/empty-lib && elixir ../run.exs"),
+            format!("cd {show}/empty-lib && osascript ../run.scpt"),
+            "sqlite3 :memory: '.shell git push origin main'".to_string(),
+            "octave --quiet --eval 'system(\"git push origin main\");'".to_string(),
+            "julia --startup-file=no -e 'run(`git push origin main`)'".to_string(),
+            "elixir -e 'System.cmd(\"git\", [\"push\", \"origin\", \"main\"])'".to_string(),
+            "elixir -e 'System.shell(\"git push origin main\")'".to_string(),
+            "erl -noshell -eval 'os:cmd(\"git push origin main\"), halt().'".to_string(),
+            format!("go run {show}/main.go"),
+            format!("cmake -P {show}/run.cmake"),
+            format!("cargo run --quiet --manifest-path {show}/app/Cargo.toml"),
+            format!("cd {show} && javac Main.java && java Main"),
+            format!("cd {show}/pkg && node --run test"),
+            format!("cd {show}/buntest && bun test"),
+            format!("kotlinc -script {show}/run.kts"),
+            "ghc -e 'System.Process.system \"git push origin main\"'".to_string(),
+            format!("cd {show} && lua -l push -e '0'"),
+            format!("cd {show} && lua -lpush -e '0'"),
+            format!("cd {show} && lua -e 'dofile(\"push.lua\")'"),
+            format!("cd {show} && ruby -e 'load \"push.rb\"'"),
+            format!("cd {show} && node -e 'require(\"./push.js\")'"),
+            format!("cd {show} && python3 -c 'exec(open(\"push.py\").read())'"),
+            format!("cd {show} && perl -e 'do \"./push.pl\"'"),
+            format!("cd {show} && python3 -c 'import push'"),
+            format!("cd {show} && ruby -e 'require \"./push.rb\"'"),
+            format!("cd {show} && php -r 'include \"push.php\";'"),
+            format!("cd {show} && perl -e 'require \"./push.pl\";'"),
+            format!("cd {show} && python3 -c 'from push import os'"),
+            format!("cd {show} && php -r 'require \"push.php\";'"),
+            format!("cd {show} && ruby -e 'require_relative \"push.rb\"'"),
+            format!("cd {show} && R --vanilla -e 'source(\"push.R\")'"),
+            format!("cd {show} && julia --startup-file=no -e 'include(\"push.jl\")'"),
+            format!("cd {show} && python3 -c 'import importlib; importlib.import_module(\"push\")'"),
+            format!("cd {show} && python3 -c 'import runpy; runpy.run_path(\"push.py\")'"),
+            format!("cd {show} && php -r 'include_once \"push.php\";'"),
+            format!("cd {show} && php -r 'require_once \"push.php\";'"),
+            format!("cd {show} && octave --quiet --eval 'source(\"push.m\");'"),
+            format!("cd {show}/gogen && go generate"),
+            format!("cd {show} && RUBYOPT='-r./push.rb' ruby -e '0'"),
+            format!("cd {show} && NODE_OPTIONS='--require ./push.js' node -e '0'"),
+            format!("cd {show} && PERL5OPT='-I. -MPush' perl -e '0'"),
+            format!("cd {show} && PERL5LIB=. perl -MPush -e 0"),
+            format!("cd {show}/empty-lib && perl -I.. -MPush -e 0"),
+            format!("cd {show}/empty-lib && ruby -I.. -e 'require \"push\"'"),
+            format!("cd {show}/empty-lib && AWKPATH=.. awk -f push.awk"),
+            format!("cd {show}/empty-lib && bash ../push.sh"),
+            format!("cd {show}/empty-lib && sh ../push.sh"),
+            format!("cd {show}/empty-lib && awk -f ../push.awk"),
+            format!("cd {show}/empty-lib && make -f ../Makefile push"),
+            format!("cd {show}/empty-lib && ruby -r../push.rb -e 0"),
+            format!("cd {show}/empty-lib && lua ../push.lua"),
+            format!("cd {show}/empty-lib && perl ../push.pl"),
+            format!("cd {show}/empty-lib && python3 ../push.py"),
+            format!("cd {show}/empty-lib && R_PROFILE_USER=../push.R R --no-save -e '1'"),
+            format!("PYTHONPATH='{show}' python3 -c 'import push'"),
+            format!("RUBYLIB='{show}' ruby -e 'require \"push\"'"),
+            format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l push -e '0'"),
+            format!("cd {show}/empty-lib && PYTHONPATH='{show}' python3 -m push"),
+            format!("cd {show}/empty-lib && NODE_PATH='{show}' node -e 'require(\"push\")'"),
+            format!(
+                "cd {show}/empty-lib && php -d include_path='{show}' -r 'include \"push.php\";'"
+            ),
+            format!(
+                "cd {show} && python3 -c 'exec(compile(open(\"push.py\").read(), \"push.py\", \"exec\"))'"
+            ),
+            "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
+            format!("coffee {show}/run.coffee"),
+            format!("runghc {show}/Run.hs"),
+            format!("runhaskell {show}/Run.hs"),
+            "ghci -e 'System.Process.system \"git push origin main\"' -e ':quit'".to_string(),
+            "mix run --no-mix-exs -e 'System.cmd(\"git\", [\"push\", \"origin\", \"main\"], into: IO.stream(:stdio, :line))'".to_string(),
+            "clj -M -e '(let [p (.exec (Runtime/getRuntime) \"git push origin main\")] (println 1))'".to_string(),
+            format!("octave --quiet {show}/run.m"),
+            format!("julia --startup-file=no {show}/run.jl"),
+            format!("elixir {show}/run.exs"),
+            format!("sqlite3 :memory: '.read {show}/cmds.sql'"),
+            "osascript -l JavaScript -e '$.system(\"git push origin main\")'".to_string(),
+            "sbcl --noinform --non-interactive --eval '(sb-ext:run-program \"git\" (list \"push\" \"origin\" \"main\") :search t :output *standard-output*)' --quit".to_string(),
         ];
         for command in &review {
             assert_eq!(kind(command), Some("git.push"), "{command}");
@@ -21666,6 +32099,84 @@ mod tests {
             "osascript -e 'display dialog \"git push origin main\"'".to_string(),
             format!("ruby -r {show}/missing.rb -e '0'"),
             "node -e '0'".to_string(),
+            format!("expect {show}/eof.exp"),
+            "expect -c 'expect eof'".to_string(),
+            format!("tclsh {show}/hello.tcl"),
+            format!("tclsh {show}/args.tcl"),
+            "perl -MNeed -e 0".to_string(),
+            "bun run test".to_string(),
+            "csh -c 'echo hi'".to_string(),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"\")'"
+                .to_string(),
+            "lua -e 'print(1)'".to_string(),
+            "R --vanilla -e 'print(1)'".to_string(),
+            "sqlite3 :memory: 'select 1'".to_string(),
+            "octave --quiet --eval 'disp(1)'".to_string(),
+            "julia --startup-file=no -e 'println(1)'".to_string(),
+            "elixir -e 'IO.puts(\"git push origin main\")'".to_string(),
+            "erl -noshell -eval 'halt().'".to_string(),
+            format!("awk -f{show}/print.awk"),
+            format!("just -f {show}/justfile absent"),
+            format!("cd {show}/empty-lib && just -f ../missing.just push"),
+            format!("cd {show}/empty-lib && cmake -P ../missing.cmake"),
+            format!("cd {show}/empty-lib && swift ../missing.swift"),
+            format!("cd {show}/empty-lib && expect ../missing.exp"),
+            format!("cd {show}/empty-lib && coffee ../missing.coffee"),
+            format!("cd {show}/empty-lib && osascript ../missing.scpt"),
+            format!("go run {show}/print.go"),
+            format!("cmake -P {show}/quiet.cmake"),
+            format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
+            format!("cd {show}/bunquiet && bun test"),
+            format!("cd {show}/pkg && node --run absent"),
+            format!("cd {show} && java Missing"),
+            format!("cd {show} && lua -l missing -e '0'"),
+            format!("cd {show} && lua -e 'dofile(\"missing.lua\")'"),
+            format!("cd {show} && ruby -e 'print 1'"),
+            format!("cd {show} && node -e 'require(\"fs\")'"),
+            format!("cd {show} && python3 -c 'open(\"push.py\").read()'"),
+            format!("cd {show} && perl -e 'do \"push.pl\"'"),
+            format!("cd {show} && python3 -c 'import os'"),
+            format!("cd {show} && ruby -e 'require \"json\"'"),
+            format!("cd {show} && php -r 'echo 1;'"),
+            format!("cd {show} && perl -e 'require \"push.pl\";'"),
+            format!("cd {show} && python3 -c 'from missing import os'"),
+            format!("cd {show} && julia --startup-file=no -e 'include(\"quiet.jl\")'"),
+            format!(
+                "cd {show} && python3 -c 'import importlib; importlib.import_module(\"os.path\")'"
+            ),
+            format!("cd {show}/gogen && go build"),
+            format!("cd {show} && RUBYOPT='-r./missing.rb' ruby -e '0'"),
+            format!("cd {show} && NODE_OPTIONS='--require ./missing.js' node -e '0'"),
+            format!("cd {show} && PERL5OPT='-I. -MMissing' perl -e '0'"),
+            format!("cd {show} && PERL5LIB=. perl -MMissing -e 0"),
+            format!("cd {show}/empty-lib && perl -I.. -MMissing -e 0"),
+            format!("cd {show}/empty-lib && ruby -I.. -e 'require \"missing\"'"),
+            format!("cd {show}/empty-lib && AWKPATH=.. awk -f missing.awk"),
+            format!("cd {show}/empty-lib && bash ../missing.sh"),
+            format!("cd {show}/empty-lib && make -n -f ../Makefile push"),
+            format!("cd {show}/empty-lib && lua ../missing.lua"),
+            format!("cd {show}/empty-lib && R_PROFILE_USER=../push.R R --vanilla --no-save -e '1'"),
+            format!("PYTHONPATH='{show}/empty-lib' python3 -c 'import push'"),
+            format!("RUBYLIB='{show}/empty-lib' ruby -e 'require \"push\"'"),
+            format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l missing -e '0'"),
+            format!("cd {show}/empty-lib && PYTHONPATH='{show}/empty-lib' python3 -m push"),
+            format!(
+                "cd {show}/empty-lib && NODE_PATH='{show}/empty-lib' node -e 'require(\"push\")'"
+            ),
+            format!(
+                "cd {show}/empty-lib && php -d include_path='{show}/empty-lib' -r 'include \"missing.php\";'"
+            ),
+            "swift -e 'print(1)'".to_string(),
+            format!("coffee -c {show}/run.coffee"),
+            format!("runghc {show}/quiet.hs"),
+            "ghci -e '1'".to_string(),
+            "mix -e 'System.cmd(\"git\", [\"push\", \"origin\", \"main\"])'".to_string(),
+            "clj -M -e '(println \"git push origin main\")'".to_string(),
+            format!("octave --quiet {show}/quiet.m"),
+            format!("julia --startup-file=no {show}/quiet.jl"),
+            format!("elixir {show}/quiet.exs"),
+            format!("sqlite3 :memory: '.read {show}/quiet.sql'"),
+            "osascript -l JavaScript -e '1'".to_string(),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
@@ -21675,6 +32186,9 @@ mod tests {
         assert_eq!(kind("pnpm test"), Some("git.push"));
         assert_eq!(kind("pnpm run unused"), Some("git.push"));
         assert_eq!(kind("bun run test"), Some("git.push"));
+        assert_eq!(kind("python3 -m mod"), Some("git.push"));
+        assert_eq!(kind("python3 -m pkg"), Some("git.push"));
+        assert_eq!(kind("python3 -m missingmod"), None);
         std::env::set_current_dir(previous).expect("back");
         let _ = std::fs::remove_dir_all(&root);
     }
