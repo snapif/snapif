@@ -4849,6 +4849,7 @@ struct GitBindings {
     cleans: Vec<(String, String)>,
     smudges: Vec<(String, String)>,
     aliases: Vec<(String, String)>,
+    hooks: Option<String>,
 }
 
 struct GitKey {
@@ -4873,6 +4874,9 @@ impl GitBindings {
             ("credential", _, "helper") => note_credential_helper(&mut self.helpers, value),
             ("core", None, "sshcommand") => {
                 self.ssh = Some(strip_bang(value).to_string());
+            }
+            ("core", None, "hookspath") => {
+                self.hooks = Some(value.to_string());
             }
             ("diff", None, "external") => {
                 self.external_diff = Some(strip_bang(value).to_string());
@@ -4951,6 +4955,9 @@ impl GitBindings {
             push_selected_tool(commands, argv, &self.merge_tool, &self.mergetools);
         }
         commands.extend(ssh_scripts(&self.ssh, argv, env));
+        if subcommand == "commit" {
+            shells.extend(commit_hook_scripts(self.hooks.as_deref(), argv));
+        }
         if subcommand == "credential" {
             commands.extend(self.helpers.iter().cloned());
         }
@@ -5103,6 +5110,66 @@ fn ssh_scripts(
         return git_ssh_program(value);
     }
     Vec::new()
+}
+
+/// `git -c core.hooksPath=dir commit` runs the executable hooks in
+/// that directory. `--no-verify` skips `pre-commit` and `commit-msg`.
+/// `prepare-commit-msg` and `post-commit` still run.
+fn commit_hook_scripts(dir: Option<&str>, argv: &[String]) -> Vec<String> {
+    let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
+        return Vec::new();
+    };
+    let skip_verify = commit_no_verify(argv);
+    [
+        "pre-commit",
+        "prepare-commit-msg",
+        "commit-msg",
+        "post-commit",
+    ]
+    .into_iter()
+    .filter(|name| !skip_verify || !matches!(*name, "pre-commit" | "commit-msg"))
+    .filter_map(|name| hook_body(dir, name))
+    .collect()
+}
+
+fn commit_no_verify(argv: &[String]) -> bool {
+    for token in argv {
+        if token == "--" {
+            break;
+        }
+        if token == "--no-verify" || token == "-n" {
+            return true;
+        }
+        if token.starts_with('-') && !token.starts_with("--") && token.contains('n') {
+            return true;
+        }
+    }
+    false
+}
+
+fn hook_body(dir: &str, name: &str) -> Option<String> {
+    let path = std::path::Path::new(dir).join(name);
+    if !hook_executable(&path) {
+        return None;
+    }
+    match load_script_file(&path.to_string_lossy()) {
+        Some(ScriptFile::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn hook_executable(path: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 fn one_script(value: &str) -> Vec<String> {
@@ -20041,6 +20108,41 @@ mod tests {
             let _ = std::fs::remove_file(path);
         }
         let _ = std::fs::remove_dir(&sub);
+    }
+
+    /// `git -c core.hooksPath=dir commit` runs the executable hooks in
+    /// that directory. `git status` does not. `--no-verify` skips
+    /// `pre-commit` and `commit-msg`.
+    #[test]
+    fn git_hooks_path_scores_the_commit_hook() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-hooks-{}", std::process::id()));
+        let hooks = root.join("hooks");
+        std::fs::create_dir_all(&hooks).expect("hooks");
+        let write = |name: &str, body: &str| {
+            let path = hooks.join(name);
+            std::fs::write(&path, body).expect(name);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        write("pre-commit", "rm -rf /tmp/x\n");
+        let dir = hooks.display().to_string();
+        let commit = format!("git -c core.hooksPath={dir} commit -m probe");
+        assert_eq!(kind(&commit), Some("bash.rm"), "{commit}");
+        let status = format!("git -c core.hooksPath={dir} status");
+        assert_eq!(kind(&status), None, "{status}");
+        let skip = format!("git -c core.hooksPath={dir} commit --no-verify -m probe");
+        assert_eq!(kind(&skip), None, "{skip}");
+        write("post-commit", "rm -rf /tmp/y\n");
+        assert_eq!(kind(&skip), Some("bash.rm"), "{skip}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// These are the command strings a Windows host ran. The backslashes
