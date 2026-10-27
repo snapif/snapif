@@ -953,6 +953,7 @@ fn consider_segment<'a>(
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
             score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
                 tool_name,
@@ -5161,6 +5162,102 @@ enum ExecKind {
     ExecList,
     /// `os.execl` takes the program path, then one string per argv word.
     ExecArgs,
+}
+
+fn score_swift_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = swift_script_path(argv) else {
+        return;
+    };
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = swift_process_commands(&text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn swift_script_path(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("swift") {
+        return None;
+    }
+    argv.iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .cloned()
+}
+
+fn swift_process_commands(source: &str) -> Vec<String> {
+    let code = strip_swift_line_comments(source);
+    if !code.contains(".run(") {
+        return Vec::new();
+    }
+    let Some(arguments) = swift_arguments(&code) else {
+        return Vec::new();
+    };
+    if arguments.is_empty() {
+        return Vec::new();
+    }
+    if let Some(executable) = swift_executable(&code)
+        && !is_env_program(&executable)
+    {
+        let mut words = vec![command_basename(&executable).to_string()];
+        words.extend(arguments);
+        return vec![words.join(" ")];
+    }
+    vec![arguments.join(" ")]
+}
+
+fn is_env_program(path: &str) -> bool {
+    command_basename(path).eq_ignore_ascii_case("env")
+}
+
+fn swift_arguments(code: &str) -> Option<Vec<String>> {
+    let start = code.find(".arguments")?;
+    let rest = &code[start + ".arguments".len()..];
+    let chars: Vec<char> = rest.chars().collect();
+    let open = chars.iter().position(|ch| *ch == '[')?;
+    let (_, end) = balanced(&chars, open, '[', ']')?;
+    let list: String = chars[open..end].iter().collect();
+    arg_list(&list)
+}
+
+fn swift_executable(code: &str) -> Option<String> {
+    let key = "fileURLWithPath:";
+    let start = code.find(key)?;
+    let rest = &code[start + key.len()..];
+    let chars: Vec<char> = rest.chars().collect();
+    let quote = chars.iter().position(|ch| *ch == '"')?;
+    read_quoted(&chars, quote).map(|(text, _)| text)
+}
+
+fn strip_swift_line_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
 }
 
 fn score_just_recipe<'a>(
@@ -21241,6 +21338,15 @@ mod tests {
         write("run.R", "system(\"git push origin main\")\n");
         std::fs::write(root.join("justfile"), "push:\n\tgit push origin main\n").expect("justfile");
         write(
+            "run.swift",
+            "import Foundation\nlet task = Process()\ntask.executableURL = URL(fileURLWithPath: \"/usr/bin/env\")\ntask.arguments = [\"git\", \"push\", \"origin\", \"main\"]\ntry? task.run()\ntask.waitUntilExit()\n",
+        );
+        write("print.swift", "print(\"git push origin main\")\n");
+        write(
+            "note.swift",
+            "// task.arguments = [\"git\", \"push\", \"origin\", \"main\"]\n// task.run()\nprint(1)\n",
+        );
+        write(
             "package.json",
             "{\"scripts\":{\"pretest\":\"git push origin pretest\",\"test\":\"echo ok\",\"posttest\":\"echo ok\",\"prestart\":\"echo ok\",\"start\":\"git push origin start\",\"poststart\":\"echo ok\",\"preunused\":\"echo ok\",\"unused\":\"git push origin unused\",\"postunused\":\"echo ok\"}}",
         );
@@ -21281,6 +21387,7 @@ mod tests {
             format!("Rscript {show}/run.R"),
             format!("just --justfile {show}/justfile push"),
             format!("uv run --no-project {show}/system.py"),
+            format!("swift {show}/run.swift"),
         ];
         for command in &review {
             assert_eq!(kind(command), Some("git.push"), "{command}");
@@ -21300,6 +21407,8 @@ mod tests {
             format!("python3 {show}/false.py"),
             format!("lua {show}/comment.lua"),
             format!("just --justfile {show}/justfile absent"),
+            format!("swift {show}/print.swift"),
+            format!("swift {show}/note.swift"),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
