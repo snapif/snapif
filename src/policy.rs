@@ -994,6 +994,8 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &generated, depth, local, git, best);
             let preloaded = env_preload_commands(&executed.argv, local, host_dir);
             scan_isolated(policy, tool_name, &preloaded, depth, local, git, best);
+            let awk_path = awk_path_commands(&executed.argv, local, host_dir);
+            scan_isolated(policy, tool_name, &awk_path, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6705,6 +6707,7 @@ fn env_preload_commands(
             let mut commands =
                 env_option_files(env, "RUBYOPT", "ruby", dir, HostLang::Ruby, ruby_requires);
             commands.extend(ruby_lib_files(argv, env, dir));
+            commands.extend(ruby_inc_files(argv, dir));
             commands
         }
         Some(HostLang::Node) => {
@@ -6722,6 +6725,7 @@ fn env_preload_commands(
         Some(HostLang::Perl) => {
             let mut commands = perl_opt_files(env, dir);
             commands.extend(perl_lib_files(argv, env, dir));
+            commands.extend(perl_argv_inc_files(argv, dir));
             commands
         }
         Some(HostLang::Python) => {
@@ -6810,6 +6814,128 @@ fn perl_opt_files(env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
             if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
                 commands.extend(interpreter_commands(HostLang::Perl, &body));
                 break;
+            }
+        }
+    }
+    commands
+}
+
+fn resolved_inc(inc: &str, dir: Option<&str>) -> String {
+    let path = std::path::Path::new(inc);
+    if path.is_absolute() {
+        path.display().to_string()
+    } else {
+        shell_dir(dir).join(path).display().to_string()
+    }
+}
+
+fn perl_argv_inc_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut fake = vec!["perl".to_string()];
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(inc) = argv.get(index) {
+                fake.push(format!("-I{}", resolved_inc(inc, dir)));
+            }
+        } else if let Some(inc) = arg.strip_prefix("-I").filter(|inc| !inc.is_empty()) {
+            fake.push(format!("-I{}", resolved_inc(inc, dir)));
+        } else if arg == "-M" || arg.starts_with("-M") {
+            fake.push(arg.to_string());
+            if arg == "-M" {
+                index += 1;
+                if let Some(name) = argv.get(index) {
+                    fake.push(name.clone());
+                }
+            }
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for path in perl_module_files(&fake) {
+        if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+            commands.extend(interpreter_commands(HostLang::Perl, &body));
+        }
+    }
+    commands
+}
+
+fn ruby_inc_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(inc) = argv.get(index) {
+                dirs.push(resolved_inc(inc, dir));
+            }
+        } else if let Some(inc) = arg.strip_prefix("-I").filter(|inc| !inc.is_empty()) {
+            dirs.push(resolved_inc(inc, dir));
+        }
+        index += 1;
+    }
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Ruby, argv) {
+        for raw in call_strings(&text, "require") {
+            if raw.contains('/') || raw.contains('\\') {
+                continue;
+            }
+            if raw.ends_with(".rb") {
+                names.push(raw);
+            } else {
+                names.push(format!("{raw}.rb"));
+            }
+        }
+    }
+    library_scripts(&dirs.join(":"), &names, None, HostLang::Ruby)
+}
+
+fn awk_path_commands(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("awk") && !base.eq_ignore_ascii_case("gawk") {
+        return Vec::new();
+    }
+    let Some(value) = last_assignment(env, "AWKPATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" {
+            index += 1;
+            if let Some(name) = argv.get(index)
+                && !name.contains('/')
+                && !name.contains('\\')
+            {
+                names.push(name.clone());
+            }
+        } else if let Some(name) = arg.strip_prefix("-f").filter(|name| !name.is_empty())
+            && !name.contains('/')
+            && !name.contains('\\')
+        {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = resolved_inc(entry, dir);
+        for name in &names {
+            let path = std::path::Path::new(&root).join(name);
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
+                commands.extend(awk_systems(&body));
             }
         }
     }
@@ -24033,6 +24159,7 @@ mod tests {
             "system(\"git\", \"push\", \"origin\", \"main\")\n",
         );
         write("run.awk", "BEGIN { system(\"git push origin main\") }\n");
+        write("push.awk", "BEGIN { system(\"git push origin main\") }\n");
         write("print.awk", "BEGIN { print \"git push origin main\" }\n");
         write("run.scpt", "do shell script \"git push origin main\"\n");
         write("mod.py", "import os\nos.system(\"git push origin main\")\n");
@@ -24271,6 +24398,9 @@ mod tests {
             format!("cd {show} && NODE_OPTIONS='--require ./push.js' node -e '0'"),
             format!("cd {show} && PERL5OPT='-I. -MPush' perl -e '0'"),
             format!("cd {show} && PERL5LIB=. perl -MPush -e 0"),
+            format!("cd {show}/empty-lib && perl -I.. -MPush -e 0"),
+            format!("cd {show}/empty-lib && ruby -I.. -e 'require \"push\"'"),
+            format!("cd {show}/empty-lib && AWKPATH=.. awk -f push.awk"),
             format!("PYTHONPATH='{show}' python3 -c 'import push'"),
             format!("RUBYLIB='{show}' ruby -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l push -e '0'"),
@@ -24364,6 +24494,9 @@ mod tests {
             format!("cd {show} && NODE_OPTIONS='--require ./missing.js' node -e '0'"),
             format!("cd {show} && PERL5OPT='-I. -MMissing' perl -e '0'"),
             format!("cd {show} && PERL5LIB=. perl -MMissing -e 0"),
+            format!("cd {show}/empty-lib && perl -I.. -MMissing -e 0"),
+            format!("cd {show}/empty-lib && ruby -I.. -e 'require \"missing\"'"),
+            format!("cd {show}/empty-lib && AWKPATH=.. awk -f missing.awk"),
             format!("PYTHONPATH='{show}/empty-lib' python3 -c 'import push'"),
             format!("RUBYLIB='{show}/empty-lib' ruby -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l missing -e '0'"),
