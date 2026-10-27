@@ -614,7 +614,11 @@ fn check_action(
 /// ignored (`"rm.exe "`).
 /// A shell that reads its script from stdin runs a heredoc or a
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
-/// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
+/// /dev/stdin` and `bash -s` do too. `bash < path` and `bash -s < path`
+/// score that file. `bash -c 'source /dev/stdin' < path` and
+/// `bash -c 'bash -s' < path` do too. `bash -c 'echo hi' < path`
+/// does not.
+/// `source < path` does not run the file. `source /dev/stdin` runs that
 /// body in the same shell. `source path` and `bash path` run a regular
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
@@ -655,10 +659,16 @@ fn check_action(
 /// `powershell -File script.ps1 -Command rm` does not match when
 /// `script.ps1` is missing. When the file exists, its body is scored
 /// and the later `-Command` is not the engine command. `-File` and
-/// `-f` read the first operand. `powershell -Command` of `& path` and
-/// of `Invoke-Expression (Get-Content -Raw path)` read that file.
-/// `Get-Content` without `-Raw` does not. `cmd /c` of a `.bat` or
-/// `.cmd` path reads the file, and `call` of that path does too.
+/// `-f` read the first operand. `-File -` reads the heredoc or the
+/// `< path` redirect, not a file named `-`. `powershell -Command` of
+/// a `.ps1` path reads that file. Arguments after the path stay
+/// arguments. `& path` reads that file. `Invoke-Expression` of
+/// `Get-Content -Raw` reads that file when `-Raw` is before or after
+/// the path, and when the same `Get-Content` is piped into
+/// `Invoke-Expression`. `Get-Content` without `-Raw`, and `iex`, do
+/// not. `-Command -` reads the heredoc and a `< path` redirect.
+/// `cmd /c` of a `.bat` or `.cmd` path reads the file, and `call`
+/// of that path does too.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -803,6 +813,14 @@ fn consider_segment<'a>(
     };
     // `$(...)` does not see a prefix assignment. A child process does.
     let local = &executed.env;
+    // Non-interactive bash runs `BASH_ENV`. An interactive bash runs
+    // `--rcfile` or `--init-file`. The other combination does not.
+    if let Some(path) = bash_startup_file(&executed.argv, &executed.env) {
+        score_script_path(policy, tool_name, path, depth, local, git, best);
+    }
+    if let Some(path) = zsh_startup_file(&executed.argv, &executed.env) {
+        score_script_path(policy, tool_name, &path, depth, local, git, best);
+    }
     // A function named `export` runs instead of the builtin.
     // `command export` and `builtin export` keep the builtin.
     let export_is_function = is_export(&executed.argv)
@@ -866,10 +884,13 @@ fn consider_segment<'a>(
             } else if is_stdin_script(&script)
                 && is_powershell_base(executed.argv.first().map(String::as_str))
             {
-                scan_isolated(
+                score_ps_input(
                     policy,
                     tool_name,
-                    &segment.heredocs,
+                    PsInput {
+                        heredocs: &segment.heredocs,
+                        stdin_file: segment.stdin_file.as_deref(),
+                    },
                     depth,
                     local,
                     git,
@@ -878,9 +899,29 @@ fn consider_segment<'a>(
             } else {
                 let mut child = Functions::new();
                 run_detached(&script, &mut child, best);
+                if script_reads_stdin(&script)
+                    && let Some(path) = segment.stdin_file.as_deref()
+                {
+                    score_script_path(policy, tool_name, path, depth, local, git, best);
+                }
             }
         } else if let Some(path) = powershell_file_operand(&executed.argv) {
-            score_script_path(policy, tool_name, path, depth, local, git, best);
+            if path == "-" {
+                score_ps_input(
+                    policy,
+                    tool_name,
+                    PsInput {
+                        heredocs: &segment.heredocs,
+                        stdin_file: segment.stdin_file.as_deref(),
+                    },
+                    depth,
+                    local,
+                    git,
+                    best,
+                );
+            } else {
+                score_script_path(policy, tool_name, path, depth, local, git, best);
+            }
         } else if let Some(scripts) =
             eval_script(&executed.argv, &executed.in_eval, scope, exported, local)
         {
@@ -908,6 +949,7 @@ fn consider_segment<'a>(
             // below, in this shell. `cat`, `head`, and `tail` score the text
             // they would print.
             score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_makefile(policy, tool_name, &executed.argv, depth, local, git, best);
             score_printed_file(
                 policy,
                 tool_name,
@@ -962,10 +1004,13 @@ fn consider_segment<'a>(
                 );
             }
             if shell_reads_stdin(&executed.argv) {
-                scan_isolated(
+                score_ps_input(
                     policy,
                     tool_name,
-                    &segment.heredocs,
+                    PsInput {
+                        heredocs: &segment.heredocs,
+                        stdin_file: segment.stdin_file.as_deref(),
+                    },
                     depth,
                     local,
                     git,
@@ -2167,6 +2212,28 @@ fn score_script_path<'a>(
         }
         Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
         None => {}
+    }
+}
+
+struct PsInput<'a> {
+    heredocs: &'a [String],
+    stdin_file: Option<&'a str>,
+}
+
+/// PowerShell `-Command -` and `-File -` read the heredoc and a
+/// `< path` redirect. The dash is not a file name.
+fn score_ps_input<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    input: PsInput<'_>,
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    scan_isolated(policy, tool_name, input.heredocs, depth, local, git, best);
+    if let Some(path) = input.stdin_file {
+        score_script_path(policy, tool_name, path, depth, local, git, best);
     }
 }
 
@@ -3773,6 +3840,30 @@ fn is_stdin_script(token: &str) -> bool {
     matches!(token, "/dev/stdin" | "/dev/fd/0" | "-")
 }
 
+/// `bash -c 'source /dev/stdin'` and `bash -c 'bash -s'` run the
+/// redirected file. `bash -c 'echo hi'` does not.
+fn script_reads_stdin(script: &str) -> bool {
+    let script = script.trim();
+    if matches!(
+        script,
+        "source /dev/stdin"
+            | "source -"
+            | "source /dev/fd/0"
+            | ". /dev/stdin"
+            | ". -"
+            | ". /dev/fd/0"
+    ) {
+        return true;
+    }
+    tokenize_parts(script).into_iter().any(|part| {
+        let ShellPart::Segment(segment) = part else {
+            return false;
+        };
+        executed_argv(&segment.tokens, &segment.in_eval, &[])
+            .is_some_and(|executed| shell_reads_stdin(&executed.argv))
+    })
+}
+
 fn shell_reads_stdin(argv: &[String]) -> bool {
     let Some(first) = argv.first() else {
         return false;
@@ -4355,14 +4446,51 @@ fn powershell_file_operand(argv: &[String]) -> Option<&str> {
     None
 }
 
-/// `& path` and `Invoke-Expression (Get-Content -Raw path)` run that file.
-/// Other `Get-Content` shapes are not this.
+/// `& path`, a `.ps1` path, and `Invoke-Expression` of `Get-Content -Raw`
+/// run that file. `iex` and `Get-Content` without `-Raw` do not.
 fn powershell_launched_file(argv: &[String], script: &str) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
         return None;
     }
-    ps_call_file(script).or_else(|| ps_iex_raw_file(script))
+    ps_call_file(script)
+        .or_else(|| ps_iex_raw_file(script))
+        .or_else(|| ps_command_script_path(script))
+}
+
+fn is_ps1_file(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    let name = name.trim_end_matches([' ', '\t']);
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
+}
+
+/// `-Command path.ps1` runs that file, including a quoted path that
+/// contains spaces. A later `;`, `|`, or `&` is a second statement,
+/// so this stays out of the way and the text scan still sees it.
+fn ps_command_script_path(script: &str) -> Option<String> {
+    let script = script.trim();
+    if script
+        .chars()
+        .any(|ch| matches!(ch, ';' | '|' | '&' | '<' | '>'))
+    {
+        return None;
+    }
+    if is_ps1_file(script) {
+        return Some(script.to_string());
+    }
+    let (path, rest) = take_ps_literal(script)?;
+    if !is_ps1_file(&path) {
+        return None;
+    }
+    if !rest.trim().is_empty() && path.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(path)
 }
 
 fn ps_call_file(script: &str) -> Option<String> {
@@ -4381,16 +4509,48 @@ fn ps_call_file(script: &str) -> Option<String> {
 }
 
 fn ps_iex_raw_file(script: &str) -> Option<String> {
+    ps_iex_call(script).or_else(|| ps_iex_pipeline(script))
+}
+
+fn ps_iex_call(script: &str) -> Option<String> {
     let rest = split_ps_name(script, "invoke-expression")?;
     let rest = rest.trim_start().strip_prefix('(')?.trim_start();
     let rest = split_ps_name(rest, "get-content")?;
-    let rest = split_ps_name(rest.trim_start(), "-raw")?;
-    let (path, rest) = take_ps_literal(rest)?;
+    let (path, rest) = ps_get_content_raw_args(rest)?;
     let rest = rest.trim_start().strip_prefix(')')?;
-    if path.is_empty() || !rest.trim().is_empty() {
+    if !rest.trim().is_empty() {
         return None;
     }
     Some(path)
+}
+
+fn ps_iex_pipeline(script: &str) -> Option<String> {
+    let rest = split_ps_name(script, "get-content")?;
+    let (path, rest) = ps_get_content_raw_args(rest)?;
+    let rest = rest.trim_start().strip_prefix('|')?.trim_start();
+    let rest = split_ps_name(rest, "invoke-expression")?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(path)
+}
+
+/// `-Raw` may sit before the path or after it. Both run the file.
+fn ps_get_content_raw_args(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start();
+    if let Some(rest) = split_ps_name(text, "-raw") {
+        let (path, rest) = take_ps_literal(rest)?;
+        if path.is_empty() {
+            return None;
+        }
+        return Some((path, rest));
+    }
+    let (path, rest) = take_ps_literal(text)?;
+    if path.is_empty() || path.starts_with('-') {
+        return None;
+    }
+    let rest = split_ps_name(rest, "-raw")?;
+    Some((path, rest))
 }
 
 fn split_ps_name<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -5341,6 +5501,178 @@ fn shell_file_operand(argv: &[String]) -> Option<&str> {
         return Some(token.as_str());
     }
     None
+}
+
+/// Non-interactive bash runs `BASH_ENV`. Interactive bash runs
+/// `--rcfile` or `--init-file`. A non-interactive `--rcfile` does not
+/// run, and an interactive shell does not run `BASH_ENV`.
+fn bash_startup_file<'a>(argv: &'a [String], env: &'a [(String, String)]) -> Option<&'a str> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("bash") {
+        return None;
+    }
+    let mut interactive = false;
+    let mut rcfile: Option<&str> = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            break;
+        }
+        if shell_opt_takes_value(token) {
+            let name = token.strip_prefix("--").unwrap_or(token);
+            if name == "rcfile" || name == "init-file" {
+                rcfile = argv.get(index + 1).map(String::as_str);
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.contains('i')
+        {
+            interactive = true;
+        }
+        if token.starts_with('-') || token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if interactive {
+        return rcfile.filter(|path| !path.is_empty());
+    }
+    env.iter()
+        .rev()
+        .find(|(name, _)| name == "BASH_ENV")
+        .map(|(_, value)| value.as_str())
+        .filter(|path| !path.is_empty())
+}
+
+/// `ZDOTDIR=dir zsh` runs `dir/.zshenv`. `zsh -f` does not.
+fn zsh_startup_file(argv: &[String], env: &[(String, String)]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("zsh") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            break;
+        }
+        if token == "-f" || token == "--no-rcs" {
+            return None;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.contains('f')
+        {
+            return None;
+        }
+        if token.starts_with('-') || token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    let dir = env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "ZDOTDIR")
+        .map(|(_, value)| value.as_str())?;
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        return None;
+    }
+    Some(format!("{dir}/.zshenv"))
+}
+
+/// `make -f file` runs the tab recipes in that file. `make -n` only
+/// prints them. With no `-f`, GNU make reads `GNUmakefile`, then
+/// `makefile`, then `Makefile`.
+fn score_makefile<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = make_file(argv) else {
+        return;
+    };
+    let Some(loaded) = load_script_file(path) else {
+        return;
+    };
+    match loaded {
+        ScriptFile::Text(text) => {
+            let recipes: Vec<String> = text
+                .lines()
+                .filter_map(|line| {
+                    let line = line.strip_prefix('\t')?.trim();
+                    if line.is_empty() || line.starts_with('#') {
+                        None
+                    } else {
+                        Some(line.replace("$$", "$"))
+                    }
+                })
+                .collect();
+            scan_isolated(policy, tool_name, &recipes, depth, local, git, best);
+        }
+        ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
+    }
+}
+
+fn make_file(argv: &[String]) -> Option<&str> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("make") && !base.eq_ignore_ascii_case("gmake") {
+        return None;
+    }
+    let mut file: Option<&str> = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            break;
+        }
+        if matches!(
+            token.as_str(),
+            "-n" | "--dry-run" | "--just-print" | "--recon"
+        ) {
+            return None;
+        }
+        if token == "-f" || token == "--file" || token == "--makefile" {
+            file = argv.get(index + 1).map(String::as_str);
+            index += 2;
+            continue;
+        }
+        if let Some(rest) = token.strip_prefix("-f")
+            && !rest.is_empty()
+            && !token.starts_with("--")
+        {
+            file = Some(rest);
+            index += 1;
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.contains('n')
+        {
+            return None;
+        }
+        index += 1;
+    }
+    if let Some(path) = file.filter(|path| !path.is_empty()) {
+        return Some(path);
+    }
+    ["GNUmakefile", "makefile", "Makefile"]
+        .into_iter()
+        .find(|name| load_script_file(name).is_some())
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -16995,6 +17327,8 @@ mod tests {
             "pwsh -set C:\\x.json -Command rm -rf /tmp/x",
             "pwsh -NoProfile -Command - <<'EOF'\nrm -rf /tmp/x\nEOF",
             "powershell -c - <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "pwsh -File - <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "powershell -File - <<'EOF'\nrm -rf /tmp/x\nEOF",
         ];
         for command in rm {
             assert_eq!(
@@ -19738,6 +20072,13 @@ mod tests {
             for name in names {
                 std::fs::write(dir.join(name), body).expect(name);
             }
+            std::fs::write(dir.join("payload.mk"), "all:\n\tgit push origin main\n").expect("mk");
+            let zdot = dir.join("zdot");
+            std::fs::create_dir_all(&zdot).expect("zdot");
+            std::fs::write(zdot.join(".zshenv"), body).expect("zshenv");
+            let spaced = dir.join("Program Files");
+            std::fs::create_dir_all(&spaced).expect("spaced");
+            std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
             let shown = dir.display().to_string().replace('/', "\\");
             (
                 HostFiles {
@@ -19754,6 +20095,13 @@ mod tests {
             for name in names {
                 std::fs::write(dir.join(name), body).expect(name);
             }
+            std::fs::write(dir.join("payload.mk"), "all:\n\tgit push origin main\n").expect("mk");
+            let zdot = dir.join("zdot");
+            std::fs::create_dir_all(&zdot).expect("zdot");
+            std::fs::write(zdot.join(".zshenv"), body).expect("zshenv");
+            let spaced = dir.join("Program Files");
+            std::fs::create_dir_all(&spaced).expect("spaced");
+            std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
             let previous = std::env::current_dir().expect("cwd");
             std::env::set_current_dir(&root).expect("chdir");
             (
@@ -19769,6 +20117,7 @@ mod tests {
         let ps1 = path("payload.ps1");
         let bat = path("payload.bat");
         let cmd_file = path("payload.cmd");
+        let mk = path("payload.mk");
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
         let kind = |command: &str| -> &'static str {
             let id = matched_action(&policy, "Bash", Some(command))
@@ -19784,6 +20133,32 @@ mod tests {
         };
         let review = [
             format!("bash {sh}"),
+            format!("make -f {mk}"),
+            format!("make -f '{mk}' all"),
+            format!("gmake --file {mk}"),
+            format!("make -f{}", mk.replace('\\', "/")),
+            format!("ZDOTDIR='{}' zsh -c 'echo hi'", path("zdot")),
+            format!("BASH_ENV='{sh}' bash -c 'echo hi'"),
+            format!("bash --rcfile '{sh}' -ic 'echo hi'"),
+            format!("bash --init-file '{sh}' -ic 'echo hi'"),
+            format!("bash < '{sh}'"),
+            format!("bash -s < '{sh}'"),
+            format!("sh < '{sh}'"),
+            format!("bash -c 'source /dev/stdin' < '{sh}'"),
+            format!("bash -c 'bash -s' < '{sh}'"),
+            format!("bash -c 'sh -s' < '{sh}'"),
+            format!("sh -c 'sh -s' < '{sh}'"),
+            format!("zsh -c 'zsh -s' < '{sh}'"),
+            format!("bash -c 'exec bash -s' < '{sh}'"),
+            format!("bash -c bash < '{sh}'"),
+            format!("command bash < '{sh}'"),
+            format!("env bash < '{sh}'"),
+            format!("nice bash < '{sh}'"),
+            format!("nohup bash < '{sh}'"),
+            format!("zsh < '{sh}'"),
+            format!("dash < '{sh}'"),
+            format!("ksh < '{sh}'"),
+            format!("zsh -c 'source /dev/stdin' < '{sh}'"),
             format!("source {sh}"),
             format!("cat {sh}"),
             format!("bash '{sh}'"),
@@ -19798,6 +20173,25 @@ mod tests {
             format!("pwsh {ps1} -Command rm -rf /tmp/x"),
             format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& '{ps1}'\""),
             format!("powershell -Command \"Invoke-Expression (Get-Content -Raw '{ps1}')\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content '{ps1}' -Raw)\""),
+            format!("powershell -Command \"Get-Content -Raw '{ps1}' | Invoke-Expression\""),
+            format!("powershell -Command \"Get-Content '{ps1}' -Raw | Invoke-Expression\""),
+            format!("powershell {ps1}"),
+            format!("powershell -Command {ps1}"),
+            format!("powershell -Command '{ps1}'"),
+            format!("powershell -Command \"{ps1}\""),
+            format!("pwsh -NoProfile -Command {ps1}"),
+            format!("pwsh -NoProfile -Command {ps1} arg"),
+            format!(
+                "powershell -Command '{}'",
+                path("Program Files\\payload.ps1")
+            ),
+            format!(
+                "powershell -Command \"{}\"",
+                path("Program Files\\payload.ps1")
+            ),
+            format!("pwsh -NoProfile -Command - < '{ps1}'"),
+            format!("powershell -Command - < '{ps1}'"),
             format!("cmd.exe /d /c {bat}"),
             format!("cmd /c {bat}"),
             format!("cmd.exe /d /c \"{bat}\""),
@@ -19815,6 +20209,17 @@ mod tests {
         }
         let quiet = [
             format!("bash {sh}.missing"),
+            format!("make -f {mk}.missing"),
+            format!("make -n -f {mk}"),
+            format!("make -f {mk} -n"),
+            format!("ZDOTDIR='{}' zsh -f -c 'echo hi'", path("zdot")),
+            format!("bash < '{sh}.missing'"),
+            format!("bash -s < '{sh}.missing'"),
+            format!("source < '{sh}'"),
+            format!("bash -c 'echo hi' < '{sh}'"),
+            format!("bash --rcfile '{sh}' -c 'echo hi'"),
+            format!("BASH_ENV='{sh}' bash -ic 'echo hi'"),
+            format!("BASH_ENV='{sh}.missing' bash -c 'echo hi'"),
             format!("source {sh}.missing"),
             format!("cat {sh}.missing"),
             format!("powershell -File {ps1}.missing"),
@@ -19826,7 +20231,11 @@ mod tests {
             format!("powershell -Command \"iex (Get-Content -Raw '{ps1}')\""),
             format!("cmd /c {bat}.missing"),
             format!("cmd /c call {bat}.missing"),
-            format!("powershell {ps1}"),
+            format!("powershell -Command \"{ps1}.missing\""),
+            format!("powershell -Command \"Get-Content -Raw '{ps1}'\""),
+            format!("powershell -Command \"Get-Content -Raw '{ps1}.missing' | Invoke-Expression\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content '{ps1}.missing' -Raw)\""),
+            format!("pwsh -Command - < '{ps1}.missing'"),
             "pwsh rm -rf /tmp/x".to_string(),
         ];
         for command in &quiet {
