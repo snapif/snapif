@@ -9655,9 +9655,9 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
     bodies
 }
 
-/// `mvn <phase>` runs antrun `<exec>` bound to that phase or an
-/// earlier one. `mvn -v` and a run with no goal do not. `-f` selects
-/// the pom.
+/// `mvn <phase>` runs antrun `<exec>` and the exec plugin bound to
+/// that phase or an earlier one. `command` is a shell string.
+/// `mvn -v` and a run with no goal do not. `-f` selects the pom.
 #[allow(clippy::too_many_arguments)]
 fn score_maven<'a>(
     policy: &'a Policy,
@@ -9775,17 +9775,38 @@ fn maven_exec_commands(pom: &str, reached: usize) -> Vec<String> {
                 commands.push(command);
             }
         }
+        if let Some(command) = maven_plugin_executable(execution) {
+            commands.push(command);
+        }
     }
     commands
 }
 
 fn maven_exec_command(block: &str) -> Option<String> {
-    let executable = xml_attr(block, "executable")?;
+    if let Some(executable) = xml_attr(block, "executable").filter(|item| !item.is_empty()) {
+        let mut words = vec![executable.to_string()];
+        words.extend(xml_arg_values(block));
+        return Some(words.join(" "));
+    }
+    xml_attr(block, "command")
+        .filter(|command| !command.is_empty())
+        .map(str::to_string)
+}
+
+fn maven_plugin_executable(block: &str) -> Option<String> {
+    let executable = xml_element_text(block, "executable")?.trim().to_string();
     if executable.is_empty() {
         return None;
     }
-    let mut words = vec![executable.to_string()];
-    words.extend(xml_arg_values(block));
+    let mut words = vec![executable];
+    for argument in xml_blocks(block, "argument") {
+        if let Some(text) = xml_element_text(argument, "argument") {
+            let text = text.trim();
+            if !text.is_empty() {
+                words.push(text.to_string());
+            }
+        }
+    }
     Some(words.join(" "))
 }
 
@@ -9848,6 +9869,15 @@ fn xml_blocks<'a>(text: &'a str, tag: &str) -> Vec<&'a str> {
             Some(' ' | '\n' | '\t' | '\r' | '>' | '/')
         ) {
             rest = &rest[after_name..];
+            continue;
+        }
+        let Some(gt) = rest[after_name..].find('>') else {
+            break;
+        };
+        let open_end = after_name + gt + 1;
+        if rest[..open_end].ends_with("/>") {
+            blocks.push(&rest[start..open_end]);
+            rest = &rest[open_end..];
             continue;
         }
         let Some(rel) = rest[start..].find(&close) else {
@@ -28939,6 +28969,32 @@ mod tests {
             Some("git.push")
         );
         assert_eq!(kind(&format!("cd {root_s} && mvn -q validate")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>c</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec command="git push origin main"/></target></configuration></execution></executions></plugin><plugin><artifactId>exec-maven-plugin</artifactId><executions><execution><id>x</id><phase>package</phase><goals><goal>exec</goal></goals><configuration><executable>echo</executable><arguments><argument>later</argument></arguments></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("command pom");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q validate")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q package")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>exec-maven-plugin</artifactId><executions><execution><id>x</id><phase>validate</phase><goals><goal>exec</goal></goals><configuration><executable>git</executable><arguments><argument>push</argument><argument>origin</argument><argument>main</argument></arguments></configuration></execution></executions></plugin></plugins></build></project>"#,
+        )
+        .expect("exec pom");
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q validate")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind("brew ruby -e '`git push origin main`'"),
+            Some("git.push")
+        );
         std::fs::write(
             app.join("pom.xml"),
             r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>e</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="echo"><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build><profiles><profile><id>x</id><build><plugins><plugin><artifactId>maven-antrun-plugin</artifactId><executions><execution><id>p</id><phase>validate</phase><goals><goal>run</goal></goals><configuration><target><exec executable="git"><arg value="push"/><arg value="origin"/><arg value="main"/></exec></target></configuration></execution></executions></plugin></plugins></build></profile></profiles></project>"#,
