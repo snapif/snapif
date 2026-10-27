@@ -1183,6 +1183,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_npm_explore(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_exec(
                 policy,
                 tool_name,
@@ -9613,6 +9623,135 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
         }
     }
     bodies
+}
+
+/// `npm explore pkg -- command` runs `command` in `node_modules/pkg`.
+/// `--prefix` selects that install. A missing package runs nothing.
+#[allow(clippy::too_many_arguments)]
+fn score_npm_explore<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some((name, command)) = npm_explore_invocation(argv) else {
+        return;
+    };
+    let Some(pkg) = npm_explore_package(argv, dir, &name) else {
+        return;
+    };
+    if let Some(path) = explore_script_file(&command, &pkg) {
+        score_script_path(policy, tool_name, &path, depth, local, git, best);
+    }
+    let mut functions = Functions::new();
+    let mut env = local.to_vec();
+    let mut scope = ShellScope {
+        dir: Some(pkg.display().to_string()),
+        ..ShellScope::default()
+    };
+    prefer(
+        policy,
+        best,
+        matched_in(
+            policy,
+            tool_name,
+            &command,
+            depth + 1,
+            &mut functions,
+            &mut env,
+            &mut scope,
+            git,
+        ),
+    );
+}
+
+/// The first word of `npm explore pkg -- ./file` is a script in the
+/// package directory. `git push` has no file to read.
+fn explore_script_file(command: &str, pkg: &std::path::Path) -> Option<String> {
+    let first = command.split_whitespace().next()?;
+    if first.contains('=') {
+        return None;
+    }
+    let path = std::path::Path::new(first);
+    if !(path.is_absolute() || first.starts_with('.') || first.contains('/')) {
+        return None;
+    }
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        pkg.join(path)
+    };
+    full.is_file().then(|| full.display().to_string())
+}
+
+fn npm_explore_invocation(argv: &[String]) -> Option<(String, String)> {
+    if argv.first().and_then(|word| package_tool(word)) != Some(PackageTool::Npm) {
+        return None;
+    }
+    let mut index = 1usize;
+    let mut explore = false;
+    let mut name = None;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            let command = argv[index + 1..].join(" ");
+            if command.is_empty() {
+                return None;
+            }
+            return name.map(|pkg| (pkg, command));
+        }
+        if arg == "--prefix" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--prefix=") {
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !explore {
+            if arg == "explore" {
+                explore = true;
+            } else {
+                return None;
+            }
+        } else if name.is_none() {
+            name = Some(arg.to_string());
+        } else {
+            return None;
+        }
+        index += 1;
+    }
+    None
+}
+
+fn npm_explore_package(
+    argv: &[String],
+    dir: Option<&str>,
+    name: &str,
+) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.starts_with('.') || name.starts_with('-') || name.contains('\\') {
+        return None;
+    }
+    let rel = if let Some((scope, pkg)) = name.split_once('/') {
+        if !scope.starts_with('@') || pkg.is_empty() || pkg.contains('/') {
+            return None;
+        }
+        std::path::PathBuf::from(scope).join(pkg)
+    } else {
+        std::path::PathBuf::from(name)
+    };
+    let path = install_package_dir(argv, dir)
+        .join("node_modules")
+        .join(rel);
+    path.is_dir().then_some(path)
 }
 
 /// `npm install`, `pnpm install`, and `bun install` run `preinstall`,
@@ -28201,6 +28340,61 @@ mod tests {
         ] {
             assert_eq!(kind(&command), None, "{command}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npm explore pkg -- command` runs that command in the installed
+    /// package. A relative script is read there, not from the working
+    /// directory. A missing package runs nothing.
+    #[test]
+    fn npm_explore_scores_the_command_it_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-explore-{}", std::process::id()));
+        let app = root.join("app");
+        let pkg = app.join("node_modules/p");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::write(app.join("run.sh"), "git push origin main\n").expect("decoy");
+        std::fs::write(pkg.join("run.sh"), "echo safe\n").expect("safe");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let app_s = app.display().to_string();
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm explore p -- git push origin main"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {app_s} && npm explore missing -- git push origin main"
+            )),
+            None
+        );
+        assert_eq!(kind(&format!("cd {app_s} && npm explore p")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && npm explore p -- ./run.sh")),
+            None
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {app_s} && npm explore p -- git push origin main"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {root_s} && npm explore --prefix app p -- git push origin main"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(pkg.join("run.sh"), "git push origin main\n").expect("push");
+        std::fs::write(app.join("run.sh"), "echo decoy\n").expect("decoy2");
+        assert_eq!(
+            kind(&format!("cd {app_s} && npm explore p -- ./run.sh")),
+            Some("git.push")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
