@@ -8373,6 +8373,7 @@ fn mix_inline(argv: &[String]) -> Vec<String> {
 /// whose value starts with `cmd `. Loading the project runs top-level
 /// code in `mix.exs` and `project/0`. `mix -v` does not load it.
 /// `mix run` and `mix test` also run `config/runtime.exs`.
+/// `config/config.exs` runs on load, including `import_config`.
 #[allow(clippy::too_many_arguments)]
 fn score_mix_shell<'a>(
     policy: &'a Policy,
@@ -8411,7 +8412,75 @@ fn score_mix_shell<'a>(
     {
         commands.extend(elixir_commands(&text));
     }
+    commands.extend(mix_config_commands(&root, &mix_env_name(local)));
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn mix_env_name(local: &[(String, String)]) -> String {
+    local
+        .iter()
+        .rev()
+        .find(|(key, _)| key == "MIX_ENV")
+        .map(|(_, value)| value.clone())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
+fn mix_config_commands(root: &std::path::Path, env_name: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(root.join("config/config.exs")) else {
+        return Vec::new();
+    };
+    let mut commands = elixir_commands(&text);
+    let config_dir = root.join("config");
+    for name in mix_imported_configs(&text, env_name) {
+        if let Ok(body) = std::fs::read_to_string(config_dir.join(&name)) {
+            commands.extend(elixir_commands(&body));
+        }
+    }
+    commands
+}
+
+fn mix_imported_configs(text: &str, env_name: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut names = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if mix_word_at(&chars, index, "import_config") {
+            index += "import_config".len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if let Some((value, end)) = read_quoted(&chars, index) {
+                if value == "#{config_env()}.exs" || value == "#{Mix.env()}.exs" {
+                    names.push(format!("{env_name}.exs"));
+                } else if mix_config_filename(&value) {
+                    names.push(value);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    names
+}
+
+fn mix_config_filename(value: &str) -> bool {
+    !value.is_empty()
+        && !value.contains("..")
+        && !value.starts_with('/')
+        && !value.contains('\\')
+        && value.ends_with(".exs")
 }
 
 fn mix_version_only(argv: &[String]) -> bool {
@@ -30188,6 +30257,66 @@ mod tests {
             Some("git.push")
         );
         assert_eq!(kind(&format!("cd {root_s} && mix test")), Some("git.push"));
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("quiet mix");
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nSystem.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("config");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix -v")), None);
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"extra.exs\"\n",
+        )
+        .expect("import literal");
+        std::fs::write(
+            root.join("config/extra.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("extra");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"#{config_env()}.exs\"\n",
+        )
+        .expect("import env");
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "System.cmd(\"echo\", [\"dev\"])\n",
+        )
+        .expect("dev");
+        std::fs::write(
+            root.join("config/test.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("test exs");
+        assert_eq!(kind(&format!("cd {root_s} && mix compile")), None);
+        assert_eq!(
+            kind(&format!("cd {root_s} && MIX_ENV=test mix compile")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"#{Mix.env()}.exs\"\n",
+        )
+        .expect("import mix env");
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("dev push");
+        assert_eq!(kind(&format!("cd {root_s} && mix help")), Some("git.push"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
