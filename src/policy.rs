@@ -950,6 +950,22 @@ fn consider_segment<'a>(
             // they would print.
             score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
             score_makefile(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_interpreter(
+                policy,
+                tool_name,
+                InterpSource {
+                    argv: &executed.argv,
+                    stdin_file: segment.stdin_file.as_deref(),
+                },
+                depth,
+                local,
+                git,
+                best,
+            );
             score_printed_file(
                 policy,
                 tool_name,
@@ -5110,10 +5126,946 @@ fn ssh_scripts(
     Vec::new()
 }
 
+/// Program text from `python`, `node`, `ruby`, `perl`, or `php`, plus
+/// the `package.json` scripts `npm`, `pnpm`, and `bun` actually run.
+struct InterpSource<'a> {
+    argv: &'a [String],
+    stdin_file: Option<&'a str>,
+}
+
+enum LoadedProgram {
+    Text(String),
+    Unscanned,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HostLang {
+    Python,
+    Node,
+    Ruby,
+    Perl,
+    Php,
+    Lua,
+    R,
+}
+
+enum ExecKind {
+    /// One string is a shell command (`os.system`, `execSync`).
+    Shell,
+    /// A string list is argv. A string runs only when `shell` is truthy.
+    Subprocess,
+    /// The command is the first string plus a following string list.
+    Spawn,
+    /// One string is a shell command. More strings are argv.
+    Argv,
+    /// `os.execv` takes the argv list as its second argument.
+    ExecList,
+    /// `os.execl` takes the program path, then one string per argv word.
+    ExecArgs,
+}
+
+fn score_swift_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = swift_script_path(argv) else {
+        return;
+    };
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = swift_process_commands(&text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn swift_script_path(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("swift") {
+        return None;
+    }
+    argv.iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .cloned()
+}
+
+fn swift_process_commands(source: &str) -> Vec<String> {
+    let code = strip_swift_line_comments(source);
+    if !code.contains(".run(") {
+        return Vec::new();
+    }
+    let Some(arguments) = swift_arguments(&code) else {
+        return Vec::new();
+    };
+    if arguments.is_empty() {
+        return Vec::new();
+    }
+    if let Some(executable) = swift_executable(&code)
+        && !is_env_program(&executable)
+    {
+        let mut words = vec![command_basename(&executable).to_string()];
+        words.extend(arguments);
+        return vec![words.join(" ")];
+    }
+    vec![arguments.join(" ")]
+}
+
+fn is_env_program(path: &str) -> bool {
+    command_basename(path).eq_ignore_ascii_case("env")
+}
+
+fn swift_arguments(code: &str) -> Option<Vec<String>> {
+    let start = code.find(".arguments")?;
+    let rest = &code[start + ".arguments".len()..];
+    let chars: Vec<char> = rest.chars().collect();
+    let open = chars.iter().position(|ch| *ch == '[')?;
+    let (_, end) = balanced(&chars, open, '[', ']')?;
+    let list: String = chars[open..end].iter().collect();
+    arg_list(&list)
+}
+
+fn swift_executable(code: &str) -> Option<String> {
+    let key = "fileURLWithPath:";
+    let start = code.find(key)?;
+    let rest = &code[start + key.len()..];
+    let chars: Vec<char> = rest.chars().collect();
+    let quote = chars.iter().position(|ch| *ch == '"')?;
+    read_quoted(&chars, quote).map(|(text, _)| text)
+}
+
+fn strip_swift_line_comments(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn score_just_recipe<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(body) = just_recipe_body(argv) else {
+        return;
+    };
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&body),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+fn just_recipe_body(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("just") {
+        return None;
+    }
+    let mut file = None;
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--justfile" {
+            index += 1;
+            file = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--justfile=")
+            && !path.is_empty()
+        {
+            file = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    let recipe = words.get(1)?.clone();
+    let path = if let Some(path) = file {
+        std::path::PathBuf::from(path)
+    } else {
+        ["justfile", "Justfile", ".justfile"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|candidate| candidate.is_file())?
+    };
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut body = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if !inside {
+            let header = format!("{recipe}:");
+            if line == header
+                || line
+                    .strip_prefix(&header)
+                    .is_some_and(|rest| rest.trim().is_empty())
+            {
+                inside = true;
+            }
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            body.push(line.trim().to_string());
+            continue;
+        }
+        break;
+    }
+    if body.is_empty() {
+        None
+    } else {
+        Some(body.join("\n"))
+    }
+}
+
+fn score_uv_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = uv_python_script(argv) else {
+        return;
+    };
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = interpreter_commands(HostLang::Python, &text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn uv_python_script(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("uv") {
+        return None;
+    }
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    if words.get(1).map(String::as_str) != Some("run") {
+        return None;
+    }
+    words.into_iter().skip(2).find(|word| word.ends_with(".py"))
+}
+
+fn score_package_scripts<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let scripts = package_script_bodies(argv);
+    scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+}
+
+fn score_interpreter<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    source: InterpSource<'_>,
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(lang) = source.argv.first().and_then(|word| host_lang(word)) else {
+        return;
+    };
+    match interpreter_program(lang, &source) {
+        Some(LoadedProgram::Text(text)) => {
+            let commands = interpreter_commands(lang, &text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(LoadedProgram::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn host_lang(token: &str) -> Option<HostLang> {
+    let base = command_basename(token).to_ascii_lowercase();
+    match base.as_str() {
+        "python" | "python2" | "python3" => Some(HostLang::Python),
+        "node" => Some(HostLang::Node),
+        "ruby" => Some(HostLang::Ruby),
+        "perl" => Some(HostLang::Perl),
+        "php" => Some(HostLang::Php),
+        "lua" => Some(HostLang::Lua),
+        "rscript" | "r" => Some(HostLang::R),
+        other if other.starts_with("python3.") || other.starts_with("python2.") => {
+            Some(HostLang::Python)
+        }
+        _ => None,
+    }
+}
+
+fn interpreter_program(lang: HostLang, source: &InterpSource<'_>) -> Option<LoadedProgram> {
+    let mut index = 1usize;
+    let mut inline = None;
+    let mut file: Option<&str> = None;
+    while index < source.argv.len() {
+        let arg = source.argv[index].as_str();
+        if arg == "--" {
+            index += 1;
+            file = source.argv.get(index).map(String::as_str);
+            break;
+        }
+        if lang == HostLang::Node
+            && let Some(code) = arg.strip_prefix("--eval=")
+        {
+            inline = Some(code.to_string());
+            break;
+        }
+        if takes_inline_arg(lang, arg) {
+            index += 1;
+            return Some(LoadedProgram::Text(
+                source.argv.get(index).cloned().unwrap_or_default(),
+            ));
+        }
+        if lang == HostLang::Python && arg == "-m" {
+            return None;
+        }
+        if lang == HostLang::Php && arg == "-f" {
+            index += 1;
+            file = source.argv.get(index).map(String::as_str);
+            break;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            if interp_flag_takes_value(lang, arg) {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        file = Some(arg);
+        break;
+    }
+    if let Some(text) = inline {
+        return Some(LoadedProgram::Text(text));
+    }
+    let path = match file {
+        Some("-") | None => source.stdin_file,
+        Some(path) => Some(path),
+    }?;
+    match load_script_file(path) {
+        Some(ScriptFile::Text(text)) => Some(LoadedProgram::Text(text)),
+        Some(ScriptFile::Unscanned) => Some(LoadedProgram::Unscanned),
+        None => None,
+    }
+}
+
+fn takes_inline_arg(lang: HostLang, arg: &str) -> bool {
+    match lang {
+        HostLang::Python => arg == "-c",
+        HostLang::Node => arg == "-e" || arg == "--eval",
+        HostLang::Ruby | HostLang::Perl => arg == "-e",
+        HostLang::Php => arg == "-r",
+        HostLang::Lua | HostLang::R => false,
+    }
+}
+
+fn interp_flag_takes_value(lang: HostLang, arg: &str) -> bool {
+    match lang {
+        HostLang::Python => matches!(arg, "-W" | "-X"),
+        HostLang::Node => matches!(arg, "-r" | "--require" | "--import"),
+        HostLang::Ruby => matches!(arg, "-I"),
+        HostLang::Perl => matches!(arg, "-I" | "-M" | "-m"),
+        HostLang::Php | HostLang::Lua | HostLang::R => false,
+    }
+}
+
+fn interpreter_commands(lang: HostLang, source: &str) -> Vec<String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if line_comment(lang, &chars, index) {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if block_comment(&chars, index) && matches!(lang, HostLang::Node | HostLang::Php) {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if chars[index] == '`' {
+            match lang {
+                HostLang::Ruby | HostLang::Perl | HostLang::Php => {
+                    if let Some((text, end)) = read_quoted(&chars, index) {
+                        if !text.is_empty() {
+                            commands.push(text);
+                        }
+                        index = end;
+                        continue;
+                    }
+                }
+                HostLang::Node => {
+                    if let Some((_, end)) = read_quoted(&chars, index) {
+                        index = end;
+                        continue;
+                    }
+                }
+                HostLang::Python | HostLang::Lua | HostLang::R => {}
+            }
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if let Some((name, after)) = read_dotted_name(&chars, index) {
+            let mut cursor = after;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((found, end)) = parse_exec_call(lang, &name, &chars, cursor)
+            {
+                commands.extend(found);
+                index = end;
+                continue;
+            }
+            index = after;
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn line_comment(lang: HostLang, chars: &[char], index: usize) -> bool {
+    match lang {
+        HostLang::Python | HostLang::Ruby | HostLang::Perl | HostLang::R => chars[index] == '#',
+        HostLang::Php => chars[index] == '#' || starts_with(chars, index, "//"),
+        HostLang::Node => starts_with(chars, index, "//"),
+        HostLang::Lua => starts_with(chars, index, "--"),
+    }
+}
+
+fn block_comment(chars: &[char], index: usize) -> bool {
+    starts_with(chars, index, "/*")
+}
+
+fn starts_with(chars: &[char], index: usize, text: &str) -> bool {
+    text.chars()
+        .enumerate()
+        .all(|(offset, ch)| chars.get(index + offset) == Some(&ch))
+}
+
+fn skip_line(chars: &[char], index: usize) -> usize {
+    chars
+        .iter()
+        .skip(index)
+        .position(|ch| *ch == '\n')
+        .map_or(chars.len(), |offset| index + offset)
+}
+
+fn skip_block(chars: &[char], index: usize) -> usize {
+    let mut cursor = index;
+    while cursor + 1 < chars.len() {
+        if chars[cursor] == '*' && chars[cursor + 1] == '/' {
+            return cursor + 2;
+        }
+        cursor += 1;
+    }
+    chars.len()
+}
+
+fn read_dotted_name(chars: &[char], index: usize) -> Option<(String, usize)> {
+    if !chars[index].is_ascii_alphabetic() && chars[index] != '_' {
+        return None;
+    }
+    let mut cursor = index + 1;
+    while cursor < chars.len()
+        && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_' || chars[cursor] == '.')
+    {
+        cursor += 1;
+    }
+    let name: String = chars[index..cursor].iter().collect();
+    if name.ends_with('.') || name.is_empty() {
+        return None;
+    }
+    Some((name, cursor))
+}
+
+fn parse_exec_call(
+    lang: HostLang,
+    name: &str,
+    chars: &[char],
+    open: usize,
+) -> Option<(Vec<String>, usize)> {
+    let kind = exec_kind(lang, name)?;
+    let (inner, end) = balanced(chars, open, '(', ')')?;
+    let args = split_args(&inner);
+    let commands = match kind {
+        ExecKind::Shell => args
+            .first()
+            .and_then(|arg| arg_string(arg))
+            .into_iter()
+            .collect(),
+        ExecKind::Subprocess => subprocess_command(&args),
+        ExecKind::Spawn => spawn_command(&args),
+        ExecKind::Argv => argv_command(&args),
+        ExecKind::ExecList => exec_list_command(&args),
+        ExecKind::ExecArgs => exec_args_command(&args),
+    };
+    Some((commands, end))
+}
+
+fn exec_kind(lang: HostLang, name: &str) -> Option<ExecKind> {
+    match lang {
+        HostLang::Python => match name {
+            "os.system" | "os.popen" | "subprocess.getoutput" | "subprocess.getstatusoutput" => {
+                Some(ExecKind::Shell)
+            }
+            "subprocess.run"
+            | "subprocess.call"
+            | "subprocess.check_call"
+            | "subprocess.check_output"
+            | "subprocess.Popen" => Some(ExecKind::Subprocess),
+            "os.execv" | "os.execve" | "os.execvp" | "os.execvpe" => Some(ExecKind::ExecList),
+            "os.execl" | "os.execlp" => Some(ExecKind::ExecArgs),
+            _ => None,
+        },
+        HostLang::Node => match name.rsplit('.').next().unwrap_or(name) {
+            "execSync" | "exec" => Some(ExecKind::Shell),
+            "spawnSync" | "spawn" | "execFileSync" | "execFile" => Some(ExecKind::Spawn),
+            _ => None,
+        },
+        HostLang::Ruby | HostLang::Perl => match name.rsplit('.').next().unwrap_or(name) {
+            "system" | "exec" => Some(ExecKind::Argv),
+            _ => None,
+        },
+        HostLang::Php => match name.rsplit('.').next().unwrap_or(name) {
+            "system" | "exec" | "passthru" | "shell_exec" => Some(ExecKind::Shell),
+            _ => None,
+        },
+        HostLang::Lua => match name {
+            "os.execute" => Some(ExecKind::Shell),
+            _ => None,
+        },
+        HostLang::R => match name.rsplit('.').next().unwrap_or(name) {
+            "system" => Some(ExecKind::Shell),
+            _ => None,
+        },
+    }
+}
+
+fn subprocess_command(args: &[String]) -> Vec<String> {
+    let Some(first) = args.first() else {
+        return Vec::new();
+    };
+    if let Some(words) = arg_list(first) {
+        return vec![words.join(" ")];
+    }
+    if let Some(text) = arg_string(first)
+        && args.iter().any(|arg| shell_enabled(arg))
+    {
+        return vec![text];
+    }
+    Vec::new()
+}
+
+fn exec_list_command(args: &[String]) -> Vec<String> {
+    let Some(words) = args.get(1).and_then(|arg| arg_list(arg)) else {
+        return Vec::new();
+    };
+    if words.is_empty() {
+        Vec::new()
+    } else {
+        vec![words.join(" ")]
+    }
+}
+
+fn exec_args_command(args: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    for arg in args.iter().skip(1) {
+        let Some(text) = arg_string(arg) else {
+            break;
+        };
+        words.push(text);
+    }
+    if words.is_empty() {
+        Vec::new()
+    } else {
+        vec![words.join(" ")]
+    }
+}
+
+fn spawn_command(args: &[String]) -> Vec<String> {
+    let Some(command) = args.first().and_then(|arg| arg_string(arg)) else {
+        return Vec::new();
+    };
+    let Some(rest) = args.get(1).and_then(|arg| arg_list(arg)) else {
+        return Vec::new();
+    };
+    let mut words = vec![command];
+    words.extend(rest);
+    vec![words.join(" ")]
+}
+
+fn argv_command(args: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    for arg in args {
+        let Some(text) = arg_string(arg) else {
+            break;
+        };
+        words.push(text);
+    }
+    if words.is_empty() {
+        Vec::new()
+    } else {
+        vec![words.join(" ")]
+    }
+}
+
+fn shell_enabled(arg: &str) -> bool {
+    let compact: String = arg.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let Some(value) = compact.strip_prefix("shell=") else {
+        return false;
+    };
+    match value {
+        "True" => true,
+        "False" | "0" | "None" => false,
+        other => other.parse::<i64>().is_ok_and(|number| number != 0),
+    }
+}
+
+fn arg_string(arg: &str) -> Option<String> {
+    let chars: Vec<char> = arg.trim().chars().collect();
+    let (text, end) = read_quoted(&chars, 0)?;
+    if end == chars.len() { Some(text) } else { None }
+}
+
+fn arg_list(arg: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = arg.trim().chars().collect();
+    let open = *chars.first()?;
+    if open != '[' && open != '(' {
+        return None;
+    }
+    let close = if open == '[' { ']' } else { ')' };
+    let (inner, end) = balanced(&chars, 0, open, close)?;
+    if end != chars.len() {
+        return None;
+    }
+    let mut words = Vec::new();
+    for part in split_args(&inner) {
+        if part.trim().is_empty() {
+            continue;
+        }
+        words.push(arg_string(&part)?);
+    }
+    Some(words)
+}
+
+fn split_args(inner: &str) -> Vec<String> {
+    let chars: Vec<char> = inner.chars().collect();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0i32;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            current.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        match chars[index] {
+            '(' | '[' | '{' => {
+                depth += 1;
+                current.push(chars[index]);
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                current.push(chars[index]);
+            }
+            ',' if depth == 0 => parts.push(std::mem::take(&mut current)),
+            ch => current.push(ch),
+        }
+        index += 1;
+    }
+    if !current.trim().is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+fn balanced(chars: &[char], open: usize, left: char, right: char) -> Option<(String, usize)> {
+    if chars.get(open) != Some(&left) {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut inner = String::new();
+    let mut index = open;
+    while index < chars.len() {
+        if depth > 0
+            && let Some((_, end)) = read_quoted(chars, index)
+        {
+            inner.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if depth > 0 && line_comment_any(chars, index) {
+            index = skip_line(chars, index);
+            continue;
+        }
+        let ch = chars[index];
+        if ch == left {
+            depth += 1;
+            if depth > 1 {
+                inner.push(ch);
+            }
+            index += 1;
+            continue;
+        }
+        if ch == right {
+            depth -= 1;
+            if depth == 0 {
+                return Some((inner, index + 1));
+            }
+            inner.push(ch);
+            index += 1;
+            continue;
+        }
+        if depth > 0 {
+            inner.push(ch);
+        }
+        index += 1;
+    }
+    None
+}
+
+fn line_comment_any(chars: &[char], index: usize) -> bool {
+    chars[index] == '#' || starts_with(chars, index, "//")
+}
+
+fn read_quoted(chars: &[char], index: usize) -> Option<(String, usize)> {
+    let quote = *chars.get(index)?;
+    if !matches!(quote, '"' | '\'' | '`') {
+        return None;
+    }
+    let triple = matches!(quote, '"' | '\'')
+        && index + 2 < chars.len()
+        && chars[index + 1] == quote
+        && chars[index + 2] == quote;
+    let mut cursor = index + if triple { 3 } else { 1 };
+    let mut text = String::new();
+    if triple {
+        while cursor + 2 < chars.len() {
+            if chars[cursor] == quote && chars[cursor + 1] == quote && chars[cursor + 2] == quote {
+                return Some((text, cursor + 3));
+            }
+            if chars[cursor] == '\\' && cursor + 1 < chars.len() {
+                text.push(unescape(chars[cursor + 1]));
+                cursor += 2;
+                continue;
+            }
+            text.push(chars[cursor]);
+            cursor += 1;
+        }
+        return None;
+    }
+    while cursor < chars.len() {
+        if chars[cursor] == '\\' && cursor + 1 < chars.len() {
+            text.push(unescape(chars[cursor + 1]));
+            cursor += 2;
+            continue;
+        }
+        if chars[cursor] == quote {
+            return Some((text, cursor + 1));
+        }
+        if chars[cursor] == '\n' {
+            return None;
+        }
+        text.push(chars[cursor]);
+        cursor += 1;
+    }
+    None
+}
+
+fn unescape(ch: char) -> char {
+    match ch {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        other => other,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PackageTool {
+    Npm,
+    Pnpm,
+    Bun,
+}
+
+fn package_script_bodies(argv: &[String]) -> Vec<String> {
+    let Some(tool) = argv.first().and_then(|word| package_tool(word)) else {
+        return Vec::new();
+    };
+    let Some(name) = package_script_name(tool, argv) else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(package_dir(argv).join("package.json")) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(scripts) = value.get("scripts").and_then(|item| item.as_object()) else {
+        return Vec::new();
+    };
+    let mut bodies = Vec::new();
+    let pre = format!("pre{name}");
+    let post = format!("post{name}");
+    for key in [pre, name, post] {
+        if let Some(body) = scripts.get(&key).and_then(|item| item.as_str())
+            && !body.is_empty()
+        {
+            bodies.push(body.to_string());
+        }
+    }
+    bodies
+}
+
+fn package_tool(token: &str) -> Option<PackageTool> {
+    match command_basename(token).to_ascii_lowercase().as_str() {
+        "npm" => Some(PackageTool::Npm),
+        "pnpm" => Some(PackageTool::Pnpm),
+        "bun" => Some(PackageTool::Bun),
+        _ => None,
+    }
+}
+
+fn package_script_name(tool: PackageTool, argv: &[String]) -> Option<String> {
+    let positionals = package_positionals(argv);
+    let sub = positionals.get(1)?.as_str();
+    match (tool, sub) {
+        (PackageTool::Npm | PackageTool::Pnpm, "test" | "start") => Some(sub.to_string()),
+        (PackageTool::Npm | PackageTool::Pnpm | PackageTool::Bun, "run") => {
+            let name = positionals.get(2)?;
+            if name.is_empty() {
+                None
+            } else {
+                Some(name.clone())
+            }
+        }
+        _ => None,
+    }
+}
+
+fn package_dir(argv: &[String]) -> std::path::PathBuf {
+    let mut index = 0usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--prefix"
+            && let Some(dir) = argv.get(index + 1)
+        {
+            return std::path::PathBuf::from(dir);
+        }
+        if let Some(dir) = arg.strip_prefix("--prefix=")
+            && !dir.is_empty()
+        {
+            return std::path::PathBuf::from(dir);
+        }
+        index += 1;
+    }
+    std::path::PathBuf::from(".")
+}
+
+fn package_positionals(argv: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    let mut options = true;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if options && arg == "--" {
+            options = false;
+            index += 1;
+            continue;
+        }
+        if options && (arg == "--prefix" || arg.starts_with("--prefix=")) {
+            if arg == "--prefix" {
+                index += 1;
+            }
+            index += 1;
+            continue;
+        }
+        if options && arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    words
+}
+
 /// `git -c core.hooksPath=dir commit` runs the executable commit
 /// hooks. `merge` runs `pre-merge-commit`, `prepare-commit-msg`, and
 /// `post-merge`. `--no-verify` skips `pre-commit`, `commit-msg`, and
-/// `pre-merge-commit`.
+/// `pre-merge-commit`. `checkout`, `switch`, and `clone` run
+/// `post-checkout`. `clone -n` and `clone --no-checkout` do not.
+/// `cherry-pick` runs `prepare-commit-msg` and `post-commit`.
+/// `cherry-pick -n` and `cherry-pick --no-verify` do not.
+/// A fast-forward `pull` runs `post-merge`. `pull --no-rebase`
+/// also runs the merge commit hooks. `pull --rebase`, `pull -r`,
+/// and `pull --rebase=merges` run the rebase hooks. `pull
+/// --rebase=false` does not.
 fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec<String> {
     let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
         return Vec::new();
@@ -5129,12 +6081,76 @@ fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec
         ],
         "merge" if skip_verify => &["prepare-commit-msg", "post-merge"],
         "merge" => &["pre-merge-commit", "prepare-commit-msg", "post-merge"],
+        "checkout" | "switch" => &["post-checkout"],
+        "clone" if clone_checks_out(argv) => &["post-checkout"],
+        "cherry-pick" if cherry_pick_commits(argv) => &["prepare-commit-msg", "post-commit"],
+        "pull" if pull_rebases(argv) => &["pre-rebase", "post-checkout", "post-rewrite"],
+        "pull" if pull_merges(argv) => &[
+            "pre-merge-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-merge",
+        ],
+        "pull" => &["post-merge"],
+        "rebase" if rebase_skips_pre(argv) => &["post-checkout", "post-rewrite"],
+        "rebase" => &["pre-rebase", "post-checkout", "post-rewrite"],
+        "am" => &["applypatch-msg", "pre-applypatch", "post-applypatch"],
         _ => return Vec::new(),
     };
     names
         .iter()
         .filter_map(|name| hook_body(dir, name))
         .collect()
+}
+
+/// `git clone -n` and `--no-checkout` skip the worktree, so
+/// `post-checkout` does not run. A short cluster that contains `n`
+/// is the same flag.
+fn clone_checks_out(argv: &[String]) -> bool {
+    !argv.iter().any(|token| {
+        token == "--no-checkout"
+            || (token.starts_with('-') && !token.starts_with("--") && token.contains('n'))
+    })
+}
+
+/// A fast-forward `git pull` runs `post-merge` only. `git pull
+/// --no-rebase` that merges also runs `pre-merge-commit`,
+/// `prepare-commit-msg`, and `commit-msg`.
+fn pull_merges(argv: &[String]) -> bool {
+    argv.iter().any(|token| token == "--no-rebase")
+}
+
+/// `git pull --rebase`, `pull -r`, and `pull --rebase=merges` run the
+/// rebase hooks, including with `--no-verify`. `pull --rebase=false`
+/// is a merge or fast-forward and does not.
+fn pull_rebases(argv: &[String]) -> bool {
+    argv.iter().any(|token| {
+        if token == "--rebase" {
+            return true;
+        }
+        if let Some(value) = token.strip_prefix("--rebase=") {
+            return value != "false";
+        }
+        token.starts_with('-') && !token.starts_with("--") && token.contains('r')
+    })
+}
+
+/// `git rebase --no-verify` still runs `post-checkout` and
+/// `post-rewrite`. It does not run `pre-rebase`.
+fn rebase_skips_pre(argv: &[String]) -> bool {
+    argv.iter().any(|token| token == "--no-verify")
+}
+
+/// This git runs `prepare-commit-msg` and `post-commit` for a
+/// cherry-pick that creates a commit. `-n` is `--no-commit` and does
+/// not run them. `--no-verify` is not a cherry-pick flag here, so the
+/// command fails before any hook.
+fn cherry_pick_commits(argv: &[String]) -> bool {
+    !argv.iter().any(|token| {
+        token == "--no-verify"
+            || token == "--no-commit"
+            || (token.starts_with('-') && !token.starts_with("--") && token.contains('n'))
+    })
 }
 
 fn commit_no_verify(argv: &[String]) -> bool {
@@ -20154,6 +21170,255 @@ mod tests {
         assert_eq!(kind(&merge_skip), None, "{merge_skip}");
         write("post-merge", "rm -rf /tmp/w\n");
         assert_eq!(kind(&merge_skip), Some("bash.rm"), "{merge_skip}");
+        write("post-checkout", "rm -rf /tmp/co\n");
+        let checkout = format!("git -c core.hooksPath={dir} checkout -- a.txt");
+        assert_eq!(kind(&checkout), Some("bash.rm"), "{checkout}");
+        let switch = format!("git -c core.hooksPath={dir} switch main");
+        assert_eq!(kind(&switch), Some("bash.rm"), "{switch}");
+        let clone = format!("git -c core.hooksPath={dir} clone src dest");
+        assert_eq!(kind(&clone), Some("bash.rm"), "{clone}");
+        let clone_n = format!("git -c core.hooksPath={dir} clone -n src dest");
+        assert_eq!(kind(&clone_n), None, "{clone_n}");
+        let clone_nc = format!("git -c core.hooksPath={dir} clone --no-checkout src dest");
+        assert_eq!(kind(&clone_nc), None, "{clone_nc}");
+        assert_eq!(kind(&status), None, "{status}");
+        write("prepare-commit-msg", "echo ok\n");
+        write("post-commit", "echo ok\n");
+        write("commit-msg", "rm -rf /tmp/cm\n");
+        let cherry = format!("git -c core.hooksPath={dir} cherry-pick side");
+        assert_eq!(kind(&cherry), None, "{cherry}");
+        write("prepare-commit-msg", "rm -rf /tmp/prep\n");
+        assert_eq!(kind(&cherry), Some("bash.rm"), "{cherry}");
+        let cherry_n = format!("git -c core.hooksPath={dir} cherry-pick -n side");
+        assert_eq!(kind(&cherry_n), None, "{cherry_n}");
+        let cherry_nv = format!("git -c core.hooksPath={dir} cherry-pick --no-verify side");
+        assert_eq!(kind(&cherry_nv), None, "{cherry_nv}");
+        write("post-merge", "rm -rf /tmp/pm\n");
+        let pull = format!("git -c core.hooksPath={dir} pull origin main");
+        assert_eq!(kind(&pull), Some("bash.rm"), "{pull}");
+        write("post-merge", "echo ok\n");
+        write("pre-merge-commit", "rm -rf /tmp/pre\n");
+        assert_eq!(kind(&pull), None, "{pull}");
+        let pull_merge = format!("git -c core.hooksPath={dir} pull --no-rebase origin main");
+        assert_eq!(kind(&pull_merge), Some("bash.rm"), "{pull_merge}");
+        write("pre-rebase", "echo ok\n");
+        write("post-checkout", "echo ok\n");
+        write("post-rewrite", "echo ok\n");
+        let pull_rebase = format!("git -c core.hooksPath={dir} pull --rebase origin main");
+        assert_eq!(kind(&pull_rebase), None, "{pull_rebase}");
+        write("pre-rebase", "rm -rf /tmp/prb\n");
+        assert_eq!(kind(&pull_rebase), Some("bash.rm"), "{pull_rebase}");
+        let pull_r = format!("git -c core.hooksPath={dir} pull -r origin main");
+        assert_eq!(kind(&pull_r), Some("bash.rm"), "{pull_r}");
+        let pull_merges = format!("git -c core.hooksPath={dir} pull --rebase=merges origin main");
+        assert_eq!(kind(&pull_merges), Some("bash.rm"), "{pull_merges}");
+        let pull_nv = format!("git -c core.hooksPath={dir} pull --rebase --no-verify origin main");
+        assert_eq!(kind(&pull_nv), Some("bash.rm"), "{pull_nv}");
+        write("pre-rebase", "echo ok\n");
+        write("post-merge", "rm -rf /tmp/pm\n");
+        let pull_false = format!("git -c core.hooksPath={dir} pull --rebase=false origin main");
+        assert_eq!(kind(&pull_false), Some("bash.rm"), "{pull_false}");
+        write("post-merge", "echo ok\n");
+        assert_eq!(kind(&pull_false), None, "{pull_false}");
+        assert_eq!(kind(&pull_rebase), None, "{pull_rebase}");
+        write("pre-rebase", "rm -rf /tmp/prb\n");
+        let rebase = format!("git -c core.hooksPath={dir} rebase main");
+        assert_eq!(kind(&rebase), Some("bash.rm"), "{rebase}");
+        write("pre-rebase", "echo ok\n");
+        write("post-checkout", "echo ok\n");
+        write("post-rewrite", "echo ok\n");
+        assert_eq!(kind(&rebase), None, "{rebase}");
+        let rebase_nv = format!("git -c core.hooksPath={dir} rebase --no-verify main");
+        write("pre-rebase", "rm -rf /tmp/prb\n");
+        assert_eq!(kind(&rebase_nv), None, "{rebase_nv}");
+        write("post-rewrite", "rm -rf /tmp/rw\n");
+        assert_eq!(kind(&rebase_nv), Some("bash.rm"), "{rebase_nv}");
+        write("applypatch-msg", "rm -rf /tmp/am\n");
+        let am = format!("git -c core.hooksPath={dir} am patch");
+        assert_eq!(kind(&am), Some("bash.rm"), "{am}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The host ran these interpreters and package scripts. A file that
+    /// only prints the same words does not run them. A missing file
+    /// stays unmatched. `python3 -c` does not read a redirected file.
+    #[test]
+    fn host_programs_score_the_command_they_run() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-host-prog-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        let write = |name: &str, body: &str| {
+            std::fs::write(root.join(name), body).expect(name);
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let show = root.display().to_string();
+        write(
+            "system.py",
+            "import os\nos.system(\"git push origin main\")\n",
+        );
+        write(
+            "popen.py",
+            "import os\nprint(os.popen(\"git push origin main\").read())\n",
+        );
+        write(
+            "run.py",
+            "import subprocess\nsubprocess.run([\"git\", \"push\", \"origin\", \"main\"])\n",
+        );
+        write(
+            "call.py",
+            "import subprocess\nsubprocess.check_call([\"git\", \"push\", \"origin\", \"main\"])\n",
+        );
+        write(
+            "shell.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=True)\n",
+        );
+        write(
+            "plain.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\")\n",
+        );
+        write("print.py", "print(\"git push origin main\")\n");
+        write(
+            "comment.py",
+            "# os.system(\"git push origin main\")\nprint(\"ok\")\n",
+        );
+        write(
+            "exec.js",
+            "const {execSync} = require(\"child_process\");\nexecSync(\"git push origin main\");\n",
+        );
+        write(
+            "spawn.js",
+            "const {spawnSync} = require(\"child_process\");\nspawnSync(\"git\", [\"push\", \"origin\", \"main\"]);\n",
+        );
+        write("log.js", "console.log(\"git push origin main\");\n");
+        write("system.rb", "system(\"git push origin main\")\n");
+        write(
+            "argv.rb",
+            "system(\"git\", \"push\", \"origin\", \"main\")\n",
+        );
+        write("tick.rb", "print `git push origin main`\n");
+        write("puts.rb", "puts \"git push origin main\"\n");
+        write("system.pl", "system(\"git push origin main\");\n");
+        write("tick.pl", "print `git push origin main`;\n");
+        write("print.pl", "print \"git push origin main\\n\";\n");
+        write("system.php", "<?php\nsystem(\"git push origin main\");\n");
+        write("tick.php", "<?php\necho `git push origin main`;\n");
+        write("echo.php", "<?php\necho \"git push origin main\\n\";\n");
+        write(
+            "execvp.py",
+            "import os\nos.execvp(\"git\", [\"git\", \"push\", \"origin\", \"main\"])\n",
+        );
+        write(
+            "execl.py",
+            "import os\nos.execl(\"/bin/git\", \"git\", \"push\", \"origin\", \"main\")\n",
+        );
+        write(
+            "shell1.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=1)\n",
+        );
+        write(
+            "shell2.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=2)\n",
+        );
+        write(
+            "shell0.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=0)\n",
+        );
+        write(
+            "false.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=False)\n",
+        );
+        write("run.lua", "os.execute(\"git push origin main\")\n");
+        write(
+            "comment.lua",
+            "-- os.execute(\"git push origin main\")\nprint(1)\n",
+        );
+        write("run.R", "system(\"git push origin main\")\n");
+        std::fs::write(root.join("justfile"), "push:\n\tgit push origin main\n").expect("justfile");
+        write(
+            "run.swift",
+            "import Foundation\nlet task = Process()\ntask.executableURL = URL(fileURLWithPath: \"/usr/bin/env\")\ntask.arguments = [\"git\", \"push\", \"origin\", \"main\"]\ntry? task.run()\ntask.waitUntilExit()\n",
+        );
+        write("print.swift", "print(\"git push origin main\")\n");
+        write(
+            "note.swift",
+            "// task.arguments = [\"git\", \"push\", \"origin\", \"main\"]\n// task.run()\nprint(1)\n",
+        );
+        write(
+            "package.json",
+            "{\"scripts\":{\"pretest\":\"git push origin pretest\",\"test\":\"echo ok\",\"posttest\":\"echo ok\",\"prestart\":\"echo ok\",\"start\":\"git push origin start\",\"poststart\":\"echo ok\",\"preunused\":\"echo ok\",\"unused\":\"git push origin unused\",\"postunused\":\"echo ok\"}}",
+        );
+        let review = [
+            format!("python3 {show}/system.py"),
+            format!("python3 {show}/popen.py"),
+            format!("python3 {show}/run.py"),
+            format!("python3 {show}/call.py"),
+            format!("python3 {show}/shell.py"),
+            format!("python3 < {show}/system.py"),
+            format!("python3 - < {show}/run.py"),
+            "python3 -c 'import os; os.system(\"git push origin main\")'".to_string(),
+            format!("node {show}/exec.js"),
+            format!("node {show}/spawn.js"),
+            format!("node < {show}/exec.js"),
+            "node -e 'require(\"child_process\").execSync(\"git push origin main\")'".to_string(),
+            format!("ruby {show}/system.rb"),
+            format!("ruby {show}/argv.rb"),
+            format!("ruby {show}/tick.rb"),
+            format!("ruby < {show}/system.rb"),
+            "ruby -e 'system(\"git push origin main\")'".to_string(),
+            format!("perl {show}/system.pl"),
+            format!("perl {show}/tick.pl"),
+            format!("perl < {show}/system.pl"),
+            "perl -e 'system(\"git push origin main\")'".to_string(),
+            format!("php {show}/system.php"),
+            format!("php {show}/tick.php"),
+            format!("php < {show}/system.php"),
+            "php -r 'system(\"git push origin main\");'".to_string(),
+            format!("npm test --prefix {show}"),
+            format!("npm start --prefix {show}"),
+            format!("npm run unused --prefix {show}"),
+            format!("python3 {show}/execvp.py"),
+            format!("python3 {show}/execl.py"),
+            format!("python3 {show}/shell1.py"),
+            format!("python3 {show}/shell2.py"),
+            format!("lua {show}/run.lua"),
+            format!("Rscript {show}/run.R"),
+            format!("just --justfile {show}/justfile push"),
+            format!("uv run --no-project {show}/system.py"),
+            format!("swift {show}/run.swift"),
+        ];
+        for command in &review {
+            assert_eq!(kind(command), Some("git.push"), "{command}");
+        }
+        let quiet = [
+            format!("python3 {show}/print.py"),
+            format!("python3 {show}/comment.py"),
+            format!("python3 {show}/plain.py"),
+            format!("python3 {show}/missing.py"),
+            format!("python3 -c 'print(1)' < {show}/system.py"),
+            format!("node {show}/log.js"),
+            format!("ruby {show}/puts.rb"),
+            format!("perl {show}/print.pl"),
+            format!("php {show}/echo.php"),
+            format!("npm run --prefix {show}"),
+            format!("python3 {show}/shell0.py"),
+            format!("python3 {show}/false.py"),
+            format!("lua {show}/comment.lua"),
+            format!("just --justfile {show}/justfile absent"),
+            format!("swift {show}/print.swift"),
+            format!("swift {show}/note.swift"),
+        ];
+        for command in &quiet {
+            assert_eq!(kind(command), None, "{command}");
+        }
+        let previous = std::env::current_dir().expect("cwd");
+        std::env::set_current_dir(&root).expect("cd");
+        assert_eq!(kind("pnpm test"), Some("git.push"));
+        assert_eq!(kind("pnpm run unused"), Some("git.push"));
+        assert_eq!(kind("bun run test"), Some("git.push"));
+        std::env::set_current_dir(previous).expect("back");
         let _ = std::fs::remove_dir_all(&root);
     }
 
