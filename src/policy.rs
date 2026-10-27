@@ -1002,6 +1002,66 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_crystal(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_dart_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ocaml_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_escript(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_pandoc_filter(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_ldc_run(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_exec(
                 policy,
@@ -10643,6 +10703,352 @@ fn groovy_execute_at(chars: &[char], index: usize) -> bool {
     chars
         .get(index + method.len())
         .is_none_or(|ch| !ch.is_ascii_alphanumeric() && *ch != '_')
+}
+
+/// `crystal eval` and `crystal run file.cr` run backtick commands.
+/// A quoted string does not.
+#[allow(clippy::too_many_arguments)]
+fn score_crystal<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("crystal") {
+        return;
+    }
+    let words = script_positionals(argv);
+    let commands = match words.first().map(String::as_str) {
+        Some("eval") => words
+            .get(1)
+            .map(|code| julia_commands(code))
+            .unwrap_or_default(),
+        Some("run") => words
+            .iter()
+            .skip(1)
+            .find(|word| word.ends_with(".cr"))
+            .and_then(|word| load_text(&shell_path(word, dir)))
+            .map(|text| julia_commands(&text))
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `dart file.dart` runs `Process.run("prog", ["args"])`.
+/// A printed string does not.
+#[allow(clippy::too_many_arguments)]
+fn score_dart_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = extension_script(argv, "dart", ".dart", dir) else {
+        return;
+    };
+    let commands = dart_processes(&strip_c_comments(&text));
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `ocaml file.ml` runs `Sys.command "cmd"`. `print_endline` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_ocaml_file<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = extension_script(argv, "ocaml", ".ml", dir) else {
+        return;
+    };
+    let commands = call_strings(&strip_ocaml_comments(&text), "Sys.command");
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `escript file.escript` runs `os:cmd("cmd")`. `io:format` does not.
+#[allow(clippy::too_many_arguments)]
+fn score_escript<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = extension_script(argv, "escript", ".escript", dir) else {
+        return;
+    };
+    let commands = quoted_call(&text, "os:cmd", &['%']);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `pandoc --lua-filter=file` runs `io.popen` and `os.execute` in that file.
+#[allow(clippy::too_many_arguments)]
+fn score_pandoc_filter<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("pandoc") {
+        return;
+    }
+    let mut commands = Vec::new();
+    for filter in pandoc_filters(argv, dir) {
+        let Some(text) = load_text(&filter) else {
+            continue;
+        };
+        let text = strip_lua_comments(&text);
+        commands.extend(quoted_call(&text, "io.popen", &[]));
+        commands.extend(quoted_call(&text, "os.execute", &[]));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `ldc2 -run file.d` runs `executeShell("cmd")`. `writeln` does not.
+/// Without `-run` the file is not executed.
+#[allow(clippy::too_many_arguments)]
+fn score_ldc_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("ldc2") {
+        return;
+    }
+    if !argv.iter().any(|arg| arg == "-run") {
+        return;
+    }
+    let Some(text) = script_positionals(argv)
+        .into_iter()
+        .find(|word| word.ends_with(".d"))
+        .and_then(|word| load_text(&shell_path(&word, dir)))
+    else {
+        return;
+    };
+    let commands = quoted_call(&strip_c_comments(&text), "executeShell", &[]);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn script_positionals(argv: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        words.push(arg.clone());
+    }
+    words
+}
+
+fn extension_script(
+    argv: &[String],
+    command: &str,
+    ext: &str,
+    dir: Option<&str>,
+) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
+    {
+        return None;
+    }
+    script_positionals(argv)
+        .into_iter()
+        .find(|word| word.ends_with(ext))
+        .and_then(|word| load_text(&shell_path(&word, dir)))
+}
+
+fn load_text(path: &str) -> Option<String> {
+    match load_script_file(path) {
+        Some(ScriptFile::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn pandoc_filters(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut filters = Vec::new();
+    for arg in argv.iter().skip(1) {
+        if let Some(path) = arg.strip_prefix("--lua-filter=")
+            && !path.is_empty()
+        {
+            filters.push(shell_path(path, dir));
+        }
+    }
+    filters
+}
+
+fn dart_processes(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "Process.run")
+            && let Some(command) = dart_run_after(&chars, index + "Process.run".len())
+        {
+            commands.push(command);
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn dart_run_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if chars.get(index) == Some(&'(') {
+        index += 1;
+        while index < chars.len() && chars[index].is_whitespace() {
+            index += 1;
+        }
+    }
+    let (program, mut cursor) = read_quoted(chars, index)?;
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if chars.get(cursor) == Some(&',') {
+        cursor += 1;
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+    }
+    let mut words = vec![program];
+    if chars.get(cursor) == Some(&'[')
+        && let Some((inner, _)) = balanced(chars, cursor, '[', ']')
+    {
+        let listed: Vec<char> = inner.chars().collect();
+        let mut listed_at = 0usize;
+        while listed_at < listed.len() {
+            while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+                listed_at += 1;
+            }
+            if listed.get(listed_at) == Some(&',') {
+                listed_at += 1;
+                continue;
+            }
+            let Some((word, end)) = read_quoted(&listed, listed_at) else {
+                break;
+            };
+            words.push(word);
+            listed_at = end;
+        }
+    }
+    Some(quote_argv(&words))
+}
+
+fn strip_c_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'/') {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            out.push(' ');
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn strip_ocaml_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '(' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == ')') {
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            out.push(' ');
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+fn strip_lua_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '-' && chars.get(index + 1) == Some(&'-') {
+            if chars.get(index + 2) == Some(&'[') && chars.get(index + 3) == Some(&'[') {
+                index += 4;
+                while index + 1 < chars.len() && !(chars[index] == ']' && chars[index + 1] == ']') {
+                    index += 1;
+                }
+                index = (index + 2).min(chars.len());
+                out.push(' ');
+                continue;
+            }
+            index = skip_line(&chars, index);
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -25447,6 +25853,103 @@ mod tests {
         assert_eq!(kind(&file), Some("git.push"), "{file}");
         let quiet = format!("cd {root_s} && groovy quiet.groovy");
         assert_eq!(kind(&quiet), None, "{quiet}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Crystal backticks, Dart `Process.run`, OCaml `Sys.command`,
+    /// escript `os:cmd`, Pandoc Lua `io.popen` and `os.execute`, and
+    /// `ldc2 -run` `executeShell` run that command. A printed string
+    /// does not. `ldc2` without `-run` does not execute the file.
+    #[test]
+    fn later_hosts_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-later-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        let write = |name: &str, body: &str| {
+            std::fs::write(root.join(name), body).expect(name);
+        };
+        write("p.cr", "print `git push origin main`\n");
+        write("quiet.cr", "print \"git push origin main\"\n");
+        write(
+            "p.dart",
+            "import 'dart:io';\nvoid main() { Process.run(\"git\", [\"push\", \"origin\", \"main\"]); }\n",
+        );
+        write(
+            "quiet.dart",
+            "void main() { print(\"git push origin main\"); }\n",
+        );
+        write("p.ml", "let _ = Sys.command \"git push origin main\"\n");
+        write(
+            "quiet.ml",
+            "let _ = print_endline \"git push origin main\"\n",
+        );
+        write("note.ml", "(* Sys.command \"git push origin main\" *)\n");
+        write("p.escript", "os:cmd(\"git push origin main\").\n");
+        write("quiet.escript", "io:format(\"git push origin main\").\n");
+        write(
+            "f.lua",
+            "function Pandoc(doc)\n  os.execute(\"git push origin main\")\n  return doc\nend\n",
+        );
+        write(
+            "popen.lua",
+            "function Pandoc(doc)\n  io.popen(\"git push origin main\")\n  return doc\nend\n",
+        );
+        write(
+            "quiet.lua",
+            "function Pandoc(doc)\n  -- os.execute(\"git push origin main\")\n  return doc\nend\n",
+        );
+        write(
+            "p.d",
+            "void main(){ executeShell(\"git push origin main\"); }\n",
+        );
+        write(
+            "quiet.d",
+            "void main(){ writeln(\"git push origin main\"); }\n",
+        );
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let cases = [
+            (
+                "crystal eval 'print `git push origin main`'".to_string(),
+                Some("git.push"),
+            ),
+            (
+                "crystal eval 'print \"git push origin main\"'".to_string(),
+                None,
+            ),
+            (format!("cd {root_s} && crystal run p.cr"), Some("git.push")),
+            (format!("cd {root_s} && crystal run quiet.cr"), None),
+            (format!("cd {root_s} && dart p.dart"), Some("git.push")),
+            (format!("cd {root_s} && dart quiet.dart"), None),
+            (format!("cd {root_s} && ocaml p.ml"), Some("git.push")),
+            (format!("cd {root_s} && ocaml quiet.ml"), None),
+            (format!("cd {root_s} && ocaml note.ml"), None),
+            (
+                format!("cd {root_s} && escript p.escript"),
+                Some("git.push"),
+            ),
+            (format!("cd {root_s} && escript quiet.escript"), None),
+            (
+                format!("pandoc hi.md --lua-filter={root_s}/f.lua"),
+                Some("git.push"),
+            ),
+            (
+                format!("pandoc hi.md --lua-filter={root_s}/popen.lua"),
+                Some("git.push"),
+            ),
+            (
+                format!("pandoc hi.md --lua-filter={root_s}/quiet.lua"),
+                None,
+            ),
+            (format!("pandoc hi.md"), None),
+            (format!("ldc2 -run {root_s}/p.d"), Some("git.push")),
+            (format!("ldc2 -run {root_s}/quiet.d"), None),
+            (format!("ldc2 {root_s}/p.d"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
