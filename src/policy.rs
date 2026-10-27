@@ -992,6 +992,8 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &octave_sources, depth, local, git, best);
             let generated = go_generate_commands(&executed.argv, host_dir);
             scan_isolated(policy, tool_name, &generated, depth, local, git, best);
+            let preloaded = env_preload_commands(&executed.argv, local, host_dir);
+            scan_isolated(policy, tool_name, &preloaded, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6621,14 +6623,22 @@ fn python_exec_opens(text: &str) -> Vec<String> {
 
 fn exec_before_open(chars: &[char], index: usize) -> bool {
     let mut cursor = index;
-    while cursor > 0 && chars[cursor - 1].is_whitespace() {
-        cursor -= 1;
-    }
-    if cursor > 0 && chars[cursor - 1] == '(' {
-        cursor -= 1;
-    }
-    while cursor > 0 && chars[cursor - 1].is_whitespace() {
-        cursor -= 1;
+    loop {
+        while cursor > 0 && chars[cursor - 1].is_whitespace() {
+            cursor -= 1;
+        }
+        if cursor > 0 && chars[cursor - 1] == '(' {
+            cursor -= 1;
+            continue;
+        }
+        if cursor >= 7
+            && starts_with(chars, cursor - 7, "compile")
+            && (cursor == 7 || !chars[cursor - 8].is_ascii_alphanumeric())
+        {
+            cursor -= 7;
+            continue;
+        }
+        break;
     }
     cursor >= 4
         && starts_with(chars, cursor - 4, "exec")
@@ -6680,6 +6690,115 @@ fn lua_module_names(argv: &[String]) -> Vec<String> {
         index += 1;
     }
     names
+}
+
+fn env_preload_commands(
+    argv: &[String],
+    env: &[(String, String)],
+    dir: Option<&str>,
+) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if base.eq_ignore_ascii_case("ruby") {
+        return env_option_files(env, "RUBYOPT", "ruby", dir, HostLang::Ruby, ruby_requires);
+    }
+    if base.eq_ignore_ascii_case("node") {
+        return env_option_files(
+            env,
+            "NODE_OPTIONS",
+            "node",
+            dir,
+            HostLang::Node,
+            node_preloads,
+        );
+    }
+    if base.eq_ignore_ascii_case("perl") {
+        return perl_opt_files(env, dir);
+    }
+    Vec::new()
+}
+
+fn env_option_files(
+    env: &[(String, String)],
+    name: &str,
+    command: &str,
+    dir: Option<&str>,
+    lang: HostLang,
+    paths: fn(&[String]) -> Vec<String>,
+) -> Vec<String> {
+    let Some(value) = last_assignment(env, name) else {
+        return Vec::new();
+    };
+    let mut argv = vec![command.to_string()];
+    argv.extend(value.split_whitespace().map(str::to_string));
+    let mut commands = Vec::new();
+    for raw in paths(&argv) {
+        let Some(path) = resolve_script_path(dir, &raw) else {
+            continue;
+        };
+        if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+            commands.extend(interpreter_commands(lang, &body));
+        }
+    }
+    commands
+}
+
+fn perl_opt_files(env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PERL5OPT") else {
+        return Vec::new();
+    };
+    let mut argv = vec!["perl".to_string()];
+    argv.extend(value.split_whitespace().map(str::to_string));
+    let mut dirs = Vec::new();
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(inc) = argv.get(index) {
+                dirs.push(inc.clone());
+            }
+        } else if let Some(inc) = arg.strip_prefix("-I")
+            && !inc.is_empty()
+        {
+            dirs.push(inc.to_string());
+        } else if arg == "-M" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(perl_module_name(name));
+            }
+        } else if let Some(name) = arg.strip_prefix("-M")
+            && !name.is_empty()
+        {
+            names.push(perl_module_name(name));
+        }
+        index += 1;
+    }
+    let base = shell_dir(dir);
+    let mut commands = Vec::new();
+    for name in names {
+        if name.is_empty() || name.contains("..") {
+            continue;
+        }
+        let rel = name.replace("::", "/");
+        for inc in &dirs {
+            let root = std::path::Path::new(inc);
+            let root = if root.is_absolute() {
+                root.to_path_buf()
+            } else {
+                base.join(root)
+            };
+            let path = root.join(format!("{rel}.pm"));
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
+                commands.extend(interpreter_commands(HostLang::Perl, &body));
+                break;
+            }
+        }
+    }
+    commands
 }
 
 fn octave_source_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
@@ -23785,6 +23904,7 @@ mod tests {
             "import os\nos.system(\"git push origin main\")\n",
         );
         write("push.pl", "system(\"git push origin main\");\n");
+        write("Push.pm", "system(\"git push origin main\");\n1;\n");
         write("push.php", "<?php\nsystem(\"git push origin main\");\n");
         write("push.R", "system(\"git push origin main\")\n");
         write("push.jl", "run(`git push origin main`)\n");
@@ -23914,6 +24034,12 @@ mod tests {
             format!("cd {show} && php -r 'require_once \"push.php\";'"),
             format!("cd {show} && octave --quiet --eval 'source(\"push.m\");'"),
             format!("cd {show}/gogen && go generate"),
+            format!("cd {show} && RUBYOPT='-r./push.rb' ruby -e '0'"),
+            format!("cd {show} && NODE_OPTIONS='--require ./push.js' node -e '0'"),
+            format!("cd {show} && PERL5OPT='-I. -MPush' perl -e '0'"),
+            format!(
+                "cd {show} && python3 -c 'exec(compile(open(\"push.py\").read(), \"push.py\", \"exec\"))'"
+            ),
             "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
@@ -23992,6 +24118,9 @@ mod tests {
                 "cd {show} && python3 -c 'import importlib; importlib.import_module(\"os.path\")'"
             ),
             format!("cd {show}/gogen && go build"),
+            format!("cd {show} && RUBYOPT='-r./missing.rb' ruby -e '0'"),
+            format!("cd {show} && NODE_OPTIONS='--require ./missing.js' node -e '0'"),
+            format!("cd {show} && PERL5OPT='-I. -MMissing' perl -e '0'"),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
