@@ -965,6 +965,7 @@ fn consider_segment<'a>(
             score_elixir_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_erlang_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_go_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_cargo_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6134,6 +6135,171 @@ fn go_commands(text: &str) -> Vec<String> {
         index += 1;
     }
     commands
+}
+
+fn score_cargo_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = cargo_main(argv) else {
+        return;
+    };
+    let commands = rust_commands(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cargo_main(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut manifest = None;
+    let mut running = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 1;
+            manifest = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=")
+            && !path.is_empty()
+        {
+            manifest = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "run" {
+            running = true;
+        }
+        index += 1;
+    }
+    if !running {
+        return None;
+    }
+    let manifest = manifest.unwrap_or_else(|| "Cargo.toml".to_string());
+    let main = std::path::Path::new(&manifest)
+        .parent()
+        .unwrap_or(std::path::Path::new(""))
+        .join("src/main.rs");
+    match load_script_file(&main.display().to_string()) {
+        Some(ScriptFile::Text(text)) => Some(text),
+        _ => None,
+    }
+}
+
+fn rust_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "Command::new";
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if matches!(chars[index], '"' | '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, marker)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+            && let Some((words, end)) = rust_command_at(&chars, index + marker.len())
+        {
+            if !words.is_empty() {
+                commands.push(words.join(" "));
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn rust_command_at(chars: &[char], mut cursor: usize) -> Option<(Vec<String>, usize)> {
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if chars.get(cursor) != Some(&'(') {
+        return None;
+    }
+    let (inner, mut end) = balanced(chars, cursor, '(', ')')?;
+    let mut words = Vec::new();
+    if let Some(program) = arg_string(inner.trim()) {
+        words.push(program);
+    }
+    cursor = end;
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    if starts_with(chars, cursor, ".args") {
+        cursor += ".args".len();
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if chars.get(cursor) == Some(&'(')
+            && let Some((args_inner, args_end)) = balanced(chars, cursor, '(', ')')
+        {
+            words.extend(rust_string_list(&args_inner));
+            end = args_end;
+        }
+    }
+    Some((words, end))
+}
+
+fn rust_string_list(inner: &str) -> Vec<String> {
+    let chars: Vec<char> = inner.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    let Some('[') = chars.get(index).copied() else {
+        return Vec::new();
+    };
+    let Some((list_inner, _)) = balanced(&chars, index, '[', ']') else {
+        return Vec::new();
+    };
+    let listed: Vec<char> = list_inner.chars().collect();
+    let mut words = Vec::new();
+    let mut listed_at = 0usize;
+    while listed_at < listed.len() {
+        while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+            listed_at += 1;
+        }
+        if listed.get(listed_at) == Some(&',') {
+            listed_at += 1;
+            continue;
+        }
+        let Some((word, end)) = read_quoted(&listed, listed_at) else {
+            break;
+        };
+        words.push(word);
+        listed_at = end;
+    }
+    words
 }
 
 fn score_cmake_script<'a>(
@@ -22587,6 +22753,18 @@ mod tests {
             "execute_process(COMMAND git push origin main)\n",
         );
         write("quiet.cmake", "message(STATUS \"git push origin main\")\n");
+        let app = root.join("app/src");
+        std::fs::create_dir_all(&app).expect("app");
+        std::fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("toml");
+        std::fs::write(
+            app.join("main.rs"),
+            "fn main() {\n    let _ = std::process::Command::new(\"git\")\n        .args([\"push\", \"origin\", \"main\"])\n        .output();\n}\n",
+        )
+        .expect("cargo main");
         write("run.m", "system(\"git push origin main\");\n");
         write("quiet.m", "disp(1);\n");
         write("run.jl", "run(`git push origin main`)\n");
@@ -22684,6 +22862,7 @@ mod tests {
             "erl -noshell -eval 'os:cmd(\"git push origin main\"), halt().'".to_string(),
             format!("go run {show}/main.go"),
             format!("cmake -P {show}/run.cmake"),
+            format!("cargo run --quiet --manifest-path {show}/app/Cargo.toml"),
             format!("octave --quiet {show}/run.m"),
             format!("julia --startup-file=no {show}/run.jl"),
             format!("elixir {show}/run.exs"),
@@ -22735,6 +22914,7 @@ mod tests {
             format!("just -f {show}/justfile absent"),
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
+            format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
             format!("octave --quiet {show}/quiet.m"),
             format!("julia --startup-file=no {show}/quiet.jl"),
             format!("elixir {show}/quiet.exs"),
