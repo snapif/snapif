@@ -9620,6 +9620,8 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
 /// none of them. `npm install ./pkg` runs that directory. A bare
 /// package name does not. `bun install lodash` still runs the install
 /// directory. `pnpm --dir` wins over `--prefix`. `bun` uses `--cwd`.
+/// `npm ci` does this when a lock file is present. `pnpm ci` does too.
+/// `npm rebuild` skips `prepare`. `pnpm rebuild` does not.
 #[allow(clippy::too_many_arguments)]
 fn score_install_scripts<'a>(
     policy: &'a Policy,
@@ -9646,12 +9648,37 @@ fn install_script_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
         return Vec::new();
     };
     let words = install_command_words(argv);
-    if words.get(1).map(String::as_str) != Some("install") {
+    let Some(sub) = words.get(1).map(String::as_str) else {
         return Vec::new();
-    }
+    };
     let packages = &words[2..];
+    let root = install_package_dir(argv, dir);
+    match (tool, sub) {
+        (PackageTool::Npm | PackageTool::Pnpm | PackageTool::Bun, "install") => {
+            install_bodies(tool, packages, &root, dir)
+        }
+        (PackageTool::Npm, "ci") if packages.is_empty() && npm_ci_has_lock(&root) => {
+            package_lifecycle(&root.join("package.json"), true)
+        }
+        (PackageTool::Pnpm, "ci") if packages.is_empty() => {
+            package_lifecycle(&root.join("package.json"), true)
+        }
+        (PackageTool::Npm, "rebuild") => npm_rebuild_bodies(packages, &root),
+        (PackageTool::Pnpm, "rebuild") if packages.is_empty() => {
+            package_lifecycle(&root.join("package.json"), true)
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn install_bodies(
+    tool: PackageTool,
+    packages: &[String],
+    root: &std::path::Path,
+    dir: Option<&str>,
+) -> Vec<String> {
     if packages.is_empty() || tool == PackageTool::Bun {
-        return package_lifecycle(&install_package_dir(argv, dir).join("package.json"));
+        return package_lifecycle(&root.join("package.json"), true);
     }
     if tool != PackageTool::Npm {
         return Vec::new();
@@ -9660,13 +9687,47 @@ fn install_script_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
     for arg in packages {
         if npm_local_spec(arg) {
             let path = std::path::PathBuf::from(shell_path(arg, dir)).join("package.json");
-            bodies.extend(package_lifecycle(&path));
+            bodies.extend(package_lifecycle(&path, true));
         }
     }
     bodies
 }
 
-fn package_lifecycle(path: &std::path::Path) -> Vec<String> {
+fn npm_rebuild_bodies(packages: &[String], root: &std::path::Path) -> Vec<String> {
+    if packages.is_empty() {
+        return package_lifecycle(&root.join("package.json"), false);
+    }
+    let mut bodies = Vec::new();
+    for name in packages {
+        if let Some(path) = npm_rebuild_manifest(root, name) {
+            bodies.extend(package_lifecycle(&path, false));
+        }
+    }
+    bodies
+}
+
+/// `npm rebuild foo` reads `node_modules/foo`. A scoped name reads
+/// `node_modules/@scope/foo`. `prepare` does not run.
+fn npm_rebuild_manifest(root: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    if name.is_empty() || name.starts_with('-') || name.starts_with('.') || name.contains('\\') {
+        return None;
+    }
+    let rel = if let Some((scope, pkg)) = name.split_once('/') {
+        if !scope.starts_with('@') || pkg.is_empty() || pkg.contains('/') {
+            return None;
+        }
+        std::path::PathBuf::from(scope).join(pkg)
+    } else {
+        std::path::PathBuf::from(name)
+    };
+    Some(root.join("node_modules").join(rel).join("package.json"))
+}
+
+fn npm_ci_has_lock(dir: &std::path::Path) -> bool {
+    dir.join("package-lock.json").is_file() || dir.join("npm-shrinkwrap.json").is_file()
+}
+
+fn package_lifecycle(path: &std::path::Path, prepare: bool) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -9676,9 +9737,14 @@ fn package_lifecycle(path: &std::path::Path) -> Vec<String> {
     let Some(scripts) = value.get("scripts").and_then(|item| item.as_object()) else {
         return Vec::new();
     };
+    let keys: &[&str] = if prepare {
+        &["preinstall", "install", "postinstall", "prepare"]
+    } else {
+        &["preinstall", "install", "postinstall"]
+    };
     let mut bodies = Vec::new();
-    for key in ["preinstall", "install", "postinstall", "prepare"] {
-        if let Some(body) = scripts.get(key).and_then(|item| item.as_str())
+    for key in keys {
+        if let Some(body) = scripts.get(*key).and_then(|item| item.as_str())
             && !body.is_empty()
         {
             bodies.push(body.to_string());
@@ -27859,6 +27925,104 @@ mod tests {
             kind(&format!("cd {pkg_s} && bun install ./other")),
             Some("git.push")
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npm ci` runs the lifecycle scripts when a lock file is present.
+    /// `pnpm ci` runs them too. `npm rebuild` skips `prepare` and can
+    /// target `node_modules/<name>`. `pnpm rebuild` includes `prepare`.
+    /// `bun rebuild` is not a command.
+    #[test]
+    fn ci_and_rebuild_score_the_scripts_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-ci-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let other = root.join("other");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::create_dir_all(other.join("node_modules/foo")).expect("foo");
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::write(dir.join("package.json"), body).expect("package.json");
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let pkg_s = pkg.display().to_string();
+        let other_s = other.display().to_string();
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"git push origin main","preinstall":"echo pre"}}"#,
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm ci")), None);
+        std::fs::write(pkg.join("package-lock.json"), "{}").expect("lock");
+        assert_eq!(kind(&format!("cd {pkg_s} && npm ci")), Some("git.push"));
+        std::fs::remove_file(pkg.join("package-lock.json")).expect("unlock");
+        std::fs::write(pkg.join("npm-shrinkwrap.json"), "{}").expect("shrink");
+        assert_eq!(kind(&format!("cd {pkg_s} && npm ci")), Some("git.push"));
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm ci --ignore-scripts")),
+            None
+        );
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        std::fs::write(other.join("package-lock.json"), "{}").expect("other lock");
+        assert_eq!(
+            kind(&format!("cd {root_s} && npm ci --prefix other")),
+            Some("git.push")
+        );
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"git push origin main","preinstall":"echo pre"}}"#,
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm rebuild")), None);
+        write(
+            &pkg,
+            r#"{"scripts":{"prepare":"echo prep","preinstall":"git push origin main"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm rebuild")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm rebuild --ignore-scripts")),
+            None
+        );
+        write(
+            &other,
+            r#"{"scripts":{"preinstall":"git push origin main","prepare":"echo prep"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {root_s} && npm rebuild --prefix other")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"preinstall":"echo app"}}"#);
+        write(
+            &other.join("node_modules/foo"),
+            r#"{"scripts":{"preinstall":"git push origin main","prepare":"echo prep"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {other_s} && npm rebuild foo")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {other_s} && npm rebuild missing")), None);
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && pnpm rebuild")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && pnpm rebuild foo")), None);
+        assert_eq!(kind(&format!("cd {pkg_s} && pnpm ci")), Some("git.push"));
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && pnpm ci --ignore-scripts")),
+            None
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"echo cwd"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {root_s} && pnpm ci --dir other")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(kind(&format!("cd {pkg_s} && bun rebuild")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
