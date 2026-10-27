@@ -1203,6 +1203,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_swift_test(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_swift_script(
                 policy,
                 tool_name,
@@ -5574,6 +5584,59 @@ enum ExecKind {
     ExecList,
     /// `os.execl` takes the program path, then one string per argv word.
     ExecArgs,
+}
+
+/// `swift test` runs `Process` in `Tests/**/*.swift`.
+#[allow(clippy::too_many_arguments)]
+fn score_swift_test<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("swift") {
+        return;
+    }
+    if script_positionals(argv).first().map(String::as_str) != Some("test") {
+        return;
+    }
+    let mut files = Vec::new();
+    swift_test_walk(&shell_dir(dir).join("Tests"), &mut files, 0);
+    let mut commands = Vec::new();
+    for path in files {
+        if let Some(text) = load_text(&path) {
+            commands.extend(swift_process_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn swift_test_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == ".git" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            swift_test_walk(&path, found, depth + 1);
+            continue;
+        }
+        if name.ends_with(".swift") {
+            found.push(path.display().to_string());
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10275,9 +10338,10 @@ fn zsh_startup_file(argv: &[String], env: &[(String, String)]) -> Option<String>
     Some(format!("{dir}/.zshenv"))
 }
 
-/// `make -f file` runs the tab recipes in that file. `make -n` only
-/// prints them. With no `-f`, GNU make reads `GNUmakefile`, then
-/// `makefile`, then `Makefile`.
+/// `make -f file` runs the tab recipes in that file. `make -n` does
+/// not run those recipes. `$(shell ...)` runs while make reads the
+/// file, including with `-n`. With no `-f`, GNU make reads
+/// `GNUmakefile`, then `makefile`, then `Makefile`.
 #[allow(clippy::too_many_arguments)]
 fn score_makefile<'a>(
     policy: &'a Policy,
@@ -10297,18 +10361,18 @@ fn score_makefile<'a>(
     };
     match loaded {
         ScriptFile::Text(text) => {
-            let recipes: Vec<String> = text
-                .lines()
-                .filter_map(|line| {
+            let mut commands = make_shell_commands(&text);
+            if !make_dry(argv) {
+                commands.extend(text.lines().filter_map(|line| {
                     let line = line.strip_prefix('\t')?.trim();
                     if line.is_empty() || line.starts_with('#') {
                         None
                     } else {
                         Some(line.replace("$$", "$"))
                     }
-                })
-                .collect();
-            scan_isolated(policy, tool_name, &recipes, depth, local, git, best);
+                }));
+            }
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
         }
         ScriptFile::Unscanned => prefer(policy, best, unscanned_action(policy)),
     }
@@ -10330,7 +10394,8 @@ fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
             token.as_str(),
             "-n" | "--dry-run" | "--just-print" | "--recon"
         ) {
-            return None;
+            index += 1;
+            continue;
         }
         if token == "-f" || token == "--file" || token == "--makefile" {
             file = argv.get(index + 1).map(String::as_str);
@@ -10350,7 +10415,8 @@ fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
             && !flags.starts_with('-')
             && flags.contains('n')
         {
-            return None;
+            index += 1;
+            continue;
         }
         index += 1;
     }
@@ -10361,6 +10427,45 @@ fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
         .into_iter()
         .map(|name| shell_path(name, dir))
         .find(|name| load_script_file(name).is_some())
+}
+
+fn make_dry(argv: &[String]) -> bool {
+    argv.iter().skip(1).any(|token| {
+        matches!(
+            token.as_str(),
+            "-n" | "--dry-run" | "--just-print" | "--recon"
+        ) || {
+            let Some(flags) = token.strip_prefix('-') else {
+                return false;
+            };
+            !flags.is_empty() && !token.starts_with("--") && flags.contains('n')
+        }
+    })
+}
+
+fn make_shell_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "$(shell")
+            && (index == 0 || chars[index - 1] != '$')
+            && let Some((inner, end)) = balanced(&chars, index + 1, '(', ')')
+        {
+            let command = inner.trim().strip_prefix("shell").unwrap_or("").trim();
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    commands
 }
 
 /// `ninja` runs the `command` of each build it schedules. With no
@@ -11934,8 +12039,8 @@ fn score_bundle_rake<'a>(
     score_rake(policy, tool_name, &rake_argv, depth, local, git, dir, best);
 }
 
-/// `terraform apply` runs `local-exec` provisioners. `terraform plan`
-/// does not.
+/// `terraform apply` and `tofu apply` run `local-exec` provisioners.
+/// `terraform plan` does not.
 #[allow(clippy::too_many_arguments)]
 fn score_terraform_apply<'a>(
     policy: &'a Policy,
@@ -11947,7 +12052,11 @@ fn score_terraform_apply<'a>(
     dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("terraform") {
+    let Some(first) = argv.first() else {
+        return;
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("terraform") && !base.eq_ignore_ascii_case("tofu") {
         return;
     }
     if script_positionals(argv).first().map(String::as_str) != Some("apply") {
@@ -27236,6 +27345,55 @@ mod tests {
                 Some("git.push"),
             ),
             (format!("cd {tf_s} && terraform plan"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `$(shell ...)` runs when make reads the file, including `make -n`.
+    /// `swift test` runs `Process` in `Tests`. `tofu apply` runs
+    /// `local-exec`.
+    #[test]
+    fn make_swift_and_tofu_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-mst-{}", std::process::id()));
+        let sw = root.join("sw").join("Tests").join("swTests");
+        let tf = root.join("tf");
+        std::fs::create_dir_all(&sw).expect("tests");
+        std::fs::create_dir_all(&tf).expect("tf");
+        std::fs::write(
+            root.join("Makefile"),
+            "STAMP := $(shell git push origin main)\nall:\n\t@true\n",
+        )
+        .expect("make");
+        std::fs::write(root.join("recipes.mk"), "all:\n\tgit push origin main\n").expect("recipes");
+        std::fs::write(
+            sw.join("P.swift"),
+            "import Foundation\nlet task = Process()\ntask.executableURL = URL(fileURLWithPath: \"/usr/bin/env\")\ntask.arguments = [\"git\", \"push\", \"origin\", \"main\"]\ntry? task.run()\ntask.waitUntilExit()\n",
+        )
+        .expect("swift");
+        std::fs::write(
+            tf.join("main.tf"),
+            "resource \"null_resource\" \"p\" {\n  provisioner \"local-exec\" {\n    command = \"git push origin main\"\n  }\n}\n",
+        )
+        .expect("tf");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let sw_s = root.join("sw").display().to_string();
+        let tf_s = tf.display().to_string();
+        let cases = [
+            (format!("cd {root_s} && make"), Some("git.push")),
+            (format!("cd {root_s} && make -n"), Some("git.push")),
+            (format!("make -n -f {root_s}/recipes.mk"), None),
+            (format!("cd {sw_s} && swift test -q"), Some("git.push")),
+            (
+                format!("cd {tf_s} && tofu apply -auto-approve"),
+                Some("git.push"),
+            ),
+            (format!("cd {tf_s} && tofu plan"), None),
         ];
         for (command, want) in cases {
             assert_eq!(kind(&command), want, "{command}");
