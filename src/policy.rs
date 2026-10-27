@@ -966,6 +966,10 @@ fn consider_segment<'a>(
             score_erlang_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_go_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_cargo_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_coffee_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_haskell_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_mix_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_clojure_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6135,6 +6139,260 @@ fn go_commands(text: &str) -> Vec<String> {
         index += 1;
     }
     commands
+}
+
+fn score_coffee_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = coffee_program(argv) else {
+        return;
+    };
+    let commands = interpreter_commands(HostLang::Node, &text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn coffee_program(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("coffee"))
+    {
+        return None;
+    }
+    if argv.iter().any(|arg| arg == "-c" || arg == "--compile") {
+        return None;
+    }
+    for arg in argv.iter().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+            return Some(text);
+        }
+    }
+    None
+}
+
+fn score_haskell_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "ghci", &["-e"]) {
+        commands.extend(haskell_commands(&text));
+    }
+    for command in ["runghc", "runhaskell"] {
+        if let Some(text) = positional_script(argv, command) {
+            commands.extend(haskell_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn haskell_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "{-") {
+            index = skip_haskell_block(&chars, index + 2);
+            continue;
+        }
+        if starts_with(&chars, index, "--") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "system") {
+            if let Some(command) = haskell_string_after(&chars, index + "system".len()) {
+                commands.push(command);
+            }
+        } else if haskell_word(&chars, index, "proc")
+            && let Some(command) = haskell_proc_after(&chars, index + "proc".len())
+        {
+            commands.push(command);
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn haskell_word(chars: &[char], index: usize, word: &str) -> bool {
+    starts_with(chars, index, word)
+        && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        && chars
+            .get(index + word.len())
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric())
+}
+
+fn haskell_string_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    let (text, _) = read_quoted(chars, index)?;
+    (!text.is_empty()).then_some(text)
+}
+
+fn haskell_proc_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    let (program, mut cursor) = read_quoted(chars, index)?;
+    while cursor < chars.len() && chars[cursor].is_whitespace() {
+        cursor += 1;
+    }
+    let mut words = vec![program];
+    if chars.get(cursor) == Some(&'[')
+        && let Some((inner, _)) = balanced(chars, cursor, '[', ']')
+    {
+        let listed: Vec<char> = inner.chars().collect();
+        let mut listed_at = 0usize;
+        while listed_at < listed.len() {
+            while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+                listed_at += 1;
+            }
+            if listed.get(listed_at) == Some(&',') {
+                listed_at += 1;
+                continue;
+            }
+            let Some((word, end)) = read_quoted(&listed, listed_at) else {
+                break;
+            };
+            words.push(word);
+            listed_at = end;
+        }
+    }
+    let command = words.join(" ");
+    (!command.is_empty()).then_some(command)
+}
+
+fn skip_haskell_block(chars: &[char], index: usize) -> usize {
+    let mut cursor = index;
+    while cursor + 1 < chars.len() {
+        if chars[cursor] == '-' && chars[cursor + 1] == '}' {
+            return cursor + 2;
+        }
+        cursor += 1;
+    }
+    chars.len()
+}
+
+fn score_mix_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in mix_inline(argv) {
+        commands.extend(elixir_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn mix_inline(argv: &[String]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("mix"))
+    {
+        return Vec::new();
+    }
+    let mut running = false;
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-e" || arg == "--eval" {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "run" {
+            running = true;
+        }
+        index += 1;
+    }
+    if running { texts } else { Vec::new() }
+}
+
+fn score_clojure_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for command in ["clj", "clojure"] {
+        for text in flag_programs(argv, command, &["-e"]) {
+            commands.extend(clojure_execs(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn clojure_execs(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == ';' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, ".exec")
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+            && let Some(command) = first_quoted_after(&chars, index + ".exec".len())
+        {
+            commands.push(command);
+            index += ".exec".len();
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn first_quoted_after(chars: &[char], mut index: usize) -> Option<String> {
+    let limit = index.saturating_add(200).min(chars.len());
+    while index < limit {
+        if let Some((text, _)) = read_quoted(chars, index)
+            && !text.is_empty()
+        {
+            return Some(text);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn score_cargo_run<'a>(
@@ -22776,6 +23034,15 @@ mod tests {
         write("quiet.exs", "IO.puts(\"git push origin main\")\n");
         write("cmds.sql", ".shell git push origin main\n");
         write("quiet.sql", "select 1;\n");
+        write(
+            "run.coffee",
+            "child_process = require('child_process')\nchild_process.execSync('git push origin main', {stdio: 'inherit'})\n",
+        );
+        write(
+            "Run.hs",
+            "import System.Process\nmain = do\n  out <- readCreateProcess (proc \"git\" [\"push\", \"origin\", \"main\"]) \"\"\n  putStr out\n",
+        );
+        write("quiet.hs", "main = putStrLn \"git push origin main\"\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -22863,6 +23130,12 @@ mod tests {
             format!("go run {show}/main.go"),
             format!("cmake -P {show}/run.cmake"),
             format!("cargo run --quiet --manifest-path {show}/app/Cargo.toml"),
+            format!("coffee {show}/run.coffee"),
+            format!("runghc {show}/Run.hs"),
+            format!("runhaskell {show}/Run.hs"),
+            "ghci -e 'System.Process.system \"git push origin main\"' -e ':quit'".to_string(),
+            "mix run --no-mix-exs -e 'System.cmd(\"git\", [\"push\", \"origin\", \"main\"], into: IO.stream(:stdio, :line))'".to_string(),
+            "clj -M -e '(let [p (.exec (Runtime/getRuntime) \"git push origin main\")] (println 1))'".to_string(),
             format!("octave --quiet {show}/run.m"),
             format!("julia --startup-file=no {show}/run.jl"),
             format!("elixir {show}/run.exs"),
@@ -22915,6 +23188,11 @@ mod tests {
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
             format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
+            format!("coffee -c {show}/run.coffee"),
+            format!("runghc {show}/quiet.hs"),
+            "ghci -e '1'".to_string(),
+            "mix -e 'System.cmd(\"git\", [\"push\", \"origin\", \"main\"])'".to_string(),
+            "clj -M -e '(println \"git push origin main\")'".to_string(),
             format!("octave --quiet {show}/quiet.m"),
             format!("julia --startup-file=no {show}/quiet.jl"),
             format!("elixir {show}/quiet.exs"),
