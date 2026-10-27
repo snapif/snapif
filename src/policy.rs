@@ -1112,6 +1112,26 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_cargo_rust_tests(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_unittest(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_ansible_playbook(
                 policy,
                 tool_name,
@@ -11543,6 +11563,209 @@ fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::Pa
     }
     let manifest = shell_path(manifest.as_deref().unwrap_or("Cargo.toml"), dir);
     Some(std::path::Path::new(&manifest).parent()?.to_path_buf())
+}
+
+/// `cargo test` runs `#[test]` functions in `src/lib.rs` and
+/// `tests/*.rs`. `--lib` is only the library. `--test name` is only
+/// `tests/name.rs`. A helper that no test calls does not run.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_rust_tests<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for path in cargo_test_files(argv, dir) {
+        if let Some(text) = load_text(&path) {
+            commands.extend(rust_test_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cargo_test_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(package) = cargo_package_dir(argv, dir) else {
+        return Vec::new();
+    };
+    let mut lib_only = false;
+    let mut names = Vec::new();
+    let mut testing = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--manifest-path=") {
+            index += 1;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("--test=") {
+            if !name.is_empty() {
+                names.push(name.to_string());
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "--test" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(name.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "--lib" {
+            lib_only = true;
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "test" {
+            testing = true;
+        }
+        index += 1;
+    }
+    if !testing {
+        return Vec::new();
+    }
+    if !names.is_empty() {
+        return names
+            .into_iter()
+            .map(|name| {
+                if name.ends_with(".rs") {
+                    shell_path(&name, dir)
+                } else {
+                    package
+                        .join("tests")
+                        .join(format!("{name}.rs"))
+                        .display()
+                        .to_string()
+                }
+            })
+            .collect();
+    }
+    let mut files = Vec::new();
+    let lib = package.join("src").join("lib.rs");
+    if lib.is_file() {
+        files.push(lib.display().to_string());
+    }
+    if !lib_only {
+        let tests = package.join("tests");
+        if let Ok(entries) = std::fs::read_dir(&tests) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|ext| ext == "rs") && path.is_file() {
+                    files.push(path.display().to_string());
+                }
+            }
+        }
+    }
+    files
+}
+
+fn rust_test_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if matches!(chars[index], '"' | '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, "#[test]")
+            && let Some(body) = rust_fn_after(&chars, index + "#[test]".len())
+        {
+            commands.extend(rust_commands(&body));
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn rust_fn_after(chars: &[char], mut index: usize) -> Option<String> {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if !starts_with(chars, index, "fn") {
+        return None;
+    }
+    while index < chars.len() && chars[index] != '{' {
+        if matches!(chars[index], '"' | '\'') {
+            let (_, end) = read_quoted(chars, index)?;
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    let (inner, _) = balanced(chars, index, '{', '}')?;
+    Some(inner)
+}
+
+/// `python3 -m unittest` and `unittest discover` run top-level
+/// `test*.py` files. A nested file and `*_test.py` do not.
+#[allow(clippy::too_many_arguments)]
+fn score_unittest<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !python_module_is(argv, "unittest") {
+        return;
+    }
+    let extras: Vec<String> = script_positionals(argv)
+        .into_iter()
+        .filter(|word| word != "unittest" && word != "discover")
+        .collect();
+    if !extras.is_empty() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with("test") && name.ends_with(".py")) {
+            continue;
+        }
+        if let Some(text) = load_text(&path.display().to_string()) {
+            commands.extend(interpreter_commands(HostLang::Python, &text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -26600,6 +26823,86 @@ mod tests {
         std::fs::write(js.join("test.js"), "console.log(1)\n").expect("quiettest");
         let only_hidden = format!("cd {js_s} && node --test");
         assert_eq!(kind(&only_hidden), None, "{only_hidden}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `cargo test` runs `#[test]` bodies in `src/lib.rs` and `tests/*.rs`.
+    /// `--lib` skips integration tests. `--test name` runs that file only.
+    /// A helper outside `#[test]` does not run. `python3 -m unittest`
+    /// runs top-level `test*.py`.
+    #[test]
+    fn cargo_and_unittest_score_the_tests_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-ctest-{}", std::process::id()));
+        let cg = root.join("cg");
+        let tests = cg.join("tests");
+        let src = cg.join("src");
+        let ut = root.join("ut");
+        let nested = ut.join("sub");
+        for dir in [&src, &tests, &ut, &nested] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        std::fs::write(
+            src.join("lib.rs"),
+            "fn unused() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n#[test]\nfn quiet() {\n    let _ = \"git push origin main\";\n}\n",
+        )
+        .expect("lib");
+        std::fs::write(
+            tests.join("push.rs"),
+            "#[test]\nfn pushes() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("push");
+        std::fs::write(
+            ut.join("test_h.py"),
+            "import os\nimport unittest\nclass H(unittest.TestCase):\n    def test_h(self):\n        os.system(\"git push origin main\")\n",
+        )
+        .expect("ut");
+        std::fs::write(
+            ut.join("check_test.py"),
+            "import os\nimport unittest\nclass H(unittest.TestCase):\n    def test_h(self):\n        os.system(\"git push origin main\")\n",
+        )
+        .expect("suf");
+        std::fs::write(
+            nested.join("test_nest.py"),
+            "import os\nimport unittest\nclass H(unittest.TestCase):\n    def test_h(self):\n        os.system(\"git push origin main\")\n",
+        )
+        .expect("nest");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let cg_s = cg.display().to_string();
+        let ut_s = ut.display().to_string();
+        let lib_only = format!("cd {cg_s} && cargo test -q --lib");
+        assert_eq!(kind(&lib_only), None, "{lib_only}");
+        std::fs::write(
+            src.join("lib.rs"),
+            "#[test]\nfn pushes() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("lib2");
+        let cases = [
+            (
+                format!("cd {cg_s} && cargo test -q --lib"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {cg_s} && cargo test -q --test push"),
+                Some("git.push"),
+            ),
+            (format!("cd {cg_s} && cargo test -q"), Some("git.push")),
+            (
+                format!("cd {ut_s} && python3 -m unittest -q"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {ut_s} && python3 -m unittest discover -q"),
+                Some("git.push"),
+            ),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        std::fs::write(ut.join("test_h.py"), "print(\"git push origin main\")\n").expect("quiet");
+        let quiet = format!("cd {ut_s} && python3 -m unittest -q");
+        assert_eq!(kind(&quiet), None, "{quiet}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
