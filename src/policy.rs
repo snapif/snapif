@@ -7072,6 +7072,8 @@ fn shell_dir(dir: Option<&str>) -> std::path::PathBuf {
 }
 
 fn shell_path(path: &str, dir: Option<&str>) -> String {
+    let normalized = openable_path(path);
+    let path = normalized.as_ref();
     let file = std::path::Path::new(path);
     if file.is_absolute() || dir.is_none() {
         path.to_string()
@@ -12517,15 +12519,29 @@ fn make_includes(text: &str) -> Vec<String> {
 
 fn make_dry(argv: &[String]) -> bool {
     argv.iter().skip(1).any(|token| {
-        matches!(
+        if matches!(
             token.as_str(),
             "-n" | "--dry-run" | "--just-print" | "--recon"
-        ) || {
-            let Some(flags) = token.strip_prefix('-') else {
-                return false;
-            };
-            !flags.is_empty() && !token.starts_with("--") && flags.contains('n')
+        ) {
+            return true;
         }
+        let Some(flags) = token.strip_prefix('-') else {
+            return false;
+        };
+        if flags.is_empty() || token.starts_with("--") {
+            return false;
+        }
+        // `-fPATH` is a makefile name. A letter n inside that path is
+        // not the dry-run flag. `-nfPATH` still is.
+        for ch in flags.chars() {
+            if ch == 'f' {
+                return false;
+            }
+            if ch == 'n' {
+                return true;
+            }
+        }
+        false
     })
 }
 
@@ -29638,7 +29654,7 @@ mod tests {
                 format!("cd {empty_s} && npx --no-install -c '{push}'"),
                 Some("git.push"),
             ),
-            (format!("npm exec --offline"), None),
+            ("npm exec --offline".to_string(), None),
             (
                 format!("cd {proj_s} && pnpm exec hostprobe"),
                 Some("git.push"),
@@ -29758,7 +29774,7 @@ mod tests {
             (format!("vim -c ':!{push}' -c qa!"), Some("git.push")),
             (format!("vim -c '  !{push}' -c qa!"), Some("git.push")),
             (format!("vim -c 'echo {push}' -c qa!"), None),
-            (format!("vim -c qa!"), None),
+            ("vim -c qa!".to_string(), None),
             (format!("vim --cmd '!{push}' -c qa!"), Some("git.push")),
             (format!("vim '+!{push}' '+qa!'"), Some("git.push")),
             (format!("cd {root_s} && vim -S go.ex"), Some("git.push")),
@@ -29911,7 +29927,7 @@ mod tests {
                 format!("pandoc hi.md --lua-filter={root_s}/quiet.lua"),
                 None,
             ),
-            (format!("pandoc hi.md"), None),
+            ("pandoc hi.md".to_string(), None),
             (format!("ldc2 -run {root_s}/p.d"), Some("git.push")),
             (format!("ldc2 -run {root_s}/quiet.d"), None),
             (format!("ldc2 {root_s}/p.d"), None),
@@ -32087,7 +32103,7 @@ mod tests {
             "expect -c 'expect eof'".to_string(),
             format!("tclsh {show}/hello.tcl"),
             format!("tclsh {show}/args.tcl"),
-            format!("perl -MNeed -e 0"),
+            "perl -MNeed -e 0".to_string(),
             "bun run test".to_string(),
             "csh -c 'echo hi'".to_string(),
             "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"\")'"
