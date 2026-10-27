@@ -951,6 +951,8 @@ fn consider_segment<'a>(
             score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
             score_makefile(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
                 tool_name,
@@ -5142,17 +5144,158 @@ enum HostLang {
     Ruby,
     Perl,
     Php,
+    Lua,
+    R,
 }
 
 enum ExecKind {
     /// One string is a shell command (`os.system`, `execSync`).
     Shell,
-    /// A string list is argv. A string runs only with `shell=True`.
+    /// A string list is argv. A string runs only when `shell` is truthy.
     Subprocess,
     /// The command is the first string plus a following string list.
     Spawn,
     /// One string is a shell command. More strings are argv.
     Argv,
+    /// `os.execv` takes the argv list as its second argument.
+    ExecList,
+    /// `os.execl` takes the program path, then one string per argv word.
+    ExecArgs,
+}
+
+fn score_just_recipe<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(body) = just_recipe_body(argv) else {
+        return;
+    };
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&body),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+fn just_recipe_body(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("just") {
+        return None;
+    }
+    let mut file = None;
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--justfile" {
+            index += 1;
+            file = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--justfile=")
+            && !path.is_empty()
+        {
+            file = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    let recipe = words.get(1)?.clone();
+    let path = if let Some(path) = file {
+        std::path::PathBuf::from(path)
+    } else {
+        ["justfile", "Justfile", ".justfile"]
+            .into_iter()
+            .map(std::path::PathBuf::from)
+            .find(|candidate| candidate.is_file())?
+    };
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut body = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if !inside {
+            let header = format!("{recipe}:");
+            if line == header
+                || line
+                    .strip_prefix(&header)
+                    .is_some_and(|rest| rest.trim().is_empty())
+            {
+                inside = true;
+            }
+            continue;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with(' ') || line.starts_with('\t') {
+            body.push(line.trim().to_string());
+            continue;
+        }
+        break;
+    }
+    if body.is_empty() {
+        None
+    } else {
+        Some(body.join("\n"))
+    }
+}
+
+fn score_uv_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = uv_python_script(argv) else {
+        return;
+    };
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = interpreter_commands(HostLang::Python, &text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn uv_python_script(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("uv") {
+        return None;
+    }
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    if words.get(1).map(String::as_str) != Some("run") {
+        return None;
+    }
+    words.into_iter().skip(2).find(|word| word.ends_with(".py"))
 }
 
 fn score_package_scripts<'a>(
@@ -5198,6 +5341,8 @@ fn host_lang(token: &str) -> Option<HostLang> {
         "ruby" => Some(HostLang::Ruby),
         "perl" => Some(HostLang::Perl),
         "php" => Some(HostLang::Php),
+        "lua" => Some(HostLang::Lua),
+        "rscript" | "r" => Some(HostLang::R),
         other if other.starts_with("python3.") || other.starts_with("python2.") => {
             Some(HostLang::Python)
         }
@@ -5266,6 +5411,7 @@ fn takes_inline_arg(lang: HostLang, arg: &str) -> bool {
         HostLang::Node => arg == "-e" || arg == "--eval",
         HostLang::Ruby | HostLang::Perl => arg == "-e",
         HostLang::Php => arg == "-r",
+        HostLang::Lua | HostLang::R => false,
     }
 }
 
@@ -5275,7 +5421,7 @@ fn interp_flag_takes_value(lang: HostLang, arg: &str) -> bool {
         HostLang::Node => matches!(arg, "-r" | "--require" | "--import"),
         HostLang::Ruby => matches!(arg, "-I"),
         HostLang::Perl => matches!(arg, "-I" | "-M" | "-m"),
-        HostLang::Php => false,
+        HostLang::Php | HostLang::Lua | HostLang::R => false,
     }
 }
 
@@ -5313,7 +5459,7 @@ fn interpreter_commands(lang: HostLang, source: &str) -> Vec<String> {
                         continue;
                     }
                 }
-                HostLang::Python => {}
+                HostLang::Python | HostLang::Lua | HostLang::R => {}
             }
         }
         if let Some((_, end)) = read_quoted(&chars, index) {
@@ -5343,9 +5489,10 @@ fn interpreter_commands(lang: HostLang, source: &str) -> Vec<String> {
 
 fn line_comment(lang: HostLang, chars: &[char], index: usize) -> bool {
     match lang {
-        HostLang::Python | HostLang::Ruby | HostLang::Perl => chars[index] == '#',
+        HostLang::Python | HostLang::Ruby | HostLang::Perl | HostLang::R => chars[index] == '#',
         HostLang::Php => chars[index] == '#' || starts_with(chars, index, "//"),
         HostLang::Node => starts_with(chars, index, "//"),
+        HostLang::Lua => starts_with(chars, index, "--"),
     }
 }
 
@@ -5413,6 +5560,8 @@ fn parse_exec_call(
         ExecKind::Subprocess => subprocess_command(&args),
         ExecKind::Spawn => spawn_command(&args),
         ExecKind::Argv => argv_command(&args),
+        ExecKind::ExecList => exec_list_command(&args),
+        ExecKind::ExecArgs => exec_args_command(&args),
     };
     Some((commands, end))
 }
@@ -5428,6 +5577,8 @@ fn exec_kind(lang: HostLang, name: &str) -> Option<ExecKind> {
             | "subprocess.check_call"
             | "subprocess.check_output"
             | "subprocess.Popen" => Some(ExecKind::Subprocess),
+            "os.execv" | "os.execve" | "os.execvp" | "os.execvpe" => Some(ExecKind::ExecList),
+            "os.execl" | "os.execlp" => Some(ExecKind::ExecArgs),
             _ => None,
         },
         HostLang::Node => match name.rsplit('.').next().unwrap_or(name) {
@@ -5443,6 +5594,14 @@ fn exec_kind(lang: HostLang, name: &str) -> Option<ExecKind> {
             "system" | "exec" | "passthru" | "shell_exec" => Some(ExecKind::Shell),
             _ => None,
         },
+        HostLang::Lua => match name {
+            "os.execute" => Some(ExecKind::Shell),
+            _ => None,
+        },
+        HostLang::R => match name.rsplit('.').next().unwrap_or(name) {
+            "system" => Some(ExecKind::Shell),
+            _ => None,
+        },
     }
 }
 
@@ -5454,11 +5613,37 @@ fn subprocess_command(args: &[String]) -> Vec<String> {
         return vec![words.join(" ")];
     }
     if let Some(text) = arg_string(first)
-        && args.iter().any(|arg| shell_true(arg))
+        && args.iter().any(|arg| shell_enabled(arg))
     {
         return vec![text];
     }
     Vec::new()
+}
+
+fn exec_list_command(args: &[String]) -> Vec<String> {
+    let Some(words) = args.get(1).and_then(|arg| arg_list(arg)) else {
+        return Vec::new();
+    };
+    if words.is_empty() {
+        Vec::new()
+    } else {
+        vec![words.join(" ")]
+    }
+}
+
+fn exec_args_command(args: &[String]) -> Vec<String> {
+    let mut words = Vec::new();
+    for arg in args.iter().skip(1) {
+        let Some(text) = arg_string(arg) else {
+            break;
+        };
+        words.push(text);
+    }
+    if words.is_empty() {
+        Vec::new()
+    } else {
+        vec![words.join(" ")]
+    }
 }
 
 fn spawn_command(args: &[String]) -> Vec<String> {
@@ -5488,11 +5673,16 @@ fn argv_command(args: &[String]) -> Vec<String> {
     }
 }
 
-fn shell_true(arg: &str) -> bool {
-    arg.chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>()
-        == "shell=True"
+fn shell_enabled(arg: &str) -> bool {
+    let compact: String = arg.chars().filter(|ch| !ch.is_whitespace()).collect();
+    let Some(value) = compact.strip_prefix("shell=") else {
+        return false;
+    };
+    match value {
+        "True" => true,
+        "False" | "0" | "None" => false,
+        other => other.parse::<i64>().is_ok_and(|number| number != 0),
+    }
 }
 
 fn arg_string(arg: &str) -> Option<String> {
@@ -5775,6 +5965,8 @@ fn package_positionals(argv: &[String]) -> Vec<String> {
 /// `post-checkout`. `clone -n` and `clone --no-checkout` do not.
 /// `cherry-pick` runs `prepare-commit-msg` and `post-commit`.
 /// `cherry-pick -n` and `cherry-pick --no-verify` do not.
+/// A fast-forward `pull` runs `post-merge`. `pull --no-rebase`
+/// also runs the merge commit hooks.
 fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec<String> {
     let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
         return Vec::new();
@@ -5793,6 +5985,13 @@ fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec
         "checkout" | "switch" => &["post-checkout"],
         "clone" if clone_checks_out(argv) => &["post-checkout"],
         "cherry-pick" if cherry_pick_commits(argv) => &["prepare-commit-msg", "post-commit"],
+        "pull" if pull_merges(argv) => &[
+            "pre-merge-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-merge",
+        ],
+        "pull" => &["post-merge"],
         _ => return Vec::new(),
     };
     names
@@ -5809,6 +6008,13 @@ fn clone_checks_out(argv: &[String]) -> bool {
         token == "--no-checkout"
             || (token.starts_with('-') && !token.starts_with("--") && token.contains('n'))
     })
+}
+
+/// A fast-forward `git pull` runs `post-merge` only. `git pull
+/// --no-rebase` that merges also runs `pre-merge-commit`,
+/// `prepare-commit-msg`, and `commit-msg`.
+fn pull_merges(argv: &[String]) -> bool {
+    argv.iter().any(|token| token == "--no-rebase")
 }
 
 /// This git runs `prepare-commit-msg` and `post-commit` for a
@@ -20863,6 +21069,14 @@ mod tests {
         assert_eq!(kind(&cherry_n), None, "{cherry_n}");
         let cherry_nv = format!("git -c core.hooksPath={dir} cherry-pick --no-verify side");
         assert_eq!(kind(&cherry_nv), None, "{cherry_nv}");
+        write("post-merge", "rm -rf /tmp/pm\n");
+        let pull = format!("git -c core.hooksPath={dir} pull origin main");
+        assert_eq!(kind(&pull), Some("bash.rm"), "{pull}");
+        write("post-merge", "echo ok\n");
+        write("pre-merge-commit", "rm -rf /tmp/pre\n");
+        assert_eq!(kind(&pull), None, "{pull}");
+        let pull_merge = format!("git -c core.hooksPath={dir} pull --no-rebase origin main");
+        assert_eq!(kind(&pull_merge), Some("bash.rm"), "{pull_merge}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -20934,6 +21148,37 @@ mod tests {
         write("tick.php", "<?php\necho `git push origin main`;\n");
         write("echo.php", "<?php\necho \"git push origin main\\n\";\n");
         write(
+            "execvp.py",
+            "import os\nos.execvp(\"git\", [\"git\", \"push\", \"origin\", \"main\"])\n",
+        );
+        write(
+            "execl.py",
+            "import os\nos.execl(\"/bin/git\", \"git\", \"push\", \"origin\", \"main\")\n",
+        );
+        write(
+            "shell1.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=1)\n",
+        );
+        write(
+            "shell2.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=2)\n",
+        );
+        write(
+            "shell0.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=0)\n",
+        );
+        write(
+            "false.py",
+            "import subprocess\nsubprocess.run(\"git push origin main\", shell=False)\n",
+        );
+        write("run.lua", "os.execute(\"git push origin main\")\n");
+        write(
+            "comment.lua",
+            "-- os.execute(\"git push origin main\")\nprint(1)\n",
+        );
+        write("run.R", "system(\"git push origin main\")\n");
+        std::fs::write(root.join("justfile"), "push:\n\tgit push origin main\n").expect("justfile");
+        write(
             "package.json",
             "{\"scripts\":{\"pretest\":\"git push origin pretest\",\"test\":\"echo ok\",\"posttest\":\"echo ok\",\"prestart\":\"echo ok\",\"start\":\"git push origin start\",\"poststart\":\"echo ok\",\"preunused\":\"echo ok\",\"unused\":\"git push origin unused\",\"postunused\":\"echo ok\"}}",
         );
@@ -20966,6 +21211,14 @@ mod tests {
             format!("npm test --prefix {show}"),
             format!("npm start --prefix {show}"),
             format!("npm run unused --prefix {show}"),
+            format!("python3 {show}/execvp.py"),
+            format!("python3 {show}/execl.py"),
+            format!("python3 {show}/shell1.py"),
+            format!("python3 {show}/shell2.py"),
+            format!("lua {show}/run.lua"),
+            format!("Rscript {show}/run.R"),
+            format!("just --justfile {show}/justfile push"),
+            format!("uv run --no-project {show}/system.py"),
         ];
         for command in &review {
             assert_eq!(kind(command), Some("git.push"), "{command}");
@@ -20981,6 +21234,10 @@ mod tests {
             format!("perl {show}/print.pl"),
             format!("php {show}/echo.php"),
             format!("npm run --prefix {show}"),
+            format!("python3 {show}/shell0.py"),
+            format!("python3 {show}/false.py"),
+            format!("lua {show}/comment.lua"),
+            format!("just --justfile {show}/justfile absent"),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
