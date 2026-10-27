@@ -1178,7 +1178,7 @@ fn consider_segment<'a>(
                 trap_scripts(&executed.argv)
             };
             scan_isolated(policy, tool_name, &traps, depth, local, git, best);
-            let found = git_alias_scripts(&executed.argv, local, git);
+            let found = git_alias_scripts(&executed.argv, local, git, scope.dir.as_deref());
             scan_isolated(policy, tool_name, &found.commands, depth, local, git, best);
             for body in &found.shells {
                 let mut child = Functions::new();
@@ -4979,6 +4979,7 @@ fn git_alias_scripts(
     argv: &[String],
     env: &[(String, String)],
     inherited: &GitBindings,
+    dir: Option<&str>,
 ) -> GitScripts {
     let bindings = inherited.clone();
     let Some(first) = argv.first() else {
@@ -5031,7 +5032,7 @@ fn git_alias_scripts(
     }
     let mut commands = Vec::new();
     let mut shells = Vec::new();
-    seen.collect(argv, env, 0, &mut commands, &mut shells);
+    seen.collect(argv, env, dir, 0, &mut commands, &mut shells);
     GitScripts {
         commands,
         shells,
@@ -5106,6 +5107,15 @@ impl GitBindings {
         }
     }
 
+    /// An explicit `core.hooksPath` wins, including an empty one.
+    /// Otherwise git uses the repository's `.git/hooks`.
+    fn hook_directory(&self, argv: &[String], dir: Option<&str>) -> Option<String> {
+        if self.hooks.is_some() {
+            return self.hooks.clone();
+        }
+        default_hook_directory(argv, dir)
+    }
+
     fn note_env(&mut self, spec: &str, env: &[(String, String)]) {
         let Some((key, var)) = spec.rsplit_once('=') else {
             return;
@@ -5124,6 +5134,7 @@ impl GitBindings {
         &self,
         argv: &[String],
         env: &[(String, String)],
+        dir: Option<&str>,
         depth: u32,
         commands: &mut Vec<String>,
         shells: &mut Vec<String>,
@@ -5157,7 +5168,11 @@ impl GitBindings {
             push_selected_tool(commands, argv, &self.merge_tool, &self.mergetools);
         }
         commands.extend(ssh_scripts(&self.ssh, argv, env));
-        shells.extend(git_hook_scripts(self.hooks.as_deref(), subcommand, argv));
+        shells.extend(git_hook_scripts(
+            self.hook_directory(argv, dir).as_deref(),
+            subcommand,
+            argv,
+        ));
         if subcommand == "credential" {
             commands.extend(self.helpers.iter().cloned());
         }
@@ -5182,7 +5197,7 @@ impl GitBindings {
                     // Quote so a later rescan sees the same words git executes.
                     // A bare join would turn the argument `a;rm` into a shell.
                     commands.push(quote_argv(&child));
-                    self.collect(&child, env, depth + 1, commands, shells);
+                    self.collect(&child, env, dir, depth + 1, commands, shells);
                 }
             }
         }
@@ -9062,8 +9077,10 @@ fn package_positionals(argv: &[String]) -> Vec<String> {
 }
 
 /// `git -c core.hooksPath=dir commit` runs the executable commit
-/// hooks. `merge` runs `pre-merge-commit`, `prepare-commit-msg`, and
-/// `post-merge`. `--no-verify` skips `pre-commit`, `commit-msg`, and
+/// hooks. With no `core.hooksPath`, git reads `.git/hooks` in the
+/// repository selected by `cd` and `-C`. `merge` runs
+/// `pre-merge-commit`, `prepare-commit-msg`, and `post-merge`.
+/// `--no-verify` skips `pre-commit`, `commit-msg`, and
 /// `pre-merge-commit`. `checkout`, `switch`, and `clone` run
 /// `post-checkout`. `clone -n` and `clone --no-checkout` do not.
 /// `cherry-pick` runs `prepare-commit-msg` and `post-commit`.
@@ -9072,6 +9089,38 @@ fn package_positionals(argv: &[String]) -> Vec<String> {
 /// also runs the merge commit hooks. `pull --rebase`, `pull -r`,
 /// and `pull --rebase=merges` run the rebase hooks. `pull
 /// --rebase=false` does not.
+/// `git -C path` uses `path` as the repository. A later relative `-C`
+/// joins the earlier one. `clone` runs `post-checkout` in the new
+/// repository, which is not this directory. A stuck `-Cpath` is not
+/// an option on this git.
+fn default_hook_directory(argv: &[String], dir: Option<&str>) -> Option<String> {
+    if git_subcommand(argv).is_none_or(|name| name == "clone") {
+        return None;
+    }
+    let mut tree = shell_dir(dir);
+    let mut index = 1;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" || !token.starts_with('-') {
+            break;
+        }
+        if token == "-C" {
+            index += 1;
+            if let Some(path) = argv.get(index) {
+                tree = tree.join(path.as_str());
+                index += 1;
+            }
+            continue;
+        }
+        let takes = !token.contains('=') && option_takes_value(token);
+        index += 1;
+        if takes && index < argv.len() {
+            index += 1;
+        }
+    }
+    Some(tree.join(".git").join("hooks").display().to_string())
+}
+
 fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec<String> {
     let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
         return Vec::new();
@@ -24245,6 +24294,67 @@ mod tests {
         write("applypatch-msg", "rm -rf /tmp/am\n");
         let am = format!("git -c core.hooksPath={dir} am patch");
         assert_eq!(kind(&am), Some("bash.rm"), "{am}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no `core.hooksPath`, `git checkout` runs the executable
+    /// `.git/hooks/post-checkout` of the repository `cd` or `-C`
+    /// selected. `git status` does not. An explicit `core.hooksPath`
+    /// replaces that directory. A stuck `-Cpath` does not select it.
+    #[test]
+    fn git_checkout_scores_the_default_hook_directory() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-defhook-{}", std::process::id()));
+        let repo = root.join("repo");
+        let other = root.join("other");
+        let empty = root.join("empty");
+        let hooks = repo.join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).expect("hooks");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::create_dir_all(&empty).expect("empty");
+        let path = hooks.join("post-checkout");
+        std::fs::write(&path, "rm -rf /tmp/co\n").expect("hook");
+        let chmod = |mode: u32| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&path).expect("meta").permissions();
+                perms.set_mode(mode);
+                std::fs::set_permissions(&path, perms).expect("chmod");
+            }
+            let _ = mode;
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let repo_s = repo.display().to_string();
+        let root_s = root.display().to_string();
+        let other_s = other.display().to_string();
+        let empty_s = empty.display().to_string();
+        let hooks_s = hooks.display().to_string();
+        let checkout = format!("git -C {repo_s} checkout side");
+        #[cfg(unix)]
+        {
+            chmod(0o644);
+            assert_eq!(kind(&checkout), None, "{checkout}");
+        }
+        chmod(0o755);
+        assert_eq!(kind(&checkout), Some("bash.rm"), "{checkout}");
+        let status = format!("git -C {repo_s} status");
+        assert_eq!(kind(&status), None, "{status}");
+        let from_cd = format!("cd {repo_s} && git checkout side");
+        assert_eq!(kind(&from_cd), Some("bash.rm"), "{from_cd}");
+        let relative = format!("cd {root_s} && git -C repo checkout side");
+        assert_eq!(kind(&relative), Some("bash.rm"), "{relative}");
+        let into_repo = format!("git -C {other_s} -C ../repo checkout side");
+        assert_eq!(kind(&into_repo), Some("bash.rm"), "{into_repo}");
+        let into_other = format!("git -C {repo_s} -C ../other checkout side");
+        assert_eq!(kind(&into_other), None, "{into_other}");
+        let forced = format!("git -C {repo_s} -c core.hooksPath={other_s} checkout side");
+        assert_eq!(kind(&forced), None, "{forced}");
+        let explicit = format!("git -c core.hooksPath={hooks_s} -C {other_s} checkout side");
+        assert_eq!(kind(&explicit), Some("bash.rm"), "{explicit}");
+        let stuck = format!("cd {empty_s} && git -C{repo_s} checkout side");
+        assert_eq!(kind(&stuck), None, "{stuck}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
