@@ -10066,14 +10066,22 @@ fn sbt_shell_commands(source: &str) -> Vec<(Option<String>, String)> {
             while after < chars.len() && chars[after].is_whitespace() {
                 after += 1;
             }
-            if after + 1 < chars.len() && chars[after] == '.' && chars[after + 1] == '!' {
+            let bang_end =
+                if after + 1 < chars.len() && chars[after] == '.' && chars[after + 1] == '!' {
+                    Some(after + 2)
+                } else if chars.get(after) == Some(&'!') && chars.get(after + 1) != Some(&'=') {
+                    Some(after + 1)
+                } else {
+                    None
+                };
+            if let Some(end) = bang_end {
                 let owner = if depth == 0 {
                     pending.clone()
                 } else {
                     task.clone()
                 };
                 commands.push((owner, body));
-                index = after + 2;
+                index = end;
             }
             continue;
         }
@@ -10340,6 +10348,11 @@ fn score_xcodebuild<'a>(
     let scripts = xcode_shell_scripts(&text, &xcode_target_names(argv));
     let srcroot = project.parent().map(|path| path.display().to_string());
     for script in scripts {
+        let script = if let Some(root) = srcroot.as_deref() {
+            xcode_expand_srcroot(&script, root)
+        } else {
+            script
+        };
         let mut functions = Functions::new();
         let mut env = local.to_vec();
         let mut scope = ShellScope {
@@ -10361,6 +10374,40 @@ fn score_xcodebuild<'a>(
             ),
         );
     }
+}
+
+fn xcode_expand_srcroot(script: &str, srcroot: &str) -> String {
+    let chars: Vec<char> = script.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '$'
+            && chars.get(index + 1) == Some(&'{')
+            && let Some(end) = chars[index + 2..].iter().position(|ch| *ch == '}')
+        {
+            let name: String = chars[index + 2..index + 2 + end].iter().collect();
+            if name == "SRCROOT" {
+                out.push_str(srcroot);
+                index += end + 3;
+                continue;
+            }
+        }
+        if chars[index] == '$' {
+            let mut end = index + 1;
+            while end < chars.len() && (chars[end].is_ascii_alphanumeric() || chars[end] == '_') {
+                end += 1;
+            }
+            let name: String = chars[index + 1..end].iter().collect();
+            if name == "SRCROOT" {
+                out.push_str(srcroot);
+                index = end;
+                continue;
+            }
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
 }
 
 fn xcode_runs_scripts(positionals: &[String]) -> bool {
@@ -29740,6 +29787,53 @@ mod tests {
             )),
             None
         );
+        std::fs::write(
+            project.join("project.pbxproj"),
+            r#"// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA00000000000000000000A1 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B1, );
+			name = Probe;
+		};
+		AA00000000000000000000A2 = {
+			isa = PBXProject;
+			targets = ( AA00000000000000000000A1, );
+		};
+		AA00000000000000000000B1 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "sh \"${SRCROOT}/run.sh\"";
+		};
+	};
+	rootObject = AA00000000000000000000A2;
+}
+"#,
+        )
+        .expect("srcroot pbxproj");
+        std::fs::write(root.join("run.sh"), "git push origin main\n").expect("srcroot script");
+        assert_eq!(
+            kind(&format!(
+                "cd {elsewhere_s} && xcodebuild -project {project_s} -target Probe build"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"git push origin main\" !\n",
+        )
+        .expect("bang");
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = \"git push origin main\" != \"no\"\n",
+        )
+        .expect("not equal");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
