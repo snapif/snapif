@@ -954,6 +954,8 @@ fn consider_segment<'a>(
             score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
             score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_awk_program(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_osascript(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
                 tool_name,
@@ -5428,6 +5430,238 @@ fn score_interpreter<'a>(
         Some(LoadedProgram::Unscanned) => prefer(policy, best, unscanned_action(policy)),
         None => {}
     }
+    for path in preload_files(lang, source.argv) {
+        match load_script_file(&path) {
+            Some(ScriptFile::Text(text)) => {
+                let commands = interpreter_commands(lang, &text);
+                scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+            }
+            Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+            None => {}
+        }
+    }
+}
+
+fn preload_files(lang: HostLang, argv: &[String]) -> Vec<String> {
+    match lang {
+        HostLang::Node => node_preloads(argv),
+        HostLang::Ruby => ruby_requires(argv),
+        _ => Vec::new(),
+    }
+}
+
+fn node_preloads(argv: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-r" || arg == "--require" {
+            index += 1;
+            if let Some(path) = argv.get(index) {
+                paths.push(path.clone());
+            }
+        } else if let Some(path) = arg.strip_prefix("--require=")
+            && !path.is_empty()
+        {
+            paths.push(path.to_string());
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn ruby_requires(argv: &[String]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-r" {
+            index += 1;
+            if let Some(path) = argv.get(index) {
+                paths.push(path.clone());
+            }
+        } else if let Some(path) = arg.strip_prefix("-r")
+            && !path.is_empty()
+        {
+            paths.push(path.to_string());
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn score_awk_program<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let programs = awk_programs(argv);
+    let mut commands = Vec::new();
+    for program in &programs {
+        commands.extend(awk_systems(program));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn awk_programs(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("awk") && !base.eq_ignore_ascii_case("gawk") {
+        return Vec::new();
+    }
+    let mut programs = Vec::new();
+    let mut saw_file = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "-f" || arg == "--file" {
+            saw_file = true;
+            index += 1;
+            if let Some(path) = argv.get(index)
+                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+            {
+                programs.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "-F" | "-v" | "--field-separator") {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') && arg != "-" {
+            index += 1;
+            continue;
+        }
+        if !saw_file {
+            programs.push(arg.to_string());
+        }
+        break;
+    }
+    programs
+}
+
+fn awk_systems(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((name, after)) = read_dotted_name(&chars, index) {
+            let mut cursor = after;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if name == "system"
+                && cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                if let Some(command) = arg_string(inner.trim())
+                    && !command.is_empty()
+                {
+                    commands.push(command);
+                }
+                index = end;
+                continue;
+            }
+            index = after;
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn score_osascript<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let texts = osascript_texts(argv);
+    let mut commands = Vec::new();
+    for text in &texts {
+        commands.extend(applescript_shells(text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn osascript_texts(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("osascript") {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-e" {
+            index += 1;
+            if let Some(text) = argv.get(index) {
+                texts.push(text.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg == "-l" || arg == "--language" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+            texts.push(text);
+        }
+        break;
+    }
+    texts
+}
+
+fn applescript_shells(text: &str) -> Vec<String> {
+    let marker = "do shell script";
+    let folded = text.to_ascii_lowercase();
+    let mut commands = Vec::new();
+    let mut from = 0usize;
+    while let Some(found) = folded[from..].find(marker) {
+        let start = from + found + marker.len();
+        let rest = &text[start..];
+        let chars: Vec<char> = rest.chars().collect();
+        if let Some(quote) = chars.iter().position(|ch| *ch == '"')
+            && let Some((command, _)) = read_quoted(&chars, quote)
+            && !command.is_empty()
+        {
+            commands.push(command);
+        }
+        from = start;
+        if from >= folded.len() {
+            break;
+        }
+    }
+    commands
 }
 
 fn host_lang(token: &str) -> Option<HostLang> {
@@ -21341,6 +21575,17 @@ mod tests {
             "run.swift",
             "import Foundation\nlet task = Process()\ntask.executableURL = URL(fileURLWithPath: \"/usr/bin/env\")\ntask.arguments = [\"git\", \"push\", \"origin\", \"main\"]\ntry? task.run()\ntask.waitUntilExit()\n",
         );
+        write(
+            "preload.js",
+            "require(\"child_process\").execSync(\"git push origin main\");\n",
+        );
+        write(
+            "need.rb",
+            "system(\"git\", \"push\", \"origin\", \"main\")\n",
+        );
+        write("run.awk", "BEGIN { system(\"git push origin main\") }\n");
+        write("print.awk", "BEGIN { print \"git push origin main\" }\n");
+        write("run.scpt", "do shell script \"git push origin main\"\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -21388,6 +21633,14 @@ mod tests {
             format!("just --justfile {show}/justfile push"),
             format!("uv run --no-project {show}/system.py"),
             format!("swift {show}/run.swift"),
+            format!("node -r {show}/preload.js -e '0'"),
+            format!("node --require {show}/preload.js -e '0'"),
+            format!("ruby -r {show}/need.rb -e '0'"),
+            format!("ruby -r{show}/need.rb -e '0'"),
+            format!("awk -f {show}/run.awk"),
+            "awk 'BEGIN { system(\"git push origin main\") }'".to_string(),
+            format!("osascript {show}/run.scpt"),
+            "osascript -e 'do shell script \"git push origin main\"'".to_string(),
         ];
         for command in &review {
             assert_eq!(kind(command), Some("git.push"), "{command}");
@@ -21409,6 +21662,10 @@ mod tests {
             format!("just --justfile {show}/justfile absent"),
             format!("swift {show}/print.swift"),
             format!("swift {show}/note.swift"),
+            format!("awk -f {show}/print.awk"),
+            "osascript -e 'display dialog \"git push origin main\"'".to_string(),
+            format!("ruby -r {show}/missing.rb -e '0'"),
+            "node -e '0'".to_string(),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
