@@ -1173,6 +1173,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_install_scripts(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_exec(
                 policy,
                 tool_name,
@@ -9603,6 +9613,180 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
         }
     }
     bodies
+}
+
+/// `npm install`, `pnpm install`, and `bun install` run `preinstall`,
+/// `install`, `postinstall`, and `prepare`. `--ignore-scripts` runs
+/// none of them. `npm install ./pkg` runs that directory. A bare
+/// package name does not. `bun install lodash` still runs the install
+/// directory. `pnpm --dir` wins over `--prefix`. `bun` uses `--cwd`.
+#[allow(clippy::too_many_arguments)]
+fn score_install_scripts<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let scripts = install_script_bodies(argv, dir);
+    scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+}
+
+fn install_script_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .iter()
+        .any(|arg| arg == "--ignore-scripts" || arg == "--ignore-scripts=true")
+    {
+        return Vec::new();
+    }
+    let Some(tool) = argv.first().and_then(|word| package_tool(word)) else {
+        return Vec::new();
+    };
+    let words = install_command_words(argv);
+    if words.get(1).map(String::as_str) != Some("install") {
+        return Vec::new();
+    }
+    let packages = &words[2..];
+    if packages.is_empty() || tool == PackageTool::Bun {
+        return package_lifecycle(&install_package_dir(argv, dir).join("package.json"));
+    }
+    if tool != PackageTool::Npm {
+        return Vec::new();
+    }
+    let mut bodies = Vec::new();
+    for arg in packages {
+        if npm_local_spec(arg) {
+            let path = std::path::PathBuf::from(shell_path(arg, dir)).join("package.json");
+            bodies.extend(package_lifecycle(&path));
+        }
+    }
+    bodies
+}
+
+fn package_lifecycle(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(scripts) = value.get("scripts").and_then(|item| item.as_object()) else {
+        return Vec::new();
+    };
+    let mut bodies = Vec::new();
+    for key in ["preinstall", "install", "postinstall", "prepare"] {
+        if let Some(body) = scripts.get(key).and_then(|item| item.as_str())
+            && !body.is_empty()
+        {
+            bodies.push(body.to_string());
+        }
+    }
+    bodies
+}
+
+/// A local npm install spec. `./pkg`, `../pkg`, and an absolute path
+/// are directories. `@scope/name` and `lodash` are registry names.
+fn npm_local_spec(arg: &str) -> bool {
+    std::path::Path::new(arg).is_absolute() || arg.starts_with('.') || arg.starts_with('/')
+}
+
+fn install_package_dir(argv: &[String], dir: Option<&str>) -> std::path::PathBuf {
+    let tool = argv.first().and_then(|word| package_tool(word));
+    let chosen = match tool {
+        Some(PackageTool::Bun) => last_flag_path(argv, "--cwd"),
+        Some(PackageTool::Pnpm) => {
+            last_flag_path(argv, "--dir").or_else(|| last_flag_path(argv, "--prefix"))
+        }
+        _ => last_flag_path(argv, "--prefix"),
+    };
+    match chosen {
+        Some(path) => std::path::PathBuf::from(shell_path(&path, dir)),
+        None => shell_dir(dir),
+    }
+}
+
+fn last_flag_path(argv: &[String], name: &str) -> Option<String> {
+    let mut index = 0usize;
+    let mut found = None;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if let Some(skip) = flag_value_skip(arg, name) {
+            if skip == 2
+                && let Some(path) = argv.get(index + 1).filter(|path| !path.is_empty())
+            {
+                found = Some((*path).clone());
+            } else if skip == 1 {
+                let glued = format!("{name}=");
+                if let Some(path) = arg.strip_prefix(&glued)
+                    && !path.is_empty()
+                {
+                    found = Some(path.to_string());
+                }
+            }
+            index += skip;
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+fn install_command_words(argv: &[String]) -> Vec<String> {
+    let tool = argv.first().and_then(|word| package_tool(word));
+    let mut words = Vec::new();
+    let mut index = 0usize;
+    let mut options = true;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if options && arg == "--" {
+            options = false;
+            index += 1;
+            continue;
+        }
+        if options && let Some(skip) = install_option_skip(tool, arg) {
+            index += skip;
+            continue;
+        }
+        if options && arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    words
+}
+
+fn install_option_skip(tool: Option<PackageTool>, arg: &str) -> Option<usize> {
+    if let Some(skip) = flag_value_skip(arg, "--prefix") {
+        return Some(skip);
+    }
+    match tool {
+        Some(PackageTool::Pnpm) => flag_value_skip(arg, "--dir"),
+        Some(PackageTool::Bun) => flag_value_skip(arg, "--cwd"),
+        _ => None,
+    }
+}
+
+fn flag_value_skip(arg: &str, name: &str) -> Option<usize> {
+    if arg == name {
+        return Some(2);
+    }
+    let glued = format!("{name}=");
+    if arg
+        .strip_prefix(&glued)
+        .is_some_and(|path| !path.is_empty())
+    {
+        Some(1)
+    } else {
+        None
+    }
 }
 
 fn package_tool(token: &str) -> Option<PackageTool> {
@@ -27539,6 +27723,142 @@ mod tests {
         for (command, want) in cases {
             assert_eq!(kind(&command), want, "{command}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `npm install`, `pnpm install`, and `bun install` run lifecycle
+    /// scripts. `npm install ./pkg` runs that directory. `bun install`
+    /// keeps running the install directory when a package name is
+    /// present. `--ignore-scripts` runs none.
+    #[test]
+    fn install_scripts_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-install-{}", std::process::id()));
+        let pkg = root.join("pkg");
+        let other = root.join("other");
+        let later = root.join("later");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&pkg).expect("pkg");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::create_dir_all(&later).expect("later");
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::write(dir.join("package.json"), body).expect("package.json");
+        };
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let pkg_s = pkg.display().to_string();
+        let other_s = other.display().to_string();
+        write(
+            &pkg,
+            r#"{"scripts":{"preinstall":"git push origin main","test":"echo ok"}}"#,
+        );
+        for tool in ["npm", "pnpm", "bun"] {
+            let command = format!("cd {pkg_s} && {tool} install");
+            assert_eq!(kind(&command), Some("git.push"), "{command}");
+        }
+        write(
+            &pkg,
+            r#"{"scripts":{"preinstall":"echo a","install":"echo b","postinstall":"echo c","prepare":"git push origin main","test":"echo d"}}"#,
+        );
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm install")),
+            Some("git.push")
+        );
+        for tool in ["npm", "pnpm", "bun"] {
+            let command = format!("cd {pkg_s} && {tool} install --ignore-scripts");
+            assert_eq!(kind(&command), None, "{command}");
+            let command = format!("cd {pkg_s} && {tool} install --ignore-scripts=true");
+            assert_eq!(kind(&command), None, "{command}");
+        }
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && npm install --ignore-scripts=false")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {pkg_s} && npm install lodash")), None);
+        assert_eq!(kind(&format!("cd {pkg_s} && pnpm install lodash")), None);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && bun install lodash")),
+            Some("git.push")
+        );
+        write(&pkg, r#"{"scripts":{"test":"git push origin main"}}"#);
+        assert_eq!(kind(&format!("cd {pkg_s} && npm install")), None);
+        write(&pkg, r#"{"scripts":{"prepare":"echo safe"}}"#);
+        write(&other, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        write(&later, r#"{"scripts":{"prepare":"echo later"}}"#);
+        let cases = [
+            (
+                format!("cd {root_s} && npm install --prefix other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install --prefix=other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --prefix other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir=other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --prefix later --dir other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir later --prefix other"),
+                None,
+            ),
+            (
+                format!("cd {root_s} && pnpm install --dir later --dir other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && bun install --cwd other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && bun install --cwd=other lodash"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {pkg_s} && bun install --prefix {other_s}"),
+                None,
+            ),
+            (
+                format!("cd {root_s} && npm install ./other"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install {other_s}"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install ./other ./later"),
+                Some("git.push"),
+            ),
+            (
+                format!("cd {root_s} && npm install ./other --ignore-scripts"),
+                None,
+            ),
+            (format!("cd {root_s} && npm install lodash"), None),
+            (format!("cd {root_s} && pnpm install ./other"), None),
+            (format!("cd {root_s} && bun install ./other"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        write(&pkg, r#"{"scripts":{"prepare":"git push origin main"}}"#);
+        assert_eq!(
+            kind(&format!("cd {pkg_s} && bun install ./other")),
+            Some("git.push")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
