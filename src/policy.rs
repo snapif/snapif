@@ -13774,7 +13774,10 @@ fn strip_hash_comments(text: &str) -> String {
     out
 }
 
-/// `cargo build`, `check`, `clippy`, `run`, and `test` run `build.rs`.
+/// `cargo build`, `check`, `clippy`, `rustc`, `doc`, `run`, and
+/// `test` run `build.rs`. `cargo install --path dir` runs that
+/// directory's `build.rs`. `cargo install` without `--path` does not.
+/// These commands do not run the `cfg(unix)` runner.
 #[allow(clippy::too_many_arguments)]
 fn score_cargo_build_script<'a>(
     policy: &'a Policy,
@@ -13786,7 +13789,8 @@ fn score_cargo_build_script<'a>(
     dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(package) = cargo_package_dir(argv, dir) else {
+    let Some(package) = cargo_install_package(argv, dir).or_else(|| cargo_package_dir(argv, dir))
+    else {
         return;
     };
     let Some(text) = load_text(&package.join("build.rs").display().to_string()) else {
@@ -14235,6 +14239,50 @@ fn cargo_runner_command(dir: Option<&str>) -> Option<String> {
     None
 }
 
+fn cargo_install_package(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut install = false;
+    let mut path = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--path" {
+            index += 1;
+            path = argv.get(index).cloned().filter(|value| !value.is_empty());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = arg.strip_prefix("--path=")
+            && !value.is_empty()
+        {
+            path = Some(value.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') || arg.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        if arg == "install" {
+            install = true;
+        }
+        index += 1;
+    }
+    if !install {
+        return None;
+    }
+    let path = std::path::PathBuf::from(shell_path(&path?, dir));
+    path.join("Cargo.toml").is_file().then_some(path)
+}
+
 fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
     if argv
         .first()
@@ -14267,7 +14315,10 @@ fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::Pa
             index += 1;
             continue;
         }
-        if matches!(arg, "build" | "check" | "clippy" | "run" | "test") {
+        if matches!(
+            arg,
+            "build" | "check" | "clippy" | "doc" | "run" | "rustc" | "test"
+        ) {
             builds = true;
         }
         index += 1;
@@ -29622,7 +29673,8 @@ mod tests {
     /// `node --test` run the tests they discover. `go test` runs
     /// `exec.Command` in the package directory. `rake` runs `sh` in
     /// the named task, or `default`. `cargo build`, `check`, `clippy`,
-    /// `run`, and `test` run `build.rs`.
+    /// `rustc`, `doc`, `run`, and `test` run `build.rs`.
+    /// `cargo install --path` runs that directory's `build.rs`.
     #[test]
     fn discovered_programs_score_the_command_they_run() {
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
@@ -29695,6 +29747,8 @@ mod tests {
             (format!("cd {rk_s} && rake missing"), None),
             (format!("cd {cg_s} && cargo build -q"), Some("git.push")),
             (format!("cd {cg_s} && cargo clippy -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo rustc -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo doc -q"), Some("git.push")),
             (format!("cd {cg_s} && cargo check -q"), Some("git.push")),
             (format!("cd {cg_s} && cargo test -q"), Some("git.push")),
             (format!("cd {cg_s} && cargo run -q"), Some("git.push")),
@@ -29889,6 +29943,48 @@ mod tests {
         std::fs::remove_file(runpkg.join("build.rs")).ok();
         assert_eq!(
             kind(&format!("cd {run_s} && cargo pushy -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            runpkg.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("install build");
+        let away_install = root.join("away-install");
+        std::fs::create_dir_all(away_install.join("src")).expect("away install");
+        std::fs::write(away_install.join("Cargo.toml"), package).expect("away toml");
+        std::fs::write(away_install.join("src/main.rs"), "fn main() {}\n").expect("away main");
+        std::fs::write(
+            away_install.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"echo\").arg(\"safe\").status().ok();\n}\n",
+        )
+        .expect("away build");
+        let away_install_s = away_install.display().to_string();
+        assert_eq!(
+            kind(&format!(
+                "cd {away_install_s} && cargo install --offline --path {run_s}"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo install --offline -q")),
+            None
+        );
+        std::fs::write(
+            runpkg.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"echo\").arg(\"safe\").status().ok();\n}\n",
+        )
+        .expect("quiet build");
+        assert_eq!(kind(&format!("cd {run_s} && cargo rustc -q")), None);
+        assert_eq!(kind(&format!("cd {run_s} && cargo doc -q")), None);
+        assert_eq!(
+            kind(&format!(
+                "cd {run_s} && cargo install --offline --path . -q"
+            )),
+            None
+        );
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo run -q")),
             Some("git.push")
         );
         let _ = std::fs::remove_dir_all(&root);
