@@ -12727,8 +12727,9 @@ fn score_crystal<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-/// `dart file.dart` and `dart run file.dart` run `Process.run` and
-/// `Process.runSync`. A printed string does not.
+/// `dart file.dart`, `dart run`, and `dart pub run` execute
+/// `Process.run` and `Process.runSync` when the argument list is
+/// present. A single string does not compile and does not run.
 #[allow(clippy::too_many_arguments)]
 fn score_dart_file<'a>(
     policy: &'a Policy,
@@ -12939,10 +12940,11 @@ fn dart_run_after(chars: &[char], mut index: usize) -> Option<String> {
             cursor += 1;
         }
     }
+    if chars.get(cursor) != Some(&'[') {
+        return None;
+    }
     let mut words = vec![program];
-    if chars.get(cursor) == Some(&'[')
-        && let Some((inner, _)) = balanced(chars, cursor, '[', ']')
-    {
+    if let Some((inner, _)) = balanced(chars, cursor, '[', ']') {
         let listed: Vec<char> = inner.chars().collect();
         let mut listed_at = 0usize;
         while listed_at < listed.len() {
@@ -30012,6 +30014,16 @@ mod tests {
             kind(&format!("cd {root_s} && dart tool.dart")),
             Some("git.push")
         );
+        assert_eq!(
+            kind(&format!("cd {root_s} && dart pub run tool.dart")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("tool.dart"),
+            "import 'dart:io';\nvoid main() { Process.runSync('git push origin main'); }\n",
+        )
+        .expect("one string");
+        assert_eq!(kind(&format!("cd {root_s} && dart run tool.dart")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
