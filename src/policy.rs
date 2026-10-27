@@ -8370,7 +8370,9 @@ fn mix_inline(argv: &[String]) -> Vec<String> {
 }
 
 /// `mix cmd command` runs that command. `mix name` runs an alias
-/// whose value starts with `cmd `.
+/// whose value starts with `cmd `. Loading the project runs top-level
+/// code in `mix.exs` and `project/0`. `mix -v` does not load it.
+/// `mix run` and `mix test` also run `config/runtime.exs`.
 #[allow(clippy::too_many_arguments)]
 fn score_mix_shell<'a>(
     policy: &'a Policy,
@@ -8388,36 +8390,36 @@ fn score_mix_shell<'a>(
     {
         return;
     }
+    if mix_version_only(argv) {
+        return;
+    }
+    let mut commands = Vec::new();
     if let Some(command) = mix_cmd_line(argv) {
-        scan_isolated(
-            policy,
-            tool_name,
-            std::slice::from_ref(&command),
-            depth,
-            local,
-            git,
-            best,
-        );
-        return;
+        commands.push(command);
     }
-    let Some(task) = mix_task(argv) else {
-        return;
-    };
-    let path = shell_dir(dir).join("mix.exs");
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return;
-    };
-    if let Some(command) = mix_alias_shell(&text, &task) {
-        scan_isolated(
-            policy,
-            tool_name,
-            std::slice::from_ref(&command),
-            depth,
-            local,
-            git,
-            best,
-        );
+    let root = shell_dir(dir);
+    if let Ok(text) = std::fs::read_to_string(root.join("mix.exs")) {
+        commands.extend(elixir_commands(&mix_startup_source(&text)));
+        if let Some(task) = mix_task(argv)
+            && let Some(command) = mix_alias_shell(&text, &task)
+        {
+            commands.push(command);
+        }
     }
+    if mix_loads_runtime(argv)
+        && let Ok(text) = std::fs::read_to_string(root.join("config/runtime.exs"))
+    {
+        commands.extend(elixir_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn mix_version_only(argv: &[String]) -> bool {
+    mix_task(argv).is_none() && argv.iter().any(|arg| arg == "-v" || arg == "--version")
+}
+
+fn mix_loads_runtime(argv: &[String]) -> bool {
+    matches!(mix_task(argv).as_deref(), Some("run") | Some("test"))
 }
 
 fn mix_cmd_line(argv: &[String]) -> Option<String> {
@@ -8482,6 +8484,133 @@ fn mix_alias_shell(text: &str, task: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn mix_startup_source(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    let mut copying = true;
+    let mut stack: Vec<bool> = Vec::new();
+    while index < chars.len() {
+        if chars[index] == '#' {
+            let end = skip_line(&chars, index);
+            if copying {
+                out.extend(chars[index..end].iter());
+            }
+            index = end;
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            if copying {
+                out.extend(chars[index..end].iter());
+            }
+            index = end;
+            continue;
+        }
+        if chars[index].is_ascii_alphabetic() || chars[index] == '_' {
+            let start = index;
+            let word = mix_ident(&chars, &mut index);
+            match word.as_str() {
+                "def" | "defp" => {
+                    let name = mix_next_ident(&chars, &mut index);
+                    if mix_consume_do(&chars, &mut index) {
+                        stack.push(copying);
+                        copying = name.as_deref() == Some("project");
+                    }
+                }
+                "defmodule" | "defprotocol" | "defimpl" => {
+                    if mix_consume_do(&chars, &mut index) {
+                        stack.push(copying);
+                        copying = false;
+                    }
+                }
+                "do" => {
+                    stack.push(copying);
+                    if copying {
+                        out.push_str("do");
+                    }
+                }
+                "end" => {
+                    if let Some(previous) = stack.pop() {
+                        copying = previous;
+                    }
+                    if copying {
+                        out.push_str("end");
+                    }
+                }
+                _ => {
+                    if copying {
+                        out.extend(chars[start..index].iter());
+                    }
+                }
+            }
+            continue;
+        }
+        if copying {
+            out.push(chars[index]);
+        }
+        index += 1;
+    }
+    out
+}
+
+fn mix_ident(chars: &[char], index: &mut usize) -> String {
+    let start = *index;
+    while *index < chars.len() && (chars[*index].is_ascii_alphanumeric() || chars[*index] == '_') {
+        *index += 1;
+    }
+    chars[start..*index].iter().collect()
+}
+
+fn mix_next_ident(chars: &[char], index: &mut usize) -> Option<String> {
+    while *index < chars.len() && chars[*index].is_whitespace() {
+        *index += 1;
+    }
+    if *index < chars.len() && (chars[*index].is_ascii_alphabetic() || chars[*index] == '_') {
+        Some(mix_ident(chars, index))
+    } else {
+        None
+    }
+}
+
+fn mix_consume_do(chars: &[char], index: &mut usize) -> bool {
+    let mut cursor = *index;
+    while cursor < chars.len() {
+        if chars[cursor] == '#' {
+            cursor = skip_line(chars, cursor);
+            continue;
+        }
+        if (chars[cursor] == '"' || chars[cursor] == '\'')
+            && let Some((_, end)) = read_quoted(chars, cursor)
+        {
+            cursor = end;
+            continue;
+        }
+        if mix_word_at(chars, cursor, "do") {
+            *index = cursor + 2;
+            return true;
+        }
+        if mix_word_at(chars, cursor, "end") {
+            return false;
+        }
+        cursor += 1;
+    }
+    false
+}
+
+fn mix_word_at(chars: &[char], index: usize, word: &str) -> bool {
+    let got: String = chars
+        .iter()
+        .skip(index)
+        .take(word.chars().count())
+        .collect();
+    got == word
+        && chars
+            .get(index + word.chars().count())
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric() && *ch != '_')
 }
 
 fn score_clojure_script<'a>(
@@ -30024,6 +30153,41 @@ mod tests {
         )
         .expect("one string");
         assert_eq!(kind(&format!("cd {root_s} && dart run tool.dart")), None);
+        std::fs::write(
+            root.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"echo\", [\"safe\"])\n  end\nend\n",
+        )
+        .expect("top mix");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix -v")), None);
+        assert_eq!(kind(&format!("cd {root_s} && mix --version")), None);
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"echo\", [\"nope\"])\n  end\nend\n",
+        )
+        .expect("project mix");
+        assert_eq!(kind(&format!("cd {root_s} && mix help")), Some("git.push"));
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n  end\nend\n",
+        )
+        .expect("unused mix");
+        assert_eq!(kind(&format!("cd {root_s} && mix compile")), None);
+        std::fs::create_dir_all(root.join("config")).expect("config");
+        std::fs::write(
+            root.join("config/runtime.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("runtime");
+        assert_eq!(kind(&format!("cd {root_s} && mix compile")), None);
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix run -e '1'")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix test")), Some("git.push"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
