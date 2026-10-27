@@ -956,6 +956,9 @@ fn consider_segment<'a>(
             score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_awk_program(policy, tool_name, &executed.argv, depth, local, git, best);
             score_osascript(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_bun_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_expect_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_tcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
                 tool_name,
@@ -5446,6 +5449,8 @@ fn preload_files(lang: HostLang, argv: &[String]) -> Vec<String> {
     match lang {
         HostLang::Node => node_preloads(argv),
         HostLang::Ruby => ruby_requires(argv),
+        HostLang::Perl => perl_module_files(argv),
+        HostLang::Python => python_module_files(argv),
         _ => Vec::new(),
     }
 }
@@ -5455,12 +5460,14 @@ fn node_preloads(argv: &[String]) -> Vec<String> {
     let mut index = 1usize;
     while index < argv.len() {
         let arg = argv[index].as_str();
-        if arg == "-r" || arg == "--require" {
+        if arg == "-r" || arg == "--require" || arg == "--import" {
             index += 1;
             if let Some(path) = argv.get(index) {
                 paths.push(path.clone());
             }
-        } else if let Some(path) = arg.strip_prefix("--require=")
+        } else if let Some(path) = arg
+            .strip_prefix("--require=")
+            .or_else(|| arg.strip_prefix("--import="))
             && !path.is_empty()
         {
             paths.push(path.to_string());
@@ -5488,6 +5495,281 @@ fn ruby_requires(argv: &[String]) -> Vec<String> {
         index += 1;
     }
     paths
+}
+
+fn python_module_files(argv: &[String]) -> Vec<String> {
+    let mut files = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-m" {
+            index += 1;
+            if let Some(name) = argv.get(index)
+                && let Some(path) = python_module_path(name)
+            {
+                files.push(path);
+            }
+        }
+        index += 1;
+    }
+    files
+}
+
+fn python_module_path(name: &str) -> Option<String> {
+    if name.is_empty() || name.split('.').any(|part| part.is_empty() || part == "..") {
+        return None;
+    }
+    let rel = name.replace('.', "/");
+    let main = format!("{rel}/__main__.py");
+    if std::path::Path::new(&main).is_file() {
+        return Some(main);
+    }
+    let file = format!("{rel}.py");
+    if std::path::Path::new(&file).is_file() {
+        return Some(file);
+    }
+    None
+}
+
+fn perl_module_files(argv: &[String]) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-I" {
+            index += 1;
+            if let Some(dir) = argv.get(index) {
+                dirs.push(dir.clone());
+            }
+        } else if let Some(dir) = arg.strip_prefix("-I")
+            && !dir.is_empty()
+        {
+            dirs.push(dir.to_string());
+        } else if arg == "-M" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(perl_module_name(name));
+            }
+        } else if let Some(name) = arg.strip_prefix("-M")
+            && !name.is_empty()
+        {
+            names.push(perl_module_name(name));
+        }
+        index += 1;
+    }
+    let mut files = Vec::new();
+    for name in names {
+        let rel = name.replace("::", "/");
+        for dir in &dirs {
+            let path = std::path::Path::new(dir).join(format!("{rel}.pm"));
+            if path.is_file() {
+                files.push(path.display().to_string());
+                break;
+            }
+        }
+    }
+    files
+}
+
+fn perl_module_name(raw: &str) -> String {
+    raw.split(['=', ' ']).next().unwrap_or(raw).to_string()
+}
+
+fn score_bun_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(path) = bun_script_path(argv) else {
+        return;
+    };
+    match load_script_file(&path) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = interpreter_commands(HostLang::Node, &text);
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
+    }
+}
+
+fn bun_script_path(argv: &[String]) -> Option<String> {
+    if !command_basename(argv.first()?).eq_ignore_ascii_case("bun") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            index += 1;
+            let path = argv.get(index)?;
+            return script_extension(path).then(|| path.clone());
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg.eq_ignore_ascii_case("run") {
+            index += 1;
+            continue;
+        }
+        return script_extension(arg).then(|| arg.to_string());
+    }
+    None
+}
+
+fn script_extension(path: &str) -> bool {
+    [".js", ".mjs", ".cjs", ".ts", ".mts", ".tsx", ".jsx"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
+}
+
+fn score_expect_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let programs = expect_programs(argv);
+    if programs.is_empty() {
+        return;
+    }
+    let mut commands = Vec::new();
+    for text in &programs {
+        commands.extend(expect_spawns(text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn expect_programs(argv: &[String]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("expect"))
+    {
+        return Vec::new();
+    }
+    let mut programs = Vec::new();
+    let mut index = 1usize;
+    let mut saw_inline = false;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-c" {
+            saw_inline = true;
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                programs.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !saw_inline && let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+            programs.push(text);
+        }
+        break;
+    }
+    programs
+}
+
+fn expect_spawns(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.starts_with('#') {
+                return None;
+            }
+            let rest = line.strip_prefix("spawn ")?.trim();
+            if rest.is_empty() {
+                None
+            } else {
+                Some(rest.to_string())
+            }
+        })
+        .collect()
+}
+
+fn score_tcl_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(text) = tcl_program(argv) else {
+        return;
+    };
+    let commands = tcl_execs(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn tcl_program(argv: &[String]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("tclsh") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return match load_script_file(arg) {
+            Some(ScriptFile::Text(text)) => Some(text),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn tcl_execs(text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        let mut index = 0usize;
+        while index + 4 <= chars.len() {
+            let word = chars[index..index + 4].iter().collect::<String>();
+            let before = index == 0 || !chars[index - 1].is_ascii_alphanumeric();
+            let after = index + 4 == chars.len() || !chars[index + 4].is_ascii_alphanumeric();
+            if before && after && word == "exec" && tcl_command_position(&chars, index) {
+                let command: String = chars[index + 4..]
+                    .iter()
+                    .take_while(|ch| **ch != ']' && **ch != ';')
+                    .collect();
+                let command = command.trim();
+                if !command.is_empty() {
+                    commands.push(command.to_string());
+                }
+                index += 4;
+                continue;
+            }
+            index += 1;
+        }
+    }
+    commands
+}
+
+fn tcl_command_position(chars: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    cursor == 0 || matches!(chars[cursor - 1], '[' | ';')
 }
 
 fn score_awk_program<'a>(
@@ -21586,6 +21868,19 @@ mod tests {
         write("run.awk", "BEGIN { system(\"git push origin main\") }\n");
         write("print.awk", "BEGIN { print \"git push origin main\" }\n");
         write("run.scpt", "do shell script \"git push origin main\"\n");
+        write("mod.py", "import os\nos.system(\"git push origin main\")\n");
+        std::fs::create_dir_all(root.join("pkg")).expect("pkg");
+        write(
+            "pkg/__main__.py",
+            "import os\nos.system(\"git push origin main\")\n",
+        );
+        write("Need.pm", "system(\"git push origin main\");\n1;\n");
+        write("run.exp", "spawn git push origin main\nexpect eof\n");
+        write("eof.exp", "expect eof\n");
+        write("run.tcl", "exec git push origin main\n");
+        write("puts.tcl", "puts [exec git push origin main]\n");
+        write("hello.tcl", "puts hello\n");
+        write("args.tcl", "puts hello exec git push origin main\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -21641,6 +21936,14 @@ mod tests {
             "awk 'BEGIN { system(\"git push origin main\") }'".to_string(),
             format!("osascript {show}/run.scpt"),
             "osascript -e 'do shell script \"git push origin main\"'".to_string(),
+            format!("bun {show}/preload.js"),
+            format!("bun run {show}/preload.js"),
+            format!("node --import {show}/preload.js -e '0'"),
+            format!("perl -I {show} -MNeed -e 0"),
+            format!("expect {show}/run.exp"),
+            "expect -c 'spawn git push origin main'".to_string(),
+            format!("tclsh {show}/run.tcl"),
+            format!("tclsh {show}/puts.tcl"),
         ];
         for command in &review {
             assert_eq!(kind(command), Some("git.push"), "{command}");
@@ -21666,6 +21969,12 @@ mod tests {
             "osascript -e 'display dialog \"git push origin main\"'".to_string(),
             format!("ruby -r {show}/missing.rb -e '0'"),
             "node -e '0'".to_string(),
+            format!("expect {show}/eof.exp"),
+            "expect -c 'expect eof'".to_string(),
+            format!("tclsh {show}/hello.tcl"),
+            format!("tclsh {show}/args.tcl"),
+            format!("perl -MNeed -e 0"),
+            "bun run test".to_string(),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
@@ -21675,6 +21984,9 @@ mod tests {
         assert_eq!(kind("pnpm test"), Some("git.push"));
         assert_eq!(kind("pnpm run unused"), Some("git.push"));
         assert_eq!(kind("bun run test"), Some("git.push"));
+        assert_eq!(kind("python3 -m mod"), Some("git.push"));
+        assert_eq!(kind("python3 -m pkg"), Some("git.push"));
+        assert_eq!(kind("python3 -m missingmod"), None);
         std::env::set_current_dir(previous).expect("back");
         let _ = std::fs::remove_dir_all(&root);
     }
