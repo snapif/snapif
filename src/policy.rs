@@ -986,6 +986,8 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &lua_modules, depth, local, git, best);
             let loaded = inline_loaded_commands(&executed.argv, host_dir);
             scan_isolated(policy, tool_name, &loaded, depth, local, git, best);
+            let julia_includes = julia_include_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &julia_includes, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6400,8 +6402,7 @@ fn inline_code(lang: HostLang, argv: &[String]) -> Vec<String> {
     let flags: &[&str] = match lang {
         HostLang::Python => &["-c"],
         HostLang::Php => &["-r"],
-        HostLang::Node | HostLang::Ruby | HostLang::Perl | HostLang::Lua => &["-e"],
-        HostLang::R => return Vec::new(),
+        HostLang::Node | HostLang::Ruby | HostLang::Perl | HostLang::Lua | HostLang::R => &["-e"],
     };
     let mut texts = Vec::new();
     let mut index = 1usize;
@@ -6430,6 +6431,7 @@ fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
         HostLang::Lua => call_strings(text, "dofile"),
         HostLang::Ruby => {
             let mut paths = call_strings(text, "load");
+            paths.extend(call_strings(text, "require_relative"));
             paths.extend(
                 call_strings(text, "require")
                     .into_iter()
@@ -6444,9 +6446,14 @@ fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
         HostLang::Python => {
             let mut paths = python_exec_opens(text);
             paths.extend(python_imports(text));
+            paths.extend(python_from_imports(text));
             paths
         }
-        HostLang::Php => call_strings(text, "include"),
+        HostLang::Php => {
+            let mut paths = call_strings(text, "include");
+            paths.extend(call_strings(text, "require"));
+            paths
+        }
         HostLang::Perl => {
             let mut paths = call_strings(text, "do");
             paths.extend(call_strings(text, "require"));
@@ -6455,7 +6462,7 @@ fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
                 .filter(|path| path.contains('/') || path.contains('\\'))
                 .collect()
         }
-        HostLang::R => Vec::new(),
+        HostLang::R => call_strings(text, "source"),
     }
 }
 
@@ -6483,6 +6490,43 @@ fn call_strings(text: &str, word: &str) -> Vec<String> {
                 && !path.is_empty()
             {
                 paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn python_from_imports(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "from") {
+            let mut cursor = index + "from".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            let start = cursor;
+            if cursor < chars.len() && (chars[cursor].is_ascii_alphabetic() || chars[cursor] == '_')
+            {
+                cursor += 1;
+                while cursor < chars.len()
+                    && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+                {
+                    cursor += 1;
+                }
+                let name: String = chars[start..cursor].iter().collect();
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+                if haskell_word(&chars, cursor, "import") {
+                    paths.push(format!("{name}.py"));
+                }
             }
         }
         index += 1;
@@ -6615,6 +6659,21 @@ fn lua_module_names(argv: &[String]) -> Vec<String> {
         index += 1;
     }
     names
+}
+
+fn julia_include_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "julia", &["-e", "--eval"]) {
+        for raw in call_strings(&text, "include") {
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(julia_commands(&body));
+            }
+        }
+    }
+    commands
 }
 
 fn kotlin_commands(argv: &[String]) -> Vec<String> {
@@ -23641,6 +23700,8 @@ mod tests {
         );
         write("push.pl", "system(\"git push origin main\");\n");
         write("push.php", "<?php\nsystem(\"git push origin main\");\n");
+        write("push.R", "system(\"git push origin main\")\n");
+        write("push.jl", "run(`git push origin main`)\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -23744,6 +23805,11 @@ mod tests {
             format!("cd {show} && ruby -e 'require \"./push.rb\"'"),
             format!("cd {show} && php -r 'include \"push.php\";'"),
             format!("cd {show} && perl -e 'require \"./push.pl\";'"),
+            format!("cd {show} && python3 -c 'from push import os'"),
+            format!("cd {show} && php -r 'require \"push.php\";'"),
+            format!("cd {show} && ruby -e 'require_relative \"push.rb\"'"),
+            format!("cd {show} && R --vanilla -e 'source(\"push.R\")'"),
+            format!("cd {show} && julia --startup-file=no -e 'include(\"push.jl\")'"),
             "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
@@ -23816,6 +23882,8 @@ mod tests {
             format!("cd {show} && ruby -e 'require \"json\"'"),
             format!("cd {show} && php -r 'echo 1;'"),
             format!("cd {show} && perl -e 'require \"push.pl\";'"),
+            format!("cd {show} && python3 -c 'from missing import os'"),
+            format!("cd {show} && julia --startup-file=no -e 'include(\"quiet.jl\")'"),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
