@@ -615,7 +615,9 @@ fn check_action(
 /// A shell that reads its script from stdin runs a heredoc or a
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
 /// /dev/stdin` and `bash -s` do too. `bash < path` and `bash -s < path`
-/// score that file. `bash -c 'source /dev/stdin' < path` does too.
+/// score that file. `bash -c 'source /dev/stdin' < path` and
+/// `bash -c 'bash -s' < path` do too. `bash -c 'echo hi' < path`
+/// does not.
 /// `source < path` does not run the file. `source /dev/stdin` runs that
 /// body in the same shell. `source path` and `bash path` run a regular
 /// file at that path. `cat path`, `head path`, and `tail path` score
@@ -3829,17 +3831,28 @@ fn is_stdin_script(token: &str) -> bool {
     matches!(token, "/dev/stdin" | "/dev/fd/0" | "-")
 }
 
-/// `bash -c 'source /dev/stdin'` runs the redirected file.
+/// `bash -c 'source /dev/stdin'` and `bash -c 'bash -s'` run the
+/// redirected file. `bash -c 'echo hi'` does not.
 fn script_reads_stdin(script: &str) -> bool {
-    matches!(
-        script.trim(),
+    let script = script.trim();
+    if matches!(
+        script,
         "source /dev/stdin"
             | "source -"
             | "source /dev/fd/0"
             | ". /dev/stdin"
             | ". -"
             | ". /dev/fd/0"
-    )
+    ) {
+        return true;
+    }
+    tokenize_parts(script).into_iter().any(|part| {
+        let ShellPart::Segment(segment) = part else {
+            return false;
+        };
+        executed_argv(&segment.tokens, &segment.in_eval, &[])
+            .is_some_and(|executed| shell_reads_stdin(&executed.argv))
+    })
 }
 
 fn shell_reads_stdin(argv: &[String]) -> bool {
@@ -19934,6 +19947,12 @@ mod tests {
             format!("bash -s < '{sh}'"),
             format!("sh < '{sh}'"),
             format!("bash -c 'source /dev/stdin' < '{sh}'"),
+            format!("bash -c 'bash -s' < '{sh}'"),
+            format!("bash -c 'sh -s' < '{sh}'"),
+            format!("sh -c 'sh -s' < '{sh}'"),
+            format!("zsh -c 'zsh -s' < '{sh}'"),
+            format!("bash -c 'exec bash -s' < '{sh}'"),
+            format!("bash -c bash < '{sh}'"),
             format!("command bash < '{sh}'"),
             format!("env bash < '{sh}'"),
             format!("nice bash < '{sh}'"),
@@ -19995,6 +20014,7 @@ mod tests {
             format!("bash < '{sh}.missing'"),
             format!("bash -s < '{sh}.missing'"),
             format!("source < '{sh}'"),
+            format!("bash -c 'echo hi' < '{sh}'"),
             format!("source {sh}.missing"),
             format!("cat {sh}.missing"),
             format!("powershell -File {ps1}.missing"),
