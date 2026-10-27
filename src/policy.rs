@@ -10302,7 +10302,8 @@ fn brew_ruby_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// `xcodebuild` runs each Run Script phase of the selected target.
 /// With no `-target`, that is the first target. `build`, `archive`,
 /// and a command with no action run the scripts. `clean`, `test`,
-/// and `-version` do not.
+/// and `-version` do not. A relative script is read next to the
+/// project, not from the shell's working directory.
 #[allow(clippy::too_many_arguments)]
 fn score_xcodebuild<'a>(
     policy: &'a Policy,
@@ -10337,7 +10338,29 @@ fn score_xcodebuild<'a>(
         return;
     };
     let scripts = xcode_shell_scripts(&text, &xcode_target_names(argv));
-    scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+    let srcroot = project.parent().map(|path| path.display().to_string());
+    for script in scripts {
+        let mut functions = Functions::new();
+        let mut env = local.to_vec();
+        let mut scope = ShellScope {
+            dir: srcroot.clone(),
+            ..ShellScope::default()
+        };
+        prefer(
+            policy,
+            best,
+            matched_in(
+                policy,
+                tool_name,
+                &script,
+                depth + 1,
+                &mut functions,
+                &mut env,
+                &mut scope,
+                git,
+            ),
+        );
+    }
 }
 
 fn xcode_runs_scripts(positionals: &[String]) -> bool {
@@ -29672,6 +29695,51 @@ mod tests {
             Some("git.push")
         );
         assert_eq!(kind("xcodebuild -version"), None);
+        std::fs::write(
+            project.join("project.pbxproj"),
+            r#"// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	objects = {
+		AA00000000000000000000A1 = {
+			isa = PBXAggregateTarget;
+			buildPhases = ( AA00000000000000000000B1, );
+			name = Probe;
+		};
+		AA00000000000000000000A2 = {
+			isa = PBXProject;
+			targets = ( AA00000000000000000000A1, );
+		};
+		AA00000000000000000000B1 = {
+			isa = PBXShellScriptBuildPhase;
+			shellScript = "sh run.sh";
+		};
+	};
+	rootObject = AA00000000000000000000A2;
+}
+"#,
+        )
+        .expect("relative pbxproj");
+        std::fs::write(root.join("run.sh"), "git push origin main\n").expect("project script");
+        let elsewhere = root.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+        std::fs::write(elsewhere.join("run.sh"), "echo decoy\n").expect("decoy script");
+        let project_s = project.display().to_string();
+        let elsewhere_s = elsewhere.display().to_string();
+        assert_eq!(
+            kind(&format!(
+                "cd {elsewhere_s} && xcodebuild -project {project_s} -target Probe build"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(root.join("run.sh"), "echo project\n").expect("safe project");
+        std::fs::write(elsewhere.join("run.sh"), "git push origin main\n").expect("decoy push");
+        assert_eq!(
+            kind(&format!(
+                "cd {elsewhere_s} && xcodebuild -project {project_s} -target Probe build"
+            )),
+            None
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
