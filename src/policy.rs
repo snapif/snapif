@@ -981,6 +981,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_vim(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_exec(
                 policy,
@@ -10397,6 +10407,71 @@ fn ninja_walk(file: &NinjaFile, target: &str, commands: &mut Vec<String>, seen: 
     {
         commands.push(command);
     }
+}
+
+/// `vim -c '!cmd'`, `--cmd '!cmd'`, `+!cmd`, and a `-S` script run
+/// `cmd` in a shell. `qa!` and `:echo` do not. A leading `:` is
+/// optional.
+#[allow(clippy::too_many_arguments)]
+fn score_vim<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("vim") {
+        return;
+    }
+    let mut commands = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "-c" || token == "--cmd" || token == "-S" {
+            index += 1;
+            let Some(value) = argv.get(index) else {
+                break;
+            };
+            if token == "-S" {
+                commands.extend(vim_script_shells(&shell_path(value, dir)));
+            } else if let Some(shell) = vim_shell(value) {
+                commands.push(shell);
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(shell) = token.strip_prefix('+').filter(|rest| !rest.is_empty())
+            && let Some(shell) = vim_shell(shell)
+        {
+            commands.push(shell);
+        }
+        index += 1;
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn vim_shell(command: &str) -> Option<String> {
+    let trimmed = command
+        .trim()
+        .strip_prefix(':')
+        .unwrap_or(command.trim())
+        .trim();
+    let rest = trimmed.strip_prefix('!')?.trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    }
+}
+
+fn vim_script_shells(path: &str) -> Vec<String> {
+    let Some(ScriptFile::Text(text)) = load_script_file(path) else {
+        return Vec::new();
+    };
+    text.lines().filter_map(vim_shell).collect()
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -25113,6 +25188,40 @@ mod tests {
         assert_eq!(kind(&all), None, "{all}");
         let side = format!("cd {proj_s} && ninja other");
         assert_eq!(kind(&side), Some("git.push"), "{side}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `vim -c '!cmd'`, `--cmd`, `+!cmd`, and `-S` run `cmd`. `qa!`
+    /// and `:echo` do not.
+    #[test]
+    fn vim_bang_scores_the_shell_command() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-vim-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(root.join("go.ex"), "!git push origin main\nqa!\n").expect("ex");
+        std::fs::write(root.join("quiet.ex"), "qa!\n").expect("quiet");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let push = "git push origin main";
+        let cases = [
+            (
+                format!("vim -n -es -c '!{push}' -c 'qa!'"),
+                Some("git.push"),
+            ),
+            (format!("vim -c ':!{push}' -c qa!"), Some("git.push")),
+            (format!("vim -c '  !{push}' -c qa!"), Some("git.push")),
+            (format!("vim -c 'echo {push}' -c qa!"), None),
+            (format!("vim -c qa!"), None),
+            (format!("vim --cmd '!{push}' -c qa!"), Some("git.push")),
+            (format!("vim '+!{push}' '+qa!'"), Some("git.push")),
+            (format!("cd {root_s} && vim -S go.ex"), Some("git.push")),
+            (format!("cd {root_s} && vim -S quiet.ex"), None),
+            (format!("cd {root_s} && vim -S missing.ex"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 
