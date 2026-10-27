@@ -618,7 +618,10 @@ fn check_action(
 /// body in the same shell. `source path` and `bash path` run a regular
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
-/// `gtail`. `cat < path`, `head < path`, and `tail < path` score
+/// `gtail`. An unquoted `C:\dir\file` keeps the backslashes, so
+/// `bash`, `source`, and `cat` read that file. The quoted path and
+/// `C:/dir/file` already did. A missing path stays unmatched.
+/// `cat < path`, `head < path`, and `tail < path` score
 /// that same text, including a single-quoted path and a double-quoted
 /// path with no expansion. `head - < path`
 /// and `tail - < path` do too.
@@ -632,7 +635,9 @@ fn check_action(
 /// The here-string word is expanded first, so `cat <<< $(rm)` matches.
 /// Inside double quotes, a backslash immediately before a newline is
 /// removed, so a wrapped `bash -c "git push"` matches `git.push`.
-/// A backtick inside those quotes runs too. An unquoted
+/// A backslash before any other ordinary character stays, so
+/// `"C:\dir\file"` keeps the separators. `$`, a backtick, `"`, and `\`
+/// still escape. A backtick inside those quotes runs too. An unquoted
 /// `#` comment does not run `$(rm)`. `<(rm)` and `>(rm)` do.
 /// A redirect is not a word. `rm>/dev/null`, `>/dev/null rm`, and
 /// `2>/dev/null rm` match. `echo rm>/tmp/x` does not, because `rm` is
@@ -641,13 +646,21 @@ fn check_action(
 /// matches. The same definition with no call does not. `cmd /c rm`,
 /// `cmd -c rm`, and `powershell -Command rm` match. `powershell rm`
 /// matches, because Windows PowerShell defaults a bare word to
-/// `-Command`. `pwsh rm` does not: that host defaults the word to
-/// `-File`. `pwsh -i -c rm` matches, because `-i` takes no value.
+/// `-Command`. `pwsh rm` does not match when that word is not a file:
+/// `pwsh` defaults it to `-File`. A real file at that path is read.
+/// `pwsh -i -c rm` matches, because `-i` takes no value.
 /// `powershell -i xml -c rm` matches, and `xml` is the input format.
 /// `pwsh -cwa` joins the command the same way as `-Command`. `-c`
 /// stays `-Command`. Words after `-File` are script arguments, so
-/// `powershell -File script.ps1 -Command rm` does not match, and the
-/// file is not read. `powershell -EncodedCommand`, `-E`,
+/// `powershell -File script.ps1 -Command rm` does not match when
+/// `script.ps1` is missing. When the file exists, its body is scored
+/// and the later `-Command` is not the engine command. `-File` and
+/// `-f` read the first operand. `powershell -Command` of `& path` and
+/// of `Invoke-Expression (Get-Content -Raw path)` read that file.
+/// `Get-Content` without `-Raw` does not. `cmd /c` of a `.bat` or
+/// `.cmd` path reads the file, and `call` of that path does too.
+/// `cmd /c rm` stays the command string. A missing file stays
+/// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
 /// `-com` is that command. `-co` is not. On `powershell`, bare words
 /// after that switch are still the command. A colon glues the value
@@ -837,118 +850,128 @@ fn consider_segment<'a>(
         let mut child = Functions::new();
         run_detached(script, &mut child, best);
     }
-    let child_script = shell_script(&executed.argv)
-        .or_else(|| cmd_script(&executed.argv))
-        .or_else(|| powershell_script(&executed.argv))
-        .or_else(|| su_script(&executed.argv));
-    if let Some(script) = child_script {
-        // `pwsh -Command -` reads the heredoc. The dash itself is not a command.
-        // `bash -c -` is the script "-", not stdin.
-        if is_stdin_script(&script) && is_powershell_base(executed.argv.first().map(String::as_str))
-        {
-            scan_isolated(
-                policy,
-                tool_name,
-                &segment.heredocs,
-                depth,
-                local,
-                git,
-                best,
-            );
-        } else {
-            let mut child = Functions::new();
-            run_detached(&script, &mut child, best);
-        }
-    } else if let Some(scripts) =
-        eval_script(&executed.argv, &executed.in_eval, scope, exported, local)
-    {
-        for script in &scripts {
-            score_here(
-                policy, tool_name, script, depth, functions, local, exported, scope, git, best,
-            );
-        }
-    } else if !executed.exec_wrapper
-        && !executed.bypass_function
-        && let Some(body) = executed
-            .argv
-            .first()
-            .and_then(|name| functions.get(name).cloned())
-    {
-        // `local` and `declare` inside the function end when it returns.
-        // A bare assignment still changes this shell.
-        scope.locals.push(Vec::new());
-        score_here(
-            policy, tool_name, &body, depth, functions, local, exported, scope, git, best,
-        );
-        scope.pop_frame(exported);
+    // A batch path is a file, not the command string `cmd /c` would scan.
+    if let Some(path) = cmd_batch_operand(&executed.argv) {
+        score_script_path(policy, tool_name, path, depth, local, git, best);
     } else {
-        // `bash script` starts a new process. `source script` is handled
-        // below, in this shell. `cat`, `head`, and `tail` score the text
-        // they would print.
-        score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
-        score_printed_file(
-            policy,
-            tool_name,
-            &executed.argv,
-            segment.stdin_file.as_deref(),
-            depth,
-            local,
-            git,
-            best,
-        );
-        if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
-            prefer(policy, best, Some(id));
-        }
-        if find_deletes(&executed.argv) {
-            prefer(policy, best, destructive_rm_action(policy, tool_name));
-        }
-        let scripts = find_exec_commands(&executed.argv);
-        scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
-        let compress = sort_compress_commands(&executed.argv);
-        scan_isolated(policy, tool_name, &compress, depth, local, git, best);
-        let filters = split_filter_commands(&executed.argv);
-        scan_isolated(policy, tool_name, &filters, depth, local, git, best);
-        let remotes = remote_scripts(&executed.argv);
-        scan_isolated(policy, tool_name, &remotes, depth, local, git, best);
-        let arms = case_arm_scripts(&executed.argv);
-        scan_isolated(policy, tool_name, &arms, depth, local, git, best);
-        let traps = if executed.blocks_shell_builtin {
-            Vec::new()
-        } else {
-            trap_scripts(&executed.argv)
-        };
-        scan_isolated(policy, tool_name, &traps, depth, local, git, best);
-        let found = git_alias_scripts(&executed.argv, local, git);
-        scan_isolated(policy, tool_name, &found.commands, depth, local, git, best);
-        for body in &found.shells {
-            let mut child = Functions::new();
-            let mut child_env = local.clone();
-            let mut child_scope = ShellScope::default();
-            prefer(
-                policy,
-                best,
-                matched_in(
+        let child_script = shell_script(&executed.argv)
+            .or_else(|| cmd_script(&executed.argv))
+            .or_else(|| powershell_script(&executed.argv))
+            .or_else(|| su_script(&executed.argv));
+        if let Some(script) = child_script {
+            // `pwsh -Command -` reads the heredoc. The dash itself is not a command.
+            // `bash -c -` is the script "-", not stdin.
+            if let Some(path) = powershell_launched_file(&executed.argv, &script) {
+                score_script_path(policy, tool_name, &path, depth, local, git, best);
+            } else if is_stdin_script(&script)
+                && is_powershell_base(executed.argv.first().map(String::as_str))
+            {
+                scan_isolated(
                     policy,
                     tool_name,
-                    body,
-                    depth + 1,
-                    &mut child,
-                    &mut child_env,
-                    &mut child_scope,
-                    &found.bindings,
-                ),
+                    &segment.heredocs,
+                    depth,
+                    local,
+                    git,
+                    best,
+                );
+            } else {
+                let mut child = Functions::new();
+                run_detached(&script, &mut child, best);
+            }
+        } else if let Some(path) = powershell_file_operand(&executed.argv) {
+            score_script_path(policy, tool_name, path, depth, local, git, best);
+        } else if let Some(scripts) =
+            eval_script(&executed.argv, &executed.in_eval, scope, exported, local)
+        {
+            for script in &scripts {
+                score_here(
+                    policy, tool_name, script, depth, functions, local, exported, scope, git, best,
+                );
+            }
+        } else if !executed.exec_wrapper
+            && !executed.bypass_function
+            && let Some(body) = executed
+                .argv
+                .first()
+                .and_then(|name| functions.get(name).cloned())
+        {
+            // `local` and `declare` inside the function end when it returns.
+            // A bare assignment still changes this shell.
+            scope.locals.push(Vec::new());
+            score_here(
+                policy, tool_name, &body, depth, functions, local, exported, scope, git, best,
             );
-        }
-        if shell_reads_stdin(&executed.argv) {
-            scan_isolated(
+            scope.pop_frame(exported);
+        } else {
+            // `bash script` starts a new process. `source script` is handled
+            // below, in this shell. `cat`, `head`, and `tail` score the text
+            // they would print.
+            score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_printed_file(
                 policy,
                 tool_name,
-                &segment.heredocs,
+                &executed.argv,
+                segment.stdin_file.as_deref(),
                 depth,
                 local,
                 git,
                 best,
             );
+            if let Some(id) = prefix_hit(policy, tool_name, &executed.argv) {
+                prefer(policy, best, Some(id));
+            }
+            if find_deletes(&executed.argv) {
+                prefer(policy, best, destructive_rm_action(policy, tool_name));
+            }
+            let scripts = find_exec_commands(&executed.argv);
+            scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
+            let compress = sort_compress_commands(&executed.argv);
+            scan_isolated(policy, tool_name, &compress, depth, local, git, best);
+            let filters = split_filter_commands(&executed.argv);
+            scan_isolated(policy, tool_name, &filters, depth, local, git, best);
+            let remotes = remote_scripts(&executed.argv);
+            scan_isolated(policy, tool_name, &remotes, depth, local, git, best);
+            let arms = case_arm_scripts(&executed.argv);
+            scan_isolated(policy, tool_name, &arms, depth, local, git, best);
+            let traps = if executed.blocks_shell_builtin {
+                Vec::new()
+            } else {
+                trap_scripts(&executed.argv)
+            };
+            scan_isolated(policy, tool_name, &traps, depth, local, git, best);
+            let found = git_alias_scripts(&executed.argv, local, git);
+            scan_isolated(policy, tool_name, &found.commands, depth, local, git, best);
+            for body in &found.shells {
+                let mut child = Functions::new();
+                let mut child_env = local.clone();
+                let mut child_scope = ShellScope::default();
+                prefer(
+                    policy,
+                    best,
+                    matched_in(
+                        policy,
+                        tool_name,
+                        body,
+                        depth + 1,
+                        &mut child,
+                        &mut child_env,
+                        &mut child_scope,
+                        &found.bindings,
+                    ),
+                );
+            }
+            if shell_reads_stdin(&executed.argv) {
+                scan_isolated(
+                    policy,
+                    tool_name,
+                    &segment.heredocs,
+                    depth,
+                    local,
+                    git,
+                    best,
+                );
+            }
         }
     }
     // A function named `source` runs instead of the builtin.
@@ -2116,6 +2139,34 @@ fn printer_reads_stdin(name: &str, args: &[String]) -> bool {
             identity_query(name, args).is_some_and(|query| query.is_none())
         }
         _ => false,
+    }
+}
+
+/// Body of a script file. A missing path stays unmatched. Past one
+/// megabyte the body is `shell.deep`.
+fn score_script_path<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    path: &str,
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    match load_script_file(path) {
+        Some(ScriptFile::Text(text)) => {
+            scan_isolated(
+                policy,
+                tool_name,
+                std::slice::from_ref(&text),
+                depth,
+                local,
+                git,
+                best,
+            );
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
     }
 }
 
@@ -3795,7 +3846,23 @@ enum ScriptFile {
     Unscanned,
 }
 
+/// `C:\dir\file` and `C:/dir/file` are the same file. A relative
+/// `C:/...` under the test root is how Ubuntu opens that spelling.
+fn openable_path(path: &str) -> std::borrow::Cow<'_, str> {
+    let mut chars = path.chars();
+    let drive = matches!(chars.next(), Some(ch) if ch.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && path.contains('\\');
+    if drive {
+        std::borrow::Cow::Owned(path.replace('\\', "/"))
+    } else {
+        std::borrow::Cow::Borrowed(path)
+    }
+}
+
 fn load_script_file(path: &str) -> Option<ScriptFile> {
+    let owned = openable_path(path);
+    let path = owned.as_ref();
     let mut file = open_script_candidate(path)?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() {
@@ -4012,8 +4079,8 @@ fn powershell_script(argv: &[String]) -> Option<String> {
             };
             return decode_ps_encoded_script(encoded);
         }
-        // Words after -File belong to the script. Do not read the file,
-        // and do not treat a later -Command as the engine command.
+        // Words after -File belong to the script. The caller reads the
+        // file. A later -Command is an argument, not the engine command.
         if is_ps_file_name(name) {
             return None;
         }
@@ -4181,10 +4248,183 @@ fn b64_sextet(byte: u8) -> Option<u8> {
 }
 
 // `-f` through `-file`. Later tokens are script arguments, so the scan
-// stops. The file is not read.
+// stops. The caller reads the first operand.
 fn is_ps_file_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     !name.is_empty() && "file".starts_with(&name)
+}
+
+fn cmd_run_tail(argv: &[String]) -> Option<&[String]> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("cmd") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        if is_cmd_run_switch(&argv[index]) {
+            let tail = &argv[index + 1..];
+            return (!tail.is_empty()).then_some(tail);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// The tail of `/c` or `/k` when cmd runs a batch file. `call` of that
+/// path is the same file. A command string such as `rm -rf /tmp/x` is
+/// not, including when the last argument ends in `.bat`.
+fn cmd_batch_operand(argv: &[String]) -> Option<&str> {
+    let tail = cmd_run_tail(argv)?;
+    if tail.len() == 1 {
+        return batch_token(&tail[0]);
+    }
+    if tail[0].eq_ignore_ascii_case("call") {
+        let path = tail.get(1)?;
+        return is_batch_file(path).then_some(path.as_str());
+    }
+    is_batch_file(&tail[0]).then_some(tail[0].as_str())
+}
+
+/// One quoted tail. `C:\Program Files\payload.bat` is a path. `rm -rf
+/// /tmp/x.bat` is a command whose last word happens to end in `.bat`.
+fn batch_token(token: &str) -> Option<&str> {
+    let token = token.trim();
+    if token.is_empty()
+        || token
+            .chars()
+            .any(|ch| matches!(ch, '&' | '|' | '<' | '>' | ';'))
+    {
+        return None;
+    }
+    if !token.contains(char::is_whitespace) {
+        return is_batch_file(token).then_some(token);
+    }
+    let first = token.split_whitespace().next()?;
+    if !first.contains(['/', '\\']) && !first.starts_with('.') {
+        return None;
+    }
+    is_batch_file(token).then_some(token)
+}
+
+fn is_batch_file(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    let name = name.trim_end_matches([' ', '\t']);
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("bat") || ext.eq_ignore_ascii_case("cmd"))
+}
+
+/// `-File` / `-f` operand, or the bare word `pwsh` treats as `-File`.
+/// Windows PowerShell's bare word stays `-Command`.
+fn powershell_file_operand(argv: &[String]) -> Option<&str> {
+    let base = command_basename(argv.first()?);
+    let pwsh = base.eq_ignore_ascii_case("pwsh");
+    if !pwsh && !base.eq_ignore_ascii_case("powershell") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        let Some((name, inline)) = ps_switch_parts(token) else {
+            return if pwsh { Some(token) } else { None };
+        };
+        if is_ps_command_name(name)
+            || is_ps_command_with_args_name(name)
+            || is_ps_encoded_command_name(name)
+        {
+            return None;
+        }
+        if is_ps_file_name(name) {
+            if let Some(value) = inline.filter(|value| !value.is_empty()) {
+                return Some(value);
+            }
+            return argv.get(index + 1).map(String::as_str);
+        }
+        if ps_name_takes_value(name, base) {
+            index += 1;
+            if inline.is_none() && index < argv.len() {
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    None
+}
+
+/// `& path` and `Invoke-Expression (Get-Content -Raw path)` run that file.
+/// Other `Get-Content` shapes are not this.
+fn powershell_launched_file(argv: &[String], script: &str) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
+        return None;
+    }
+    ps_call_file(script).or_else(|| ps_iex_raw_file(script))
+}
+
+fn ps_call_file(script: &str) -> Option<String> {
+    let rest = script.trim().strip_prefix('&')?;
+    if rest.starts_with('&') {
+        return None;
+    }
+    let (path, rest) = take_ps_literal(rest)?;
+    if path.is_empty() || path.starts_with(['$', '(', '{', '&']) {
+        return None;
+    }
+    if rest.chars().any(|ch| matches!(ch, ';' | '|' | '&')) {
+        return None;
+    }
+    Some(path)
+}
+
+fn ps_iex_raw_file(script: &str) -> Option<String> {
+    let rest = split_ps_name(script, "invoke-expression")?;
+    let rest = rest.trim_start().strip_prefix('(')?.trim_start();
+    let rest = split_ps_name(rest, "get-content")?;
+    let rest = split_ps_name(rest.trim_start(), "-raw")?;
+    let (path, rest) = take_ps_literal(rest)?;
+    let rest = rest.trim_start().strip_prefix(')')?;
+    if path.is_empty() || !rest.trim().is_empty() {
+        return None;
+    }
+    Some(path)
+}
+
+fn split_ps_name<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    if text.len() < name.len() || !text[..name.len()].eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let rest = &text[name.len()..];
+    if rest.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_') {
+        return None;
+    }
+    Some(rest)
+}
+
+fn take_ps_literal(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start();
+    if let Some(rest) = text.strip_prefix('\'') {
+        let end = rest.find('\'')?;
+        return Some((rest[..end].to_string(), &rest[end + 1..]));
+    }
+    if let Some(rest) = text.strip_prefix('"') {
+        let end = rest.find('"')?;
+        return Some((rest[..end].to_string(), &rest[end + 1..]));
+    }
+    if text.starts_with(['$', '(', '{', '&']) {
+        return None;
+    }
+    let end = text
+        .find(|ch: char| ch.is_whitespace() || matches!(ch, ')' | ';'))
+        .unwrap_or(text.len());
+    if end == 0 {
+        return None;
+    }
+    Some((text[..end].to_string(), &text[end..]))
 }
 
 // One argument, then the scan continues. A non-empty prefix of any name
@@ -5531,6 +5771,40 @@ struct PendingHeredoc {
     quoted: bool,
 }
 
+/// Token so far is `C:` or `C:\...`. The next backslash is a separator.
+fn drive_separator(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() || chars.next() != Some(':') {
+        return false;
+    }
+    matches!(chars.next(), None | Some('\\'))
+}
+
+/// A path character. A quote, expansion, or separator still ends the word.
+fn is_drive_path_char(ch: char) -> bool {
+    !ch.is_whitespace()
+        && !matches!(
+            ch,
+            ';' | '&'
+                | '|'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '\''
+                | '"'
+                | '$'
+                | '`'
+                | '{'
+                | '}'
+                | '\\'
+                | '#'
+        )
+}
+
 fn tokenize_parts(command: &str) -> Vec<ShellPart> {
     let mut parts = Vec::new();
     let mut current = Vec::new();
@@ -5556,13 +5830,24 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 continue;
             }
             if open == '"' && ch == '\\' {
-                // Bash removes a backslash-newline inside double quotes.
-                // Keeping that newline splits `git push` into two commands.
-                if let Some(next) = chars.next()
-                    && next != '\0'
-                    && next != '\n'
-                {
-                    token.push(next);
+                // Same rule as `$"..."`. A newline disappears. `$`, a
+                // backtick, `"`, and `\` drop the backslash. Every other
+                // character keeps it, so `"C:\dir\file"` stays a path.
+                let Some(next) = chars.next() else {
+                    token.push('\\');
+                    continue;
+                };
+                if next == '\0' {
+                    token.push('\\');
+                    continue;
+                }
+                match next {
+                    '\\' | '$' | '`' | '"' => token.push(next),
+                    '\n' => {}
+                    other => {
+                        token.push('\\');
+                        token.push(other);
+                    }
                 }
                 continue;
             }
@@ -5621,7 +5906,16 @@ fn tokenize_parts(command: &str) -> Vec<ShellPart> {
                 quoted = true;
             }
             '\\' => {
-                if let Some(next) = chars.next()
+                // `C:\dir\file` is a Windows path. The backslash is a
+                // separator there, not an escape. `rm\ -rf` still escapes.
+                if drive_separator(&token)
+                    && chars.peek().is_some_and(|next| is_drive_path_char(*next))
+                {
+                    let next = chars.next().expect("peeked");
+                    note_eval_quote(&mut word_single, false);
+                    token.push('\\');
+                    token.push(next);
+                } else if let Some(next) = chars.next()
                     && next != '\n'
                     && next != '\0'
                 {
@@ -13958,6 +14252,8 @@ enum PathBody {
 }
 
 fn path_body(path: &str) -> PathBody {
+    let owned = openable_path(path);
+    let path = owned.as_ref();
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,
         Err(_) => return PathBody::Missing,
@@ -14253,7 +14549,16 @@ fn read_word_fields(
             }
             '\\' => {
                 *index += 1;
-                if *index < chars.len() {
+                let current = fields.last().map(String::as_str).unwrap_or("");
+                if drive_separator(current)
+                    && *index < chars.len()
+                    && is_drive_path_char(chars[*index])
+                {
+                    let next = chars[*index];
+                    *index += 1;
+                    push_field(&mut fields, "\\");
+                    push_field(&mut fields, &next.to_string());
+                } else if *index < chars.len() {
                     let next = chars[*index];
                     *index += 1;
                     if next != '\n' {
@@ -15370,8 +15675,14 @@ pub fn verdict_with_blocks(
 
 #[cfg(test)]
 mod tests {
-    use super::{Policy, effective_gates, matched_action};
+    use super::{HarmClass, Policy, effective_gates, matched_action, verdict_with_blocks};
     use crate::ids::ActionId;
+    use crate::verdict::Verdict;
+
+    fn drive_letter_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|err| err.into_inner())
+    }
 
     fn nested_bash(inner: &str, layers: u32) -> String {
         let mut command = inner.to_string();
@@ -19398,12 +19709,160 @@ mod tests {
         let _ = std::fs::remove_dir(&sub);
     }
 
+    /// These are the command strings a Windows host ran. The backslashes
+    /// stay in the string. Replacing them with `/` before the call is a
+    /// different spelling, and a missing `script.ps1` does not prove the
+    /// reader is absent.
+    #[test]
+    fn windows_host_script_files_score_the_body() {
+        let _drive = drive_letter_lock();
+        struct HostFiles {
+            root: std::path::PathBuf,
+            previous: Option<std::path::PathBuf>,
+        }
+        impl Drop for HostFiles {
+            fn drop(&mut self) {
+                if let Some(prev) = self.previous.take() {
+                    let _ = std::env::set_current_dir(prev);
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+
+        let pid = std::process::id();
+        let body = "git push origin main\n";
+        let names = ["payload.sh", "payload.ps1", "payload.bat", "payload.cmd"];
+        let (files, dir_shown) = if cfg!(windows) {
+            let dir = std::env::temp_dir().join(format!("snapif-host-{pid}"));
+            std::fs::create_dir_all(&dir).expect("dir");
+            for name in names {
+                std::fs::write(dir.join(name), body).expect(name);
+            }
+            let shown = dir.display().to_string().replace('/', "\\");
+            (
+                HostFiles {
+                    root: dir,
+                    previous: None,
+                },
+                shown,
+            )
+        } else {
+            let root = std::env::temp_dir().join(format!("snapif-host-root-{pid}"));
+            let rel = format!("C:/Users/sebta/AppData/Local/Temp/snapif-host-{pid}");
+            let dir = root.join(&rel);
+            std::fs::create_dir_all(&dir).expect("dir");
+            for name in names {
+                std::fs::write(dir.join(name), body).expect(name);
+            }
+            let previous = std::env::current_dir().expect("cwd");
+            std::env::set_current_dir(&root).expect("chdir");
+            (
+                HostFiles {
+                    root,
+                    previous: Some(previous),
+                },
+                rel.replace('/', "\\"),
+            )
+        };
+        let path = |name: &str| format!("{dir_shown}\\{name}");
+        let sh = path("payload.sh");
+        let ps1 = path("payload.ps1");
+        let bat = path("payload.bat");
+        let cmd_file = path("payload.cmd");
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let kind = |command: &str| -> &'static str {
+            let id = matched_action(&policy, "Bash", Some(command))
+                .cloned()
+                .unwrap_or_else(|| ActionId::new("Bash"));
+            let verdict =
+                verdict_with_blocks(&policy, &id, 1.0, Some(HarmClass::Read), &[]).expect("gates");
+            match verdict {
+                Verdict::Auto(_) => "auto",
+                Verdict::Review(_) => "review",
+                Verdict::Escalate(_) => "escalate",
+            }
+        };
+        let review = [
+            format!("bash {sh}"),
+            format!("source {sh}"),
+            format!("cat {sh}"),
+            format!("bash '{sh}'"),
+            format!("bash \"{sh}\""),
+            format!("bash {}", sh.replace('\\', "/")),
+            format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -File {ps1}"),
+            format!("powershell -File {ps1}"),
+            format!("pwsh -NoProfile -ExecutionPolicy Bypass -File {ps1}"),
+            format!("pwsh -NoProfile -ExecutionPolicy Bypass {ps1}"),
+            format!("pwsh -f {ps1} arg"),
+            format!("powershell -File {ps1} -Command rm -rf /tmp/x"),
+            format!("pwsh {ps1} -Command rm -rf /tmp/x"),
+            format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& '{ps1}'\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content -Raw '{ps1}')\""),
+            format!("cmd.exe /d /c {bat}"),
+            format!("cmd /c {bat}"),
+            format!("cmd.exe /d /c \"{bat}\""),
+            format!("cmd.exe /d /c call {bat}"),
+            format!("cmd /k {cmd_file}"),
+            format!("cmd /c call {cmd_file} arg"),
+        ];
+        for command in &review {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("git.push"),
+                "{command}"
+            );
+            assert_eq!(kind(command), "review", "{command}");
+        }
+        let quiet = [
+            format!("bash {sh}.missing"),
+            format!("source {sh}.missing"),
+            format!("cat {sh}.missing"),
+            format!("powershell -File {ps1}.missing"),
+            format!("pwsh {ps1}.missing"),
+            format!("powershell -File {ps1}.missing -Command rm -rf /tmp/x"),
+            format!("powershell -Command \"& '{ps1}.missing'\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content -Raw '{ps1}.missing')\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content '{ps1}')\""),
+            format!("powershell -Command \"iex (Get-Content -Raw '{ps1}')\""),
+            format!("cmd /c {bat}.missing"),
+            format!("cmd /c call {bat}.missing"),
+            format!("powershell {ps1}"),
+            "pwsh rm -rf /tmp/x".to_string(),
+        ];
+        for command in &quiet {
+            assert!(
+                matched_action(&policy, "Bash", Some(command)).is_none(),
+                "{command}"
+            );
+            assert_eq!(kind(command), "auto", "{command}");
+        }
+        for command in [
+            "powershell -Command rm -rf /tmp/x",
+            "cmd /c rm -rf /tmp/x",
+            "cmd /c \"rm -rf /tmp/x\"",
+            "cmd /c \"rm -rf /tmp/x.bat\"",
+        ] {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str()),
+                Some("bash.rm"),
+                "{command}"
+            );
+        }
+        assert_eq!(
+            matched_action(&policy, "Bash", Some("cmd /c \"git push origin main.bat\""))
+                .map(|id| id.0.as_str()),
+            Some("git.push")
+        );
+        drop(files);
+    }
+
     /// `cat`, `head`, and `tail` of a drive-letter path score the file
     /// text. A missing path stays unmatched. On Unix the `C:/...` string
     /// is a relative path under a temporary root. On Windows it is the
     /// real temp path with forward slashes.
     #[test]
     fn cat_of_a_drive_letter_path_scores_the_file() {
+        let _drive = drive_letter_lock();
         struct CwdGuard(Option<std::path::PathBuf>);
         impl Drop for CwdGuard {
             fn drop(&mut self) {
