@@ -983,7 +983,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_swift_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_awk_program(
                 policy,
                 tool_name,
@@ -995,15 +1004,42 @@ fn consider_segment<'a>(
                 best,
             );
             score_osascript(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_bun_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_expect_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_bun_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_expect_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_tcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sqlite_shell(policy, tool_name, &executed.argv, depth, local, git, best);
             score_octave_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_julia_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_elixir_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_erlang_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_go_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_go_run(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_cargo_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_coffee_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_haskell_script(policy, tool_name, &executed.argv, depth, local, git, best);
@@ -1016,7 +1052,7 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &bun_tests, depth, local, git, best);
             let java_main = java_commands(&executed.argv, host_dir);
             scan_isolated(policy, tool_name, &java_main, depth, local, git, best);
-            let kotlin = kotlin_commands(&executed.argv);
+            let kotlin = kotlin_commands(&executed.argv, scope.dir.as_deref());
             scan_isolated(policy, tool_name, &kotlin, depth, local, git, best);
             let lua_modules = lua_module_commands(&executed.argv, host_dir);
             scan_isolated(policy, tool_name, &lua_modules, depth, local, git, best);
@@ -5260,6 +5296,7 @@ enum ExecKind {
     ExecArgs,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_swift_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5267,6 +5304,7 @@ fn score_swift_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     if let Some(text) = swift_inline(argv) {
@@ -5277,7 +5315,7 @@ fn score_swift_script<'a>(
     let Some(path) = swift_script_path(argv) else {
         return;
     };
-    match load_script_file(&path) {
+    match load_script_file(&shell_path(&path, dir)) {
         Some(ScriptFile::Text(text)) => {
             let commands = swift_process_commands(&text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5698,6 +5736,7 @@ fn perl_module_name(raw: &str) -> String {
     raw.split(['=', ' ']).next().unwrap_or(raw).to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_bun_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5705,12 +5744,13 @@ fn score_bun_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(path) = bun_script_path(argv) else {
         return;
     };
-    match load_script_file(&path) {
+    match load_script_file(&shell_path(&path, dir)) {
         Some(ScriptFile::Text(text)) => {
             let commands = interpreter_commands(HostLang::Node, &text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5751,6 +5791,7 @@ fn script_extension(path: &str) -> bool {
         .any(|suffix| path.ends_with(suffix))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_expect_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5758,9 +5799,10 @@ fn score_expect_script<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let programs = expect_programs(argv);
+    let programs = expect_programs(argv, dir);
     if programs.is_empty() {
         return;
     }
@@ -5771,7 +5813,7 @@ fn score_expect_script<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn expect_programs(argv: &[String]) -> Vec<String> {
+fn expect_programs(argv: &[String], dir: Option<&str>) -> Vec<String> {
     if argv
         .first()
         .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("expect"))
@@ -5796,7 +5838,8 @@ fn expect_programs(argv: &[String]) -> Vec<String> {
             index += 1;
             continue;
         }
-        if !saw_inline && let Some(ScriptFile::Text(text)) = load_script_file(arg) {
+        if !saw_inline && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir))
+        {
             programs.push(text);
         }
         break;
@@ -6153,6 +6196,7 @@ fn score_erlang_script<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_go_run<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -6160,16 +6204,17 @@ fn score_go_run<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
-    for text in go_sources(argv) {
+    for text in go_sources(argv, dir) {
         commands.extend(go_commands(&text));
     }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn go_sources(argv: &[String]) -> Vec<String> {
+fn go_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
@@ -6194,7 +6239,7 @@ fn go_sources(argv: &[String]) -> Vec<String> {
             continue;
         }
         if arg.ends_with(".go")
-            && let Some(ScriptFile::Text(text)) = load_script_file(arg)
+            && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(arg, dir))
         {
             sources.push(text);
         }
@@ -7317,7 +7362,7 @@ fn julia_include_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
     commands
 }
 
-fn kotlin_commands(argv: &[String]) -> Vec<String> {
+fn kotlin_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
     if argv
         .first()
         .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("kotlinc"))
@@ -7331,7 +7376,7 @@ fn kotlin_commands(argv: &[String]) -> Vec<String> {
         if arg == "-script" {
             index += 1;
             if let Some(path) = argv.get(index)
-                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+                && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir))
             {
                 texts.push(text);
             }
@@ -24360,6 +24405,12 @@ mod tests {
         write("push.jl", "run(`git push origin main`)\n");
         write("push.m", "system(\"git push origin main\");\n");
         std::fs::create_dir_all(root.join("empty-lib")).expect("empty-lib");
+        std::fs::create_dir_all(root.join("gorun")).expect("gorun");
+        std::fs::write(
+            root.join("gorun/main.go"),
+            "package main\nimport \"os/exec\"\nfunc main() {\n\t_ = exec.Command(\"git\", \"push\", \"origin\", \"main\").Run()\n}\n",
+        )
+        .expect("gorun");
         std::fs::create_dir_all(root.join("gogen")).expect("gogen");
         std::fs::write(
             root.join("gogen/main.go"),
@@ -24451,6 +24502,11 @@ mod tests {
             format!("just -f {show}/justfile push"),
             format!("cd {show}/empty-lib && just -f ../justfile push"),
             format!("cd {show}/empty-lib && cmake -P ../run.cmake"),
+            format!("cd {show}/empty-lib && swift ../run.swift"),
+            format!("cd {show}/empty-lib && kotlinc -script ../run.kts"),
+            format!("cd {show}/empty-lib && expect ../run.exp"),
+            format!("cd {show}/empty-lib && bun ../preload.js"),
+            format!("cd {show}/empty-lib && go run ../gorun/main.go"),
             "sqlite3 :memory: '.shell git push origin main'".to_string(),
             "octave --quiet --eval 'system(\"git push origin main\");'".to_string(),
             "julia --startup-file=no -e 'run(`git push origin main`)'".to_string(),
@@ -24572,6 +24628,8 @@ mod tests {
             format!("just -f {show}/justfile absent"),
             format!("cd {show}/empty-lib && just -f ../missing.just push"),
             format!("cd {show}/empty-lib && cmake -P ../missing.cmake"),
+            format!("cd {show}/empty-lib && swift ../missing.swift"),
+            format!("cd {show}/empty-lib && expect ../missing.exp"),
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
             format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
