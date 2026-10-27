@@ -13064,7 +13064,8 @@ fn score_crystal<'a>(
 }
 
 /// `nim c -r` and `nim r` run `execCmd`. `nim c` runs `staticExec`
-/// while compiling and does not run `execCmd`.
+/// while compiling and does not run `execCmd`. Every `config.nims`
+/// from the source file's directory up to the root runs `exec`.
 #[allow(clippy::too_many_arguments)]
 fn score_nim<'a>(
     policy: &'a Policy,
@@ -13082,8 +13083,30 @@ fn score_nim<'a>(
     let Some(text) = load_text(&path) else {
         return;
     };
-    let commands = nim_shells(&text, run);
+    let mut commands = nim_shells(&text, run);
+    commands.extend(nim_config_commands(&path));
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn nim_config_commands(nim_file: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut current = match std::path::Path::new(nim_file).parent() {
+        Some(parent) => parent.to_path_buf(),
+        None => return commands,
+    };
+    for _ in 0..32 {
+        if let Ok(text) = std::fs::read_to_string(current.join("config.nims")) {
+            commands.extend(nim_call_args(&text, "exec"));
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    commands
 }
 
 fn nim_script(argv: &[String], dir: Option<&str>) -> Option<(bool, String)> {
@@ -30322,6 +30345,21 @@ mod tests {
         )
         .expect("nim comment");
         assert_eq!(kind(&format!("nim r {nim_s}")), None);
+        let proj = root.join("proj");
+        let sub = proj.join("sub");
+        std::fs::create_dir_all(&sub).expect("nim sub");
+        std::fs::write(sub.join("app.nim"), "echo \"ok\"\n").expect("app nim");
+        std::fs::write(proj.join("config.nims"), "exec \"git push origin main\"\n")
+            .expect("parent nims");
+        std::fs::write(sub.join("config.nims"), "exec \"echo safe\"\n").expect("sub nims");
+        let app_s = sub.join("app.nim").display().to_string();
+        assert_eq!(kind(&format!("nim c {app_s}")), Some("git.push"));
+        std::fs::write(
+            proj.join("config.nims"),
+            "# exec \"git push origin main\"\n",
+        )
+        .expect("quiet parent");
+        assert_eq!(kind(&format!("nim c {app_s}")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
