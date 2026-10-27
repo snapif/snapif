@@ -982,6 +982,8 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &java_main, depth, local, git, best);
             let kotlin = kotlin_commands(&executed.argv);
             scan_isolated(policy, tool_name, &kotlin, depth, local, git, best);
+            let lua_modules = lua_module_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &lua_modules, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -5207,6 +5209,11 @@ fn score_swift_script<'a>(
     git: &GitBindings,
     best: &mut Option<&'a ActionId>,
 ) {
+    if let Some(text) = swift_inline(argv) {
+        let commands = swift_process_commands(&text);
+        scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        return;
+    }
     let Some(path) = swift_script_path(argv) else {
         return;
     };
@@ -5218,6 +5225,23 @@ fn score_swift_script<'a>(
         Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
         None => {}
     }
+}
+
+fn swift_inline(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("swift"))
+    {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        if argv[index].as_str() == "-e" {
+            return argv.get(index + 1).cloned();
+        }
+        index += 1;
+    }
+    None
 }
 
 fn swift_script_path(argv: &[String]) -> Option<String> {
@@ -6327,6 +6351,47 @@ fn java_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
         return Vec::new();
     };
     process_builder_commands(&text)
+}
+
+fn lua_module_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !matches!(host_lang(first), Some(HostLang::Lua)) {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    for name in lua_module_names(argv) {
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains('.') {
+            continue;
+        }
+        let path = shell_dir(dir).join(format!("{name}.lua"));
+        if let Some(ScriptFile::Text(text)) = load_script_file(&path.display().to_string()) {
+            commands.extend(interpreter_commands(HostLang::Lua, &text));
+        }
+    }
+    commands
+}
+
+fn lua_module_names(argv: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-l" {
+            index += 1;
+            if let Some(name) = argv.get(index) {
+                names.push(name.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(name) = arg.strip_prefix("-l").filter(|name| !name.is_empty()) {
+            names.push(name.to_string());
+        }
+        index += 1;
+    }
+    names
 }
 
 fn kotlin_commands(argv: &[String]) -> Vec<String> {
@@ -23341,6 +23406,7 @@ mod tests {
             "import System.Process\nmain = do\n  out <- readCreateProcess (proc \"git\" [\"push\", \"origin\", \"main\"]) \"\"\n  putStr out\n",
         );
         write("quiet.hs", "main = putStrLn \"git push origin main\"\n");
+        write("push.lua", "os.execute(\"git push origin main\")\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -23433,6 +23499,9 @@ mod tests {
             format!("cd {show}/buntest && bun test"),
             format!("kotlinc -script {show}/run.kts"),
             "ghc -e 'System.Process.system \"git push origin main\"'".to_string(),
+            format!("cd {show} && lua -l push -e '0'"),
+            format!("cd {show} && lua -lpush -e '0'"),
+            "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
             format!("runhaskell {show}/Run.hs"),
@@ -23494,6 +23563,8 @@ mod tests {
             format!("cd {show}/bunquiet && bun test"),
             format!("cd {show}/pkg && node --run absent"),
             format!("cd {show} && java Missing"),
+            format!("cd {show} && lua -l missing -e '0'"),
+            "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
             "ghci -e '1'".to_string(),
