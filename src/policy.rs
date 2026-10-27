@@ -5966,7 +5966,9 @@ fn package_positionals(argv: &[String]) -> Vec<String> {
 /// `cherry-pick` runs `prepare-commit-msg` and `post-commit`.
 /// `cherry-pick -n` and `cherry-pick --no-verify` do not.
 /// A fast-forward `pull` runs `post-merge`. `pull --no-rebase`
-/// also runs the merge commit hooks.
+/// also runs the merge commit hooks. `pull --rebase`, `pull -r`,
+/// and `pull --rebase=merges` run the rebase hooks. `pull
+/// --rebase=false` does not.
 fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec<String> {
     let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
         return Vec::new();
@@ -5985,6 +5987,7 @@ fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec
         "checkout" | "switch" => &["post-checkout"],
         "clone" if clone_checks_out(argv) => &["post-checkout"],
         "cherry-pick" if cherry_pick_commits(argv) => &["prepare-commit-msg", "post-commit"],
+        "pull" if pull_rebases(argv) => &["pre-rebase", "post-checkout", "post-rewrite"],
         "pull" if pull_merges(argv) => &[
             "pre-merge-commit",
             "prepare-commit-msg",
@@ -6018,6 +6021,21 @@ fn clone_checks_out(argv: &[String]) -> bool {
 /// `prepare-commit-msg`, and `commit-msg`.
 fn pull_merges(argv: &[String]) -> bool {
     argv.iter().any(|token| token == "--no-rebase")
+}
+
+/// `git pull --rebase`, `pull -r`, and `pull --rebase=merges` run the
+/// rebase hooks, including with `--no-verify`. `pull --rebase=false`
+/// is a merge or fast-forward and does not.
+fn pull_rebases(argv: &[String]) -> bool {
+    argv.iter().any(|token| {
+        if token == "--rebase" {
+            return true;
+        }
+        if let Some(value) = token.strip_prefix("--rebase=") {
+            return value != "false";
+        }
+        token.starts_with('-') && !token.starts_with("--") && token.contains('r')
+    })
 }
 
 /// `git rebase --no-verify` still runs `post-checkout` and
@@ -21086,6 +21104,26 @@ mod tests {
         assert_eq!(kind(&pull), None, "{pull}");
         let pull_merge = format!("git -c core.hooksPath={dir} pull --no-rebase origin main");
         assert_eq!(kind(&pull_merge), Some("bash.rm"), "{pull_merge}");
+        write("pre-rebase", "echo ok\n");
+        write("post-checkout", "echo ok\n");
+        write("post-rewrite", "echo ok\n");
+        let pull_rebase = format!("git -c core.hooksPath={dir} pull --rebase origin main");
+        assert_eq!(kind(&pull_rebase), None, "{pull_rebase}");
+        write("pre-rebase", "rm -rf /tmp/prb\n");
+        assert_eq!(kind(&pull_rebase), Some("bash.rm"), "{pull_rebase}");
+        let pull_r = format!("git -c core.hooksPath={dir} pull -r origin main");
+        assert_eq!(kind(&pull_r), Some("bash.rm"), "{pull_r}");
+        let pull_merges = format!("git -c core.hooksPath={dir} pull --rebase=merges origin main");
+        assert_eq!(kind(&pull_merges), Some("bash.rm"), "{pull_merges}");
+        let pull_nv = format!("git -c core.hooksPath={dir} pull --rebase --no-verify origin main");
+        assert_eq!(kind(&pull_nv), Some("bash.rm"), "{pull_nv}");
+        write("pre-rebase", "echo ok\n");
+        write("post-merge", "rm -rf /tmp/pm\n");
+        let pull_false = format!("git -c core.hooksPath={dir} pull --rebase=false origin main");
+        assert_eq!(kind(&pull_false), Some("bash.rm"), "{pull_false}");
+        write("post-merge", "echo ok\n");
+        assert_eq!(kind(&pull_false), None, "{pull_false}");
+        assert_eq!(kind(&pull_rebase), None, "{pull_rebase}");
         write("pre-rebase", "rm -rf /tmp/prb\n");
         let rebase = format!("git -c core.hooksPath={dir} rebase main");
         assert_eq!(kind(&rebase), Some("bash.rm"), "{rebase}");
