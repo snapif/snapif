@@ -1112,6 +1112,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_cargo_runner(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_cargo_rust_tests(
                 policy,
                 tool_name,
@@ -8374,6 +8384,7 @@ fn mix_inline(argv: &[String]) -> Vec<String> {
 /// code in `mix.exs` and `project/0`. `mix -v` does not load it.
 /// `mix run` and `mix test` also run `config/runtime.exs`.
 /// `config/config.exs` runs on load, including `import_config`.
+/// A path dependency's `mix.exs` startup code runs too. One level.
 #[allow(clippy::too_many_arguments)]
 fn score_mix_shell<'a>(
     policy: &'a Policy,
@@ -8406,6 +8417,7 @@ fn score_mix_shell<'a>(
         {
             commands.push(command);
         }
+        commands.extend(mix_path_dep_commands(&root, &mix_startup_source(&text)));
     }
     if mix_loads_runtime(argv)
         && let Ok(text) = std::fs::read_to_string(root.join("config/runtime.exs"))
@@ -8511,6 +8523,64 @@ fn mix_version_only(argv: &[String]) -> bool {
 
 fn mix_loads_runtime(argv: &[String]) -> bool {
     matches!(mix_task(argv).as_deref(), Some("run") | Some("test"))
+}
+
+fn mix_path_dep_commands(root: &std::path::Path, text: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    for rel in mix_dep_paths(text) {
+        let path = std::path::Path::new(&rel);
+        let dep = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        if let Ok(body) = std::fs::read_to_string(dep.join("mix.exs")) {
+            commands.extend(elixir_commands(&mix_startup_source(&body)));
+        }
+    }
+    commands
+}
+
+fn mix_dep_paths(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        let bounded =
+            index == 0 || (!chars[index - 1].is_ascii_alphanumeric() && chars[index - 1] != '_');
+        if bounded && mix_word_at(&chars, index, "path") {
+            index += "path".len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if chars.get(index) == Some(&':') {
+                index += 1;
+                while index < chars.len() && chars[index].is_whitespace() {
+                    index += 1;
+                }
+                if let Some((value, end)) = read_quoted(&chars, index) {
+                    if !value.is_empty() {
+                        paths.push(value);
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+            continue;
+        }
+        index += 1;
+    }
+    paths
 }
 
 fn mix_cmd_line(argv: &[String]) -> Option<String> {
@@ -13698,6 +13768,330 @@ fn score_cargo_build_script<'a>(
     };
     let commands = rust_commands(&text);
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `cargo run` and `cargo test` run the closest `cfg(unix)` `runner`.
+/// Cargo reads `.cargo/config` before `.cargo/config.toml`, then walks
+/// toward the filesystem root from the working directory. The manifest
+/// directory is not that walk. `cargo build` does not run it. `run`
+/// needs a bin. `test` needs a bin, a lib, or an integration test. A
+/// workspace with no root package uses its members.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_runner<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(run) = cargo_runner_kind(argv) else {
+        return;
+    };
+    let Some(package) = cargo_runner_package(argv, dir) else {
+        return;
+    };
+    if !cargo_runner_has_target(&package, run) {
+        return;
+    }
+    let Some(command) = cargo_runner_command(dir) else {
+        return;
+    };
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&command),
+        depth,
+        local,
+        git,
+        best,
+    );
+}
+
+/// `true` is `cargo run`. `false` is `cargo test`.
+fn cargo_runner_kind(argv: &[String]) -> Option<bool> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            return None;
+        }
+        if matches!(
+            arg,
+            "--manifest-path"
+                | "-p"
+                | "--package"
+                | "--bin"
+                | "--example"
+                | "--target"
+                | "--features"
+                | "-F"
+                | "--profile"
+                | "-j"
+                | "--jobs"
+                | "--color"
+                | "--config"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return match arg {
+            "run" => Some(true),
+            "test" => Some(false),
+            _ => None,
+        };
+    }
+    None
+}
+
+fn cargo_unix_runner(text: &str) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let mut section = false;
+    let mut runner = None;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let name = &line[1..line.len() - 1];
+            section = name == "target.'cfg(unix)'" || name == "target.\"cfg(unix)\"";
+            continue;
+        }
+        if !section {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("runner") else {
+            continue;
+        };
+        let rest = rest.trim().trim_start_matches('=').trim();
+        if let Some(command) = rest
+            .strip_prefix('"')
+            .and_then(|body| body.strip_suffix('"'))
+            && !command.is_empty()
+        {
+            runner = Some(command.to_string());
+        }
+    }
+    runner
+}
+
+fn cargo_runner_package(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if let Some(manifest) = cargo_manifest_path(argv) {
+        let path = std::path::PathBuf::from(shell_path(&manifest, dir));
+        if !path.is_file() {
+            return None;
+        }
+        return path.parent().map(std::path::Path::to_path_buf);
+    }
+    let root = shell_dir(dir);
+    root.join("Cargo.toml").is_file().then_some(root)
+}
+
+fn cargo_manifest_path(argv: &[String]) -> Option<String> {
+    let mut found = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 1;
+            found = argv.get(index).cloned().filter(|path| !path.is_empty());
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=")
+            && !path.is_empty()
+        {
+            found = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    found
+}
+
+fn cargo_runner_has_target(dir: &std::path::Path, run: bool) -> bool {
+    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return false;
+    };
+    if cargo_named_package(&text) {
+        return cargo_dir_has_target(dir, run);
+    }
+    if !cargo_workspace_table(&text) {
+        return false;
+    }
+    cargo_workspace_members(&text).into_iter().any(|member| {
+        if member.contains('*') || member.contains('?') || member.contains('[') {
+            return false;
+        }
+        let member_dir = dir.join(&member);
+        let Ok(body) = std::fs::read_to_string(member_dir.join("Cargo.toml")) else {
+            return false;
+        };
+        cargo_named_package(&body) && cargo_dir_has_target(&member_dir, run)
+    })
+}
+
+fn cargo_named_package(text: &str) -> bool {
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package && cargo_toml_name(line) {
+            return true;
+        }
+    }
+    false
+}
+
+fn cargo_toml_name(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("name") else {
+        return false;
+    };
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return false;
+    }
+    let rest = rest.trim().strip_prefix('=').unwrap_or("").trim();
+    let quoted =
+        |quote: char| rest.starts_with(quote) && rest.ends_with(quote) && rest.chars().count() > 2;
+    quoted('"') || quoted('\'')
+}
+
+fn cargo_workspace_table(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or("").trim();
+        line == "[workspace]"
+    })
+}
+
+fn cargo_workspace_members(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut members = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if (chars[index] == '"' || chars[index] == '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        let bounded =
+            index == 0 || (!chars[index - 1].is_ascii_alphanumeric() && chars[index - 1] != '_');
+        if bounded && mix_word_at(&chars, index, "members") {
+            index += "members".len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if chars.get(index) != Some(&'=') {
+                continue;
+            }
+            index += 1;
+            while index < chars.len() && chars[index] != '[' && chars[index] != '\n' {
+                index += 1;
+            }
+            if chars.get(index) != Some(&'[') {
+                continue;
+            }
+            index += 1;
+            while index < chars.len() && chars[index] != ']' {
+                if chars[index] == '#' {
+                    index = skip_line(&chars, index);
+                    continue;
+                }
+                if let Some((value, end)) = read_quoted(&chars, index) {
+                    if !value.is_empty() {
+                        members.push(value);
+                    }
+                    index = end;
+                    continue;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        index += 1;
+    }
+    members
+}
+
+fn cargo_dir_has_target(dir: &std::path::Path, run: bool) -> bool {
+    if cargo_has_bin(dir) {
+        return true;
+    }
+    !run && (dir.join("src/lib.rs").is_file() || cargo_dir_has_rs(&dir.join("tests")))
+}
+
+fn cargo_has_bin(dir: &std::path::Path) -> bool {
+    dir.join("src/main.rs").is_file() || cargo_dir_has_rs(&dir.join("src/bin"))
+}
+
+fn cargo_dir_has_rs(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).ok().is_some_and(|entries| {
+        entries.flatten().any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        })
+    })
+}
+
+fn cargo_runner_command(dir: Option<&str>) -> Option<String> {
+    if !cfg!(unix) {
+        return None;
+    }
+    let mut current = shell_dir(dir);
+    for _ in 0..64 {
+        let plain = current.join(".cargo/config");
+        let toml = current.join(".cargo/config.toml");
+        let chosen = if plain.is_file() {
+            Some(plain)
+        } else if toml.is_file() {
+            Some(toml)
+        } else {
+            None
+        };
+        if let Some(path) = chosen
+            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(command) = cargo_unix_runner(&text)
+        {
+            return Some(command);
+        }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    None
 }
 
 fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
@@ -29179,6 +29573,121 @@ mod tests {
         std::fs::write(js.join("test.js"), "console.log(1)\n").expect("quiettest");
         let only_hidden = format!("cd {js_s} && node --test");
         assert_eq!(kind(&only_hidden), None, "{only_hidden}");
+        let package = "[package]\nname = \"p\"\nversion = \"0.0.0\"\nedition = \"2021\"\n";
+        let runner = "[target.'cfg(unix)']\nrunner = \"git push origin main\"\n";
+        let runpkg = root.join("runpkg");
+        let away = root.join("away");
+        let parent = root.join("parent");
+        let child = parent.join("child");
+        let lib = root.join("libonly");
+        let ws = root.join("ws");
+        std::fs::create_dir_all(runpkg.join(".cargo")).expect("cargo cfg");
+        std::fs::create_dir_all(runpkg.join("src")).expect("src");
+        std::fs::create_dir_all(away.join(".cargo")).expect("away cfg");
+        std::fs::create_dir_all(parent.join(".cargo")).expect("parent cfg");
+        std::fs::create_dir_all(child.join("src")).expect("child src");
+        std::fs::create_dir_all(lib.join("src")).expect("lib src");
+        std::fs::create_dir_all(lib.join(".cargo")).expect("lib cfg");
+        std::fs::create_dir_all(ws.join(".cargo")).expect("ws cfg");
+        std::fs::create_dir_all(ws.join("member/src")).expect("member");
+        std::fs::write(runpkg.join("Cargo.toml"), package).expect("cargo toml");
+        std::fs::write(runpkg.join("src/main.rs"), "fn main() {}\n").expect("main");
+        std::fs::write(runpkg.join(".cargo/config.toml"), runner).expect("runner");
+        let run_s = runpkg.display().to_string();
+        let away_s = away.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo run -q")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {run_s} && cargo test -q")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {run_s} && cargo build -q")), None);
+        assert_eq!(
+            kind(&format!(
+                "cd {away_s} && cargo run -q --manifest-path {run_s}/Cargo.toml"
+            )),
+            None
+        );
+        std::fs::write(away.join(".cargo/config.toml"), runner).expect("away runner");
+        assert_eq!(
+            kind(&format!(
+                "cd {away_s} && cargo run -q --manifest-path {run_s}/Cargo.toml"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(child.join("Cargo.toml"), package).expect("child toml");
+        std::fs::write(child.join("src/main.rs"), "fn main() {}\n").expect("child main");
+        std::fs::write(parent.join(".cargo/config.toml"), runner).expect("parent runner");
+        let child_s = child.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {child_s} && cargo run -q")),
+            Some("git.push")
+        );
+        std::fs::create_dir_all(child.join(".cargo")).expect("child cfg");
+        std::fs::write(
+            child.join(".cargo/config.toml"),
+            "[target.'cfg(unix)']\nrunner = \"echo safe\"\n",
+        )
+        .expect("near runner");
+        assert_eq!(kind(&format!("cd {child_s} && cargo run -q")), None);
+        std::fs::write(
+            child.join(".cargo/config.toml"),
+            "[target.'cfg(windows)']\nrunner = \"git push origin main\"\n",
+        )
+        .expect("windows runner");
+        assert_eq!(
+            kind(&format!("cd {child_s} && cargo run -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            child.join(".cargo/config"),
+            "[target.'cfg(unix)']\nrunner = \"echo safe\"\n",
+        )
+        .expect("plain config");
+        assert_eq!(kind(&format!("cd {child_s} && cargo run -q")), None);
+        std::fs::remove_dir_all(child.join(".cargo")).expect("clear child cfg");
+        std::fs::write(lib.join("Cargo.toml"), package).expect("lib toml");
+        std::fs::write(lib.join("src/lib.rs"), "pub fn f() {}\n").expect("lib");
+        std::fs::write(lib.join(".cargo/config.toml"), runner).expect("lib runner");
+        let lib_s = lib.display().to_string();
+        assert_eq!(kind(&format!("cd {lib_s} && cargo run -q")), None);
+        assert_eq!(
+            kind(&format!("cd {lib_s} && cargo test -q")),
+            Some("git.push")
+        );
+        std::fs::write(lib.join("Cargo.toml"), "[package]\n").expect("nameless");
+        assert_eq!(kind(&format!("cd {lib_s} && cargo test -q")), None);
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .expect("workspace");
+        std::fs::write(ws.join("member/Cargo.toml"), package).expect("member toml");
+        std::fs::write(ws.join("member/src/main.rs"), "fn main() {}\n").expect("member main");
+        std::fs::write(ws.join(".cargo/config.toml"), runner).expect("ws runner");
+        let ws_s = ws.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {ws_s} && cargo run -q")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("cd {ws_s} && cargo test -q")),
+            Some("git.push")
+        );
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[package]\nname = \"root\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"member\"]\n",
+        )
+        .expect("root lib workspace");
+        std::fs::create_dir_all(ws.join("src")).expect("ws src");
+        std::fs::write(ws.join("src/lib.rs"), "pub fn f() {}\n").expect("ws lib");
+        assert_eq!(kind(&format!("cd {ws_s} && cargo run -q")), None);
+        assert_eq!(
+            kind(&format!("cd {ws_s} && cargo test -q")),
+            Some("git.push")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -30367,6 +30876,50 @@ mod tests {
             kind(&format!("cd {root_s} && mix compile")),
             Some("git.push")
         );
+        let app = root.join("app");
+        let other = root.join("other");
+        std::fs::create_dir_all(&app).expect("app");
+        std::fs::create_dir_all(&other).expect("other");
+        std::fs::write(
+            other.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("other");
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", deps: [{:other, path: \"../other\"}]]\n  end\nend\n",
+        )
+        .expect("app");
+        let app_s = app.display().to_string();
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), Some("git.push"));
+        assert_eq!(
+            kind(&format!("cd {app_s} && mix compile")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {app_s} && mix -v")), None);
+        std::fs::write(
+            other.join("mix.exs"),
+            "defmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\"]\n  end\n  def unused do\n    System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n  end\nend\n",
+        )
+        .expect("other unused");
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), None);
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\"]\n  end\n  def unused do\n    [path: \"../other\"]\n  end\nend\n",
+        )
+        .expect("unused path");
+        std::fs::write(
+            other.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\ndefmodule O.MixProject do\n  use Mix.Project\n  def project do\n    [app: :o, version: \"0.0.0\"]\n  end\nend\n",
+        )
+        .expect("other top");
+        assert_eq!(kind(&format!("cd {app_s} && mix compile")), None);
+        std::fs::write(
+            app.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    # path: \"../other\"\n    [app: :p, version: \"0.0.0\", mypath: \"../other\"]\n  end\nend\n",
+        )
+        .expect("comment path");
+        assert_eq!(kind(&format!("cd {app_s} && mix help")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
