@@ -971,6 +971,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_ninja(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_exec(
                 policy,
@@ -10137,6 +10147,256 @@ fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
         .into_iter()
         .map(|name| shell_path(name, dir))
         .find(|name| load_script_file(name).is_some())
+}
+
+/// `ninja` runs the `command` of each build it schedules. With no
+/// target, a `default` line chooses the roots; otherwise every build
+/// runs. A named target also runs the builds it depends on. `-n`
+/// only prints. An unknown target runs nothing.
+#[allow(clippy::too_many_arguments)]
+fn score_ninja<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(spec) = ninja_spec(argv, dir) else {
+        return;
+    };
+    if spec.dry {
+        return;
+    }
+    let Some(ScriptFile::Text(text)) = load_script_file(&spec.file) else {
+        return;
+    };
+    let file = parse_ninja(&text);
+    let targets = ninja_roots(&file, &spec.targets);
+    let Some(targets) = targets else {
+        return;
+    };
+    let commands = ninja_commands(&file, &targets);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+struct NinjaSpec {
+    file: String,
+    targets: Vec<String>,
+    dry: bool,
+}
+
+fn ninja_spec(argv: &[String], dir: Option<&str>) -> Option<NinjaSpec> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("ninja") {
+        return None;
+    }
+    let mut tree = shell_dir(dir);
+    let mut file = None;
+    let mut targets = Vec::new();
+    let mut dry = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "--" {
+            targets.extend(argv[index + 1..].iter().cloned());
+            break;
+        }
+        if token == "-n" || token == "--dry-run" {
+            dry = true;
+            index += 1;
+            continue;
+        }
+        if token == "-C" {
+            index += 1;
+            tree = tree.join(argv.get(index)?.as_str());
+            index += 1;
+            continue;
+        }
+        if token == "-f" {
+            index += 1;
+            file = Some(argv.get(index)?.as_str());
+            index += 1;
+            continue;
+        }
+        if matches!(token, "-t" | "-d" | "-j" | "-k" | "-w") {
+            if token == "-t" {
+                return None;
+            }
+            index += 2;
+            continue;
+        }
+        if token.starts_with("-j") && token.len() > 2 {
+            index += 1;
+            continue;
+        }
+        if token == "-v" || token == "--verbose" {
+            index += 1;
+            continue;
+        }
+        if token.starts_with('-') {
+            return None;
+        }
+        targets.push(token.to_string());
+        index += 1;
+    }
+    let path = match file {
+        Some(name) => tree.join(name),
+        None => tree.join("build.ninja"),
+    };
+    Some(NinjaSpec {
+        file: path.display().to_string(),
+        targets,
+        dry,
+    })
+}
+
+struct NinjaFile {
+    rules: Vec<(String, String)>,
+    builds: Vec<NinjaEdge>,
+    defaults: Vec<String>,
+}
+
+struct NinjaEdge {
+    outputs: Vec<String>,
+    rule: String,
+    inputs: Vec<String>,
+}
+
+fn parse_ninja(text: &str) -> NinjaFile {
+    let mut rules: Vec<(String, String)> = Vec::new();
+    let mut builds: Vec<NinjaEdge> = Vec::new();
+    let mut defaults: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line.starts_with([' ', '\t']) {
+            let name = current.clone();
+            let command = ninja_command(trimmed);
+            if let (Some(name), Some(command)) = (name, command)
+                && let Some(rule) = rules.iter_mut().rev().find(|rule| rule.0 == name)
+            {
+                rule.1 = command;
+            }
+            continue;
+        }
+        current = None;
+        if let Some(rest) = trimmed.strip_prefix("rule ") {
+            let Some(name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let name = name.to_string();
+            rules.push((name.clone(), String::new()));
+            current = Some(name);
+            continue;
+        }
+        if let Some(edge) = ninja_edge(trimmed) {
+            builds.push(edge);
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("default ") {
+            defaults.extend(rest.split_whitespace().map(str::to_string));
+        }
+    }
+    NinjaFile {
+        rules,
+        builds,
+        defaults,
+    }
+}
+
+fn ninja_command(line: &str) -> Option<String> {
+    let rest = line.strip_prefix("command")?;
+    let rest = rest.trim_start().strip_prefix('=')?;
+    Some(rest.trim().to_string())
+}
+
+fn ninja_edge(line: &str) -> Option<NinjaEdge> {
+    let rest = line.strip_prefix("build ")?;
+    let (outputs, right) = rest.split_once(':')?;
+    let outputs: Vec<String> = outputs.split_whitespace().map(str::to_string).collect();
+    if outputs.is_empty() {
+        return None;
+    }
+    let mut words = right
+        .split_whitespace()
+        .filter(|word| *word != "|" && *word != "||");
+    let rule = words.next()?.to_string();
+    let inputs = words.map(str::to_string).collect();
+    Some(NinjaEdge {
+        outputs,
+        rule,
+        inputs,
+    })
+}
+
+fn ninja_roots(file: &NinjaFile, requested: &[String]) -> Option<Vec<String>> {
+    let known = |name: &str| {
+        file.builds
+            .iter()
+            .any(|edge| edge.outputs.iter().any(|output| output == name))
+    };
+    if !requested.is_empty() {
+        if requested.iter().any(|name| !known(name)) {
+            return None;
+        }
+        return Some(requested.to_vec());
+    }
+    if !file.defaults.is_empty() {
+        return Some(file.defaults.clone());
+    }
+    let mut roots = Vec::new();
+    for edge in &file.builds {
+        for output in &edge.outputs {
+            if !roots.iter().any(|have| have == output) {
+                roots.push(output.clone());
+            }
+        }
+    }
+    Some(roots)
+}
+
+fn ninja_commands(file: &NinjaFile, roots: &[String]) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut seen = Vec::new();
+    for root in roots {
+        ninja_walk(file, root, &mut commands, &mut seen);
+    }
+    commands
+}
+
+fn ninja_walk(file: &NinjaFile, target: &str, commands: &mut Vec<String>, seen: &mut Vec<String>) {
+    if seen.iter().any(|name| name == target) {
+        return;
+    }
+    let Some((outputs, rule, inputs)) = file
+        .builds
+        .iter()
+        .find(|edge| edge.outputs.iter().any(|output| output == target))
+        .map(|edge| (edge.outputs.clone(), edge.rule.clone(), edge.inputs.clone()))
+    else {
+        seen.push(target.to_string());
+        return;
+    };
+    seen.extend(outputs);
+    for input in inputs {
+        ninja_walk(file, &input, commands, seen);
+    }
+    if let Some(command) = file
+        .rules
+        .iter()
+        .rev()
+        .find(|item| item.0 == rule)
+        .map(|item| item.1.clone())
+        .filter(|command| !command.is_empty())
+    {
+        commands.push(command);
+    }
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -24801,6 +25061,58 @@ mod tests {
         for (command, want) in cases {
             assert_eq!(kind(&command), want, "{command}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `ninja` runs each scheduled `command`. With no target, `default`
+    /// picks the roots; otherwise every build runs. A dependency runs
+    /// too. `-n` and an unknown target do not.
+    #[test]
+    fn ninja_scores_the_builds_it_runs() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-ninja-{}", std::process::id()));
+        let proj = root.join("proj");
+        let alt = root.join("alt");
+        std::fs::create_dir_all(&proj).expect("proj");
+        std::fs::create_dir_all(&alt).expect("alt");
+        std::fs::write(
+            proj.join("build.ninja"),
+            "rule top\n  command = echo ok\nrule dep\n  command = git push origin main\nbuild mid: dep\nbuild out: top mid\nbuild other: top\n",
+        )
+        .expect("ninja");
+        std::fs::write(
+            alt.join("custom.ninja"),
+            "rule one\n  command = git push origin main\nbuild out: one\n",
+        )
+        .expect("custom");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        let proj_s = proj.display().to_string();
+        let all = format!("cd {proj_s} && ninja");
+        assert_eq!(kind(&all), Some("git.push"), "{all}");
+        let named = format!("cd {proj_s} && ninja out");
+        assert_eq!(kind(&named), Some("git.push"), "{named}");
+        let only = format!("cd {proj_s} && ninja other");
+        assert_eq!(kind(&only), None, "{only}");
+        let dry = format!("cd {proj_s} && ninja -n");
+        assert_eq!(kind(&dry), None, "{dry}");
+        let missing = format!("cd {proj_s} && ninja absent");
+        assert_eq!(kind(&missing), None, "{missing}");
+        let switched = format!("cd {root_s} && ninja -C proj");
+        assert_eq!(kind(&switched), Some("git.push"), "{switched}");
+        let file = format!("cd {root_s} && ninja -f alt/custom.ninja");
+        assert_eq!(kind(&file), Some("git.push"), "{file}");
+        let both = format!("cd {root_s} && ninja -C alt -f custom.ninja");
+        assert_eq!(kind(&both), Some("git.push"), "{both}");
+        std::fs::write(
+            proj.join("build.ninja"),
+            "rule top\n  command = echo ok\nrule side\n  command = git push origin main\nbuild out: top\nbuild other: side\ndefault out\n# git push origin main\n",
+        )
+        .expect("default");
+        assert_eq!(kind(&all), None, "{all}");
+        let side = format!("cd {proj_s} && ninja other");
+        assert_eq!(kind(&side), Some("git.push"), "{side}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
