@@ -818,6 +818,9 @@ fn consider_segment<'a>(
     if let Some(path) = bash_startup_file(&executed.argv, &executed.env) {
         score_script_path(policy, tool_name, path, depth, local, git, best);
     }
+    if let Some(path) = zsh_startup_file(&executed.argv, &executed.env) {
+        score_script_path(policy, tool_name, &path, depth, local, git, best);
+    }
     // A function named `export` runs instead of the builtin.
     // `command export` and `builtin export` keep the builtin.
     let export_is_function = is_export(&executed.argv)
@@ -5545,6 +5548,46 @@ fn bash_startup_file<'a>(argv: &'a [String], env: &'a [(String, String)]) -> Opt
         .find(|(name, _)| name == "BASH_ENV")
         .map(|(_, value)| value.as_str())
         .filter(|path| !path.is_empty())
+}
+
+/// `ZDOTDIR=dir zsh` runs `dir/.zshenv`. `zsh -f` does not.
+fn zsh_startup_file(argv: &[String], env: &[(String, String)]) -> Option<String> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("zsh") {
+        return None;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            break;
+        }
+        if token == "-f" || token == "--no-rcs" {
+            return None;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.contains('f')
+        {
+            return None;
+        }
+        if token.starts_with('-') || token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    let dir = env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "ZDOTDIR")
+        .map(|(_, value)| value.as_str())?;
+    let dir = dir.trim_end_matches(['/', '\\']);
+    if dir.is_empty() {
+        return None;
+    }
+    Some(format!("{dir}/.zshenv"))
 }
 
 /// `make -f file` runs the tab recipes in that file. `make -n` only
@@ -20030,6 +20073,9 @@ mod tests {
                 std::fs::write(dir.join(name), body).expect(name);
             }
             std::fs::write(dir.join("payload.mk"), "all:\n\tgit push origin main\n").expect("mk");
+            let zdot = dir.join("zdot");
+            std::fs::create_dir_all(&zdot).expect("zdot");
+            std::fs::write(zdot.join(".zshenv"), body).expect("zshenv");
             let spaced = dir.join("Program Files");
             std::fs::create_dir_all(&spaced).expect("spaced");
             std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
@@ -20050,6 +20096,9 @@ mod tests {
                 std::fs::write(dir.join(name), body).expect(name);
             }
             std::fs::write(dir.join("payload.mk"), "all:\n\tgit push origin main\n").expect("mk");
+            let zdot = dir.join("zdot");
+            std::fs::create_dir_all(&zdot).expect("zdot");
+            std::fs::write(zdot.join(".zshenv"), body).expect("zshenv");
             let spaced = dir.join("Program Files");
             std::fs::create_dir_all(&spaced).expect("spaced");
             std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
@@ -20088,6 +20137,7 @@ mod tests {
             format!("make -f '{mk}' all"),
             format!("gmake --file {mk}"),
             format!("make -f{}", mk.replace('\\', "/")),
+            format!("ZDOTDIR='{}' zsh -c 'echo hi'", path("zdot")),
             format!("BASH_ENV='{sh}' bash -c 'echo hi'"),
             format!("bash --rcfile '{sh}' -ic 'echo hi'"),
             format!("bash --init-file '{sh}' -ic 'echo hi'"),
@@ -20162,6 +20212,7 @@ mod tests {
             format!("make -f {mk}.missing"),
             format!("make -n -f {mk}"),
             format!("make -f {mk} -n"),
+            format!("ZDOTDIR='{}' zsh -f -c 'echo hi'", path("zdot")),
             format!("bash < '{sh}.missing'"),
             format!("bash -s < '{sh}.missing'"),
             format!("source < '{sh}'"),
