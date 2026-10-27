@@ -13066,6 +13066,7 @@ fn score_crystal<'a>(
 /// `nim c -r` and `nim r` run `execCmd`. `nim c` runs `staticExec`
 /// while compiling and does not run `execCmd`. Every `config.nims`
 /// from the source file's directory up to the root runs `exec`.
+/// `name.nims` beside `name.nim` runs `exec` too.
 #[allow(clippy::too_many_arguments)]
 fn score_nim<'a>(
     policy: &'a Policy,
@@ -13085,7 +13086,22 @@ fn score_nim<'a>(
     };
     let mut commands = nim_shells(&text, run);
     commands.extend(nim_config_commands(&path));
+    commands.extend(nim_sibling_commands(&path));
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn nim_sibling_commands(nim_file: &str) -> Vec<String> {
+    let path = std::path::Path::new(nim_file);
+    let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        return Vec::new();
+    };
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.nims"))) else {
+        return Vec::new();
+    };
+    nim_call_args(&text, "exec")
 }
 
 fn nim_config_commands(nim_file: &str) -> Vec<String> {
@@ -30359,6 +30375,13 @@ mod tests {
             "# exec \"git push origin main\"\n",
         )
         .expect("quiet parent");
+        assert_eq!(kind(&format!("nim c {app_s}")), None);
+        std::fs::write(sub.join("app.nims"), "exec \"git push origin main\"\n").expect("app nims");
+        let _ = std::fs::remove_file(sub.join("config.nims"));
+        assert_eq!(kind(&format!("nim c {app_s}")), Some("git.push"));
+        let _ = std::fs::remove_file(sub.join("app.nims"));
+        std::fs::write(sub.join("project.nims"), "exec \"git push origin main\"\n")
+            .expect("project nims");
         assert_eq!(kind(&format!("nim c {app_s}")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
