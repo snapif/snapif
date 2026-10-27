@@ -959,6 +959,14 @@ fn consider_segment<'a>(
             score_bun_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_expect_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_tcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_sqlite_shell(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_octave_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_julia_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_elixir_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_erlang_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_go_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
                 policy,
                 tool_name,
@@ -3821,7 +3829,9 @@ fn bare_parameter(text: &str) -> Option<&str> {
 }
 
 fn is_shell_name(name: &str) -> bool {
-    const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "fish"];
+    const SHELLS: &[&str] = &[
+        "sh", "bash", "dash", "zsh", "ksh", "ash", "fish", "csh", "tcsh",
+    ];
     SHELLS.iter().any(|shell| name.eq_ignore_ascii_case(shell))
 }
 
@@ -5310,6 +5320,12 @@ fn just_recipe_body(argv: &[String]) -> Option<String> {
             index += 1;
             continue;
         }
+        if arg == "-f" {
+            index += 1;
+            file = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
         if arg.starts_with('-') {
             index += 1;
             continue;
@@ -5772,6 +5788,585 @@ fn tcl_command_position(chars: &[char], index: usize) -> bool {
     cursor == 0 || matches!(chars[cursor - 1], '[' | ';')
 }
 
+fn score_sqlite_shell<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let commands = sqlite_shells(argv);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn sqlite_shells(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("sqlite3") {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    let mut saw_db = false;
+    for arg in argv.iter().skip(1) {
+        if !saw_db {
+            if !arg.starts_with('-') {
+                saw_db = true;
+            }
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        for line in arg.lines() {
+            let Some(rest) = line.trim().strip_prefix(".shell ") else {
+                continue;
+            };
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                commands.push(rest.to_string());
+            }
+        }
+    }
+    commands
+}
+
+fn score_octave_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in octave_programs(argv) {
+        commands.extend(quoted_call(&text, "system", &['%', '#']));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn octave_programs(argv: &[String]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("octave"))
+    {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--eval" {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    texts
+}
+
+fn score_julia_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "julia", &["-e", "--eval"]) {
+        commands.extend(julia_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn julia_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if matches!(chars[index], '"' | '\'')
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        if chars[index] == '`' {
+            let start = index + 1;
+            let end = chars[start..]
+                .iter()
+                .position(|ch| *ch == '`')
+                .map_or(chars.len(), |offset| start + offset);
+            let command: String = chars[start..end].iter().collect();
+            let command = command.trim();
+            if !command.is_empty() {
+                commands.push(command.to_string());
+            }
+            index = if end < chars.len() { end + 1 } else { end };
+            continue;
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn score_elixir_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "elixir", &["-e", "--eval"]) {
+        commands.extend(elixir_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn elixir_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        let name = if starts_with(&chars, index, "System.shell") {
+            Some("System.shell")
+        } else if starts_with(&chars, index, "System.cmd") {
+            Some("System.cmd")
+        } else {
+            None
+        };
+        if let Some(name) = name
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + name.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                if let Some(command) = elixir_invocation(name, &inner) {
+                    commands.push(command);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn elixir_invocation(name: &str, inner: &str) -> Option<String> {
+    let parts = split_args(inner);
+    let program = arg_string(parts.first()?)?;
+    if name == "System.shell" {
+        return (!program.is_empty()).then_some(program);
+    }
+    let mut words = vec![program];
+    if let Some(args) = parts.get(1).and_then(|part| arg_list(part)) {
+        words.extend(args);
+    }
+    let command = words.join(" ");
+    (!command.is_empty()).then_some(command)
+}
+
+fn score_erlang_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "erl", &["-eval"]) {
+        commands.extend(quoted_call(&text, "os:cmd", &['%']));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn score_go_run<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in go_sources(argv) {
+        commands.extend(go_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn go_sources(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("go") {
+        return Vec::new();
+    }
+    let mut sources = Vec::new();
+    let mut running = false;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        if !running {
+            if arg == "run" {
+                running = true;
+            } else {
+                return Vec::new();
+            }
+            continue;
+        }
+        if arg.ends_with(".go")
+            && let Some(ScriptFile::Text(text)) = load_script_file(arg)
+        {
+            sources.push(text);
+        }
+    }
+    sources
+}
+
+fn go_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, "Command(")
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let open = index + "Command".len();
+            if let Some((inner, end)) = balanced(&chars, open, '(', ')') {
+                let mut words = Vec::new();
+                for part in split_args(&inner) {
+                    let Some(word) = arg_string(&part) else {
+                        break;
+                    };
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    commands.push(words.join(" "));
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn score_cmake_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in cmake_scripts(argv) {
+        commands.extend(cmake_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cmake_scripts(argv: &[String]) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    if !command_basename(first).eq_ignore_ascii_case("cmake") {
+        return Vec::new();
+    }
+    let mut scripts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-P" {
+            index += 1;
+            if let Some(path) = argv.get(index)
+                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+            {
+                scripts.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    scripts
+}
+
+fn cmake_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "execute_process") {
+            let mut cursor = index + "execute_process".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                commands.extend(cmake_process_commands(&inner));
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn cmake_process_commands(inner: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut words = Vec::new();
+    let mut in_command = false;
+    for raw in inner.split_whitespace() {
+        if raw == "COMMAND" {
+            if in_command && !words.is_empty() {
+                commands.push(words.join(" "));
+            }
+            words.clear();
+            in_command = true;
+            continue;
+        }
+        if in_command && cmake_keyword(raw) {
+            if !words.is_empty() {
+                commands.push(words.join(" "));
+            }
+            words.clear();
+            in_command = false;
+            continue;
+        }
+        if in_command {
+            words.push(raw.to_string());
+        }
+    }
+    if in_command && !words.is_empty() {
+        commands.push(words.join(" "));
+    }
+    commands
+}
+
+fn cmake_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "WORKING_DIRECTORY"
+            | "TIMEOUT"
+            | "OUTPUT_VARIABLE"
+            | "ERROR_VARIABLE"
+            | "RESULT_VARIABLE"
+            | "OUTPUT_FILE"
+            | "ERROR_FILE"
+            | "INPUT_FILE"
+            | "ENCODING"
+    )
+}
+
+fn score_sbcl_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    let mut commands = Vec::new();
+    for text in flag_programs(argv, "sbcl", &["--eval"]) {
+        commands.extend(sbcl_commands(&text));
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn sbcl_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "sb-ext:run-program";
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == ';' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, marker)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + marker.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if let Some((program, end)) = read_quoted(&chars, cursor) {
+                cursor = end;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+                let mut words = vec![program];
+                if starts_with(&chars, cursor, "(list")
+                    && let Some((inner, _)) = balanced(&chars, cursor, '(', ')')
+                {
+                    let listed: Vec<char> = inner.chars().collect();
+                    let mut listed_at = 0usize;
+                    if starts_with(&listed, listed_at, "list") {
+                        listed_at += 4;
+                    }
+                    while listed_at < listed.len() {
+                        while listed_at < listed.len() && listed[listed_at].is_whitespace() {
+                            listed_at += 1;
+                        }
+                        let Some((word, end)) = read_quoted(&listed, listed_at) else {
+                            break;
+                        };
+                        words.push(word);
+                        listed_at = end;
+                    }
+                }
+                let command = words.join(" ");
+                if !command.is_empty() {
+                    commands.push(command);
+                }
+                index = cursor;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
+fn flag_programs(argv: &[String], command: &str, flags: &[&str]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case(command))
+    {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if flags.contains(&arg) {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    texts
+}
+
+fn quoted_call(text: &str, name: &str, comments: &[char]) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if comments.contains(&chars[index]) {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, name)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + name.chars().count();
+            if cursor < chars.len() && chars[cursor].is_ascii_alphanumeric() {
+                index += 1;
+                continue;
+            }
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len()
+                && chars[cursor] == '('
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                if let Some(command) = arg_string(inner.trim())
+                    && !command.is_empty()
+                {
+                    commands.push(command);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
 fn score_awk_program<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5811,6 +6406,14 @@ fn awk_programs(argv: &[String]) -> Vec<String> {
             if let Some(path) = argv.get(index)
                 && let Some(ScriptFile::Text(text)) = load_script_file(path)
             {
+                programs.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("-f").filter(|path| !path.is_empty()) {
+            saw_file = true;
+            if let Some(ScriptFile::Text(text)) = load_script_file(path) {
                 programs.push(text);
             }
             index += 1;
@@ -6024,7 +6627,7 @@ fn takes_inline_arg(lang: HostLang, arg: &str) -> bool {
         HostLang::Node => arg == "-e" || arg == "--eval",
         HostLang::Ruby | HostLang::Perl => arg == "-e",
         HostLang::Php => arg == "-r",
-        HostLang::Lua | HostLang::R => false,
+        HostLang::Lua | HostLang::R => arg == "-e",
     }
 }
 
@@ -6291,11 +6894,30 @@ fn shell_enabled(arg: &str) -> bool {
     let Some(value) = compact.strip_prefix("shell=") else {
         return false;
     };
+    if let Some(text) = quoted_shell_flag(value) {
+        return !text.is_empty();
+    }
     match value {
         "True" => true,
         "False" | "0" | "None" => false,
         other => other.parse::<i64>().is_ok_and(|number| number != 0),
     }
+}
+
+fn quoted_shell_flag(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    let quote = chars.next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut text = String::new();
+    for ch in chars {
+        if ch == quote {
+            return Some(text);
+        }
+        text.push(ch);
+    }
+    None
 }
 
 fn arg_string(arg: &str) -> Option<String> {
@@ -21881,6 +22503,20 @@ mod tests {
         write("puts.tcl", "puts [exec git push origin main]\n");
         write("hello.tcl", "puts hello\n");
         write("args.tcl", "puts hello exec git push origin main\n");
+        write("push.csh", "git push origin main\n");
+        write(
+            "main.go",
+            "package main\nimport (\n\t\"os\"\n\t\"os/exec\"\n)\nfunc main() {\n\tcmd := exec.Command(\"git\", \"push\", \"origin\", \"main\")\n\tcmd.Stdout = os.Stdout\n\t_ = cmd.Run()\n}\n",
+        );
+        write(
+            "print.go",
+            "package main\nimport \"fmt\"\nfunc main() { fmt.Println(\"git push origin main\") }\n",
+        );
+        write(
+            "run.cmake",
+            "execute_process(COMMAND git push origin main)\n",
+        );
+        write("quiet.cmake", "message(STATUS \"git push origin main\")\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -21944,6 +22580,30 @@ mod tests {
             "expect -c 'spawn git push origin main'".to_string(),
             format!("tclsh {show}/run.tcl"),
             format!("tclsh {show}/puts.tcl"),
+            "csh -c 'git push origin main'".to_string(),
+            "tcsh -c 'git push origin main'".to_string(),
+            format!("csh {show}/push.csh"),
+            format!("tcsh {show}/push.csh"),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"yes\")'"
+                .to_string(),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"False\")'"
+                .to_string(),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"0\")'"
+                .to_string(),
+            "lua -e 'os.execute(\"git push origin main\")'".to_string(),
+            "R --vanilla -e 'system(\"git push origin main\")'".to_string(),
+            "Rscript --vanilla -e 'system(\"git push origin main\")'".to_string(),
+            format!("awk -f{show}/run.awk"),
+            format!("just -f {show}/justfile push"),
+            "sqlite3 :memory: '.shell git push origin main'".to_string(),
+            "octave --quiet --eval 'system(\"git push origin main\");'".to_string(),
+            "julia --startup-file=no -e 'run(`git push origin main`)'".to_string(),
+            "elixir -e 'System.cmd(\"git\", [\"push\", \"origin\", \"main\"])'".to_string(),
+            "elixir -e 'System.shell(\"git push origin main\")'".to_string(),
+            "erl -noshell -eval 'os:cmd(\"git push origin main\"), halt().'".to_string(),
+            format!("go run {show}/main.go"),
+            format!("cmake -P {show}/run.cmake"),
+            "sbcl --noinform --non-interactive --eval '(sb-ext:run-program \"git\" (list \"push\" \"origin\" \"main\") :search t :output *standard-output*)' --quit".to_string(),
         ];
         for command in &review {
             assert_eq!(kind(command), Some("git.push"), "{command}");
@@ -21975,6 +22635,20 @@ mod tests {
             format!("tclsh {show}/args.tcl"),
             format!("perl -MNeed -e 0"),
             "bun run test".to_string(),
+            "csh -c 'echo hi'".to_string(),
+            "python3 -c 'import subprocess; subprocess.run(\"git push origin main\", shell=\"\")'"
+                .to_string(),
+            "lua -e 'print(1)'".to_string(),
+            "R --vanilla -e 'print(1)'".to_string(),
+            "sqlite3 :memory: 'select 1'".to_string(),
+            "octave --quiet --eval 'disp(1)'".to_string(),
+            "julia --startup-file=no -e 'println(1)'".to_string(),
+            "elixir -e 'IO.puts(\"git push origin main\")'".to_string(),
+            "erl -noshell -eval 'halt().'".to_string(),
+            format!("awk -f{show}/print.awk"),
+            format!("just -f {show}/justfile absent"),
+            format!("go run {show}/print.go"),
+            format!("cmake -P {show}/quiet.cmake"),
         ];
         for command in &quiet {
             assert_eq!(kind(command), None, "{command}");
