@@ -614,7 +614,9 @@ fn check_action(
 /// ignored (`"rm.exe "`).
 /// A shell that reads its script from stdin runs a heredoc or a
 /// here-string, so `bash <<EOF` and `bash <<< 'rm'` match. `bash
-/// /dev/stdin` and `bash -s` do too. `source /dev/stdin` runs that
+/// /dev/stdin` and `bash -s` do too. `bash < path` and `bash -s < path`
+/// score that file. `bash -c 'source /dev/stdin' < path` does too.
+/// `source < path` does not run the file. `source /dev/stdin` runs that
 /// body in the same shell. `source path` and `bash path` run a regular
 /// file at that path. `cat path`, `head path`, and `tail path` score
 /// the text those commands print, including `gcat`, `ghead`, and
@@ -887,6 +889,11 @@ fn consider_segment<'a>(
             } else {
                 let mut child = Functions::new();
                 run_detached(&script, &mut child, best);
+                if script_reads_stdin(&script)
+                    && let Some(path) = segment.stdin_file.as_deref()
+                {
+                    score_script_path(policy, tool_name, path, depth, local, git, best);
+                }
             }
         } else if let Some(path) = powershell_file_operand(&executed.argv) {
             if path == "-" {
@@ -986,10 +993,13 @@ fn consider_segment<'a>(
                 );
             }
             if shell_reads_stdin(&executed.argv) {
-                scan_isolated(
+                score_ps_input(
                     policy,
                     tool_name,
-                    &segment.heredocs,
+                    PsInput {
+                        heredocs: &segment.heredocs,
+                        stdin_file: segment.stdin_file.as_deref(),
+                    },
                     depth,
                     local,
                     git,
@@ -3817,6 +3827,19 @@ fn shell_flag_has(argv: &[String], flag: char) -> bool {
 
 fn is_stdin_script(token: &str) -> bool {
     matches!(token, "/dev/stdin" | "/dev/fd/0" | "-")
+}
+
+/// `bash -c 'source /dev/stdin'` runs the redirected file.
+fn script_reads_stdin(script: &str) -> bool {
+    matches!(
+        script.trim(),
+        "source /dev/stdin"
+            | "source -"
+            | "source /dev/fd/0"
+            | ". /dev/stdin"
+            | ". -"
+            | ". /dev/fd/0"
+    )
 }
 
 fn shell_reads_stdin(argv: &[String]) -> bool {
@@ -19907,6 +19930,10 @@ mod tests {
         };
         let review = [
             format!("bash {sh}"),
+            format!("bash < '{sh}'"),
+            format!("bash -s < '{sh}'"),
+            format!("sh < '{sh}'"),
+            format!("bash -c 'source /dev/stdin' < '{sh}'"),
             format!("source {sh}"),
             format!("cat {sh}"),
             format!("bash '{sh}'"),
@@ -19957,6 +19984,9 @@ mod tests {
         }
         let quiet = [
             format!("bash {sh}.missing"),
+            format!("bash < '{sh}.missing'"),
+            format!("bash -s < '{sh}.missing'"),
+            format!("source < '{sh}'"),
             format!("source {sh}.missing"),
             format!("cat {sh}.missing"),
             format!("powershell -File {ps1}.missing"),
