@@ -813,6 +813,11 @@ fn consider_segment<'a>(
     };
     // `$(...)` does not see a prefix assignment. A child process does.
     let local = &executed.env;
+    // Non-interactive bash runs `BASH_ENV`. An interactive bash runs
+    // `--rcfile` or `--init-file`. The other combination does not.
+    if let Some(path) = bash_startup_file(&executed.argv, &executed.env) {
+        score_script_path(policy, tool_name, path, depth, local, git, best);
+    }
     // A function named `export` runs instead of the builtin.
     // `command export` and `builtin export` keep the builtin.
     let export_is_function = is_export(&executed.argv)
@@ -5492,6 +5497,53 @@ fn shell_file_operand(argv: &[String]) -> Option<&str> {
         return Some(token.as_str());
     }
     None
+}
+
+/// Non-interactive bash runs `BASH_ENV`. Interactive bash runs
+/// `--rcfile` or `--init-file`. A non-interactive `--rcfile` does not
+/// run, and an interactive shell does not run `BASH_ENV`.
+fn bash_startup_file<'a>(argv: &'a [String], env: &'a [(String, String)]) -> Option<&'a str> {
+    let base = command_basename(argv.first()?);
+    if !base.eq_ignore_ascii_case("bash") {
+        return None;
+    }
+    let mut interactive = false;
+    let mut rcfile: Option<&str> = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = &argv[index];
+        if token == "--" {
+            break;
+        }
+        if shell_opt_takes_value(token) {
+            let name = token.strip_prefix("--").unwrap_or(token);
+            if name == "rcfile" || name == "init-file" {
+                rcfile = argv.get(index + 1).map(String::as_str);
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-')
+            && !flags.is_empty()
+            && !flags.starts_with('-')
+            && flags.contains('i')
+        {
+            interactive = true;
+        }
+        if token.starts_with('-') || token.starts_with('+') {
+            index += 1;
+            continue;
+        }
+        break;
+    }
+    if interactive {
+        return rcfile.filter(|path| !path.is_empty());
+    }
+    env.iter()
+        .rev()
+        .find(|(name, _)| name == "BASH_ENV")
+        .map(|(_, value)| value.as_str())
+        .filter(|path| !path.is_empty())
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -19943,6 +19995,9 @@ mod tests {
         };
         let review = [
             format!("bash {sh}"),
+            format!("BASH_ENV='{sh}' bash -c 'echo hi'"),
+            format!("bash --rcfile '{sh}' -ic 'echo hi'"),
+            format!("bash --init-file '{sh}' -ic 'echo hi'"),
             format!("bash < '{sh}'"),
             format!("bash -s < '{sh}'"),
             format!("sh < '{sh}'"),
@@ -20015,6 +20070,9 @@ mod tests {
             format!("bash -s < '{sh}.missing'"),
             format!("source < '{sh}'"),
             format!("bash -c 'echo hi' < '{sh}'"),
+            format!("bash --rcfile '{sh}' -c 'echo hi'"),
+            format!("BASH_ENV='{sh}' bash -ic 'echo hi'"),
+            format!("BASH_ENV='{sh}.missing' bash -c 'echo hi'"),
             format!("source {sh}.missing"),
             format!("cat {sh}.missing"),
             format!("powershell -File {ps1}.missing"),
