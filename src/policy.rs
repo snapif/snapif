@@ -1012,6 +1012,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_nim(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_dart_file(
                 policy,
                 tool_name,
@@ -1125,6 +1135,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_cargo_rust_tests(
+                policy,
+                tool_name,
+                cargo_args,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_cargo_benches(
                 policy,
                 tool_name,
                 cargo_args,
@@ -13043,6 +13063,132 @@ fn score_crystal<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
+/// `nim c -r` and `nim r` run `execCmd`. `nim c` runs `staticExec`
+/// while compiling and does not run `execCmd`.
+#[allow(clippy::too_many_arguments)]
+fn score_nim<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some((run, path)) = nim_script(argv, dir) else {
+        return;
+    };
+    let Some(text) = load_text(&path) else {
+        return;
+    };
+    let commands = nim_shells(&text, run);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn nim_script(argv: &[String], dir: Option<&str>) -> Option<(bool, String)> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("nim"))
+    {
+        return None;
+    }
+    let mut command = None;
+    let mut run_flag = false;
+    let mut file = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-r" || arg == "--run" {
+            run_flag = true;
+            index += 1;
+            continue;
+        }
+        if matches!(
+            arg,
+            "-o" | "--out"
+                | "--nimcache"
+                | "-d"
+                | "--define"
+                | "--path"
+                | "-p"
+                | "--hint"
+                | "--hints"
+        ) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if command.is_none() {
+            command = Some(arg.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.ends_with(".nim") {
+            file = Some(arg.to_string());
+        }
+        index += 1;
+    }
+    let command = command?;
+    if command != "c" && command != "r" {
+        return None;
+    }
+    let file = file?;
+    Some((command == "r" || run_flag, shell_path(&file, dir)))
+}
+
+fn nim_shells(text: &str, run: bool) -> Vec<String> {
+    let mut commands = nim_call_args(text, "staticExec");
+    if run {
+        commands.extend(nim_call_args(text, "execCmd"));
+    }
+    commands
+}
+
+fn nim_call_args(text: &str, name: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if chars[index] == '"'
+            && let Some((_, end)) = read_quoted(&chars, index)
+        {
+            index = end;
+            continue;
+        }
+        let bounded =
+            index == 0 || (!chars[index - 1].is_ascii_alphanumeric() && chars[index - 1] != '_');
+        if bounded && mix_word_at(&chars, index, name) {
+            index += name.len();
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            if chars.get(index) == Some(&'(') {
+                index += 1;
+                while index < chars.len() && chars[index].is_whitespace() {
+                    index += 1;
+                }
+            }
+            if let Some((value, end)) = read_quoted(&chars, index) {
+                if !value.is_empty() {
+                    commands.push(value);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
 /// `dart file.dart`, `dart run`, and `dart pub run` execute
 /// `Process.run` and `Process.runSync` when the argument list is
 /// present. A single string does not compile and does not run.
@@ -13774,10 +13920,9 @@ fn strip_hash_comments(text: &str) -> String {
     out
 }
 
-/// `cargo build`, `check`, `clippy`, `rustc`, `doc`, `run`, and
-/// `test` run `build.rs`. `cargo install --path dir` runs that
+/// `cargo build`, `check`, `clippy`, `rustc`, `doc`, `bench`, `run`,
+/// and `test` run `build.rs`. `cargo install --path dir` runs that
 /// directory's `build.rs`. `cargo install` without `--path` does not.
-/// These commands do not run the `cfg(unix)` runner.
 #[allow(clippy::too_many_arguments)]
 fn score_cargo_build_script<'a>(
     policy: &'a Policy,
@@ -13840,11 +13985,18 @@ fn score_cargo_runner<'a>(
     );
 }
 
-/// `true` is `cargo run`. `false` is `cargo test`.
-fn cargo_runner_kind(argv: &[String]) -> Option<bool> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CargoInvoke {
+    Run,
+    Test,
+    Bench,
+}
+
+fn cargo_runner_kind(argv: &[String]) -> Option<CargoInvoke> {
     match argv.get(cargo_first_positional(argv)?)?.as_str() {
-        "run" => Some(true),
-        "test" => Some(false),
+        "run" => Some(CargoInvoke::Run),
+        "test" => Some(CargoInvoke::Test),
+        "bench" => Some(CargoInvoke::Bench),
         _ => None,
     }
 }
@@ -14070,10 +14222,14 @@ fn cargo_manifest_path(argv: &[String]) -> Option<String> {
     found
 }
 
-fn cargo_runner_has_target(dir: &std::path::Path, run: bool) -> bool {
+fn cargo_runner_has_target(dir: &std::path::Path, kind: CargoInvoke) -> bool {
     let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
         return false;
     };
+    if kind == CargoInvoke::Bench {
+        return cargo_has_bench(dir, &text);
+    }
+    let run = kind == CargoInvoke::Run;
     if cargo_named_package(&text) {
         return cargo_dir_has_target(dir, run);
     }
@@ -14090,6 +14246,92 @@ fn cargo_runner_has_target(dir: &std::path::Path, run: bool) -> bool {
         };
         cargo_named_package(&body) && cargo_dir_has_target(&member_dir, run)
     })
+}
+
+fn cargo_has_bench(dir: &std::path::Path, text: &str) -> bool {
+    cargo_dir_has_rs(&dir.join("benches"))
+        || text.lines().any(|line| {
+            let line = line.split('#').next().unwrap_or("").trim();
+            line == "[[bench]]"
+        })
+}
+
+fn cargo_unharnessed_benches(dir: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    let mut in_bench = false;
+    let mut name = None;
+    let mut path = None;
+    let mut harness_false = false;
+    let flush = |in_bench: bool,
+                 name: &Option<String>,
+                 path: &Option<String>,
+                 harness_false: bool,
+                 files: &mut Vec<String>| {
+        if !in_bench || !harness_false {
+            return;
+        }
+        let file = if let Some(path) = path {
+            dir.join(path)
+        } else if let Some(name) = name {
+            dir.join("benches").join(format!("{name}.rs"))
+        } else {
+            return;
+        };
+        if file.is_file() {
+            files.push(file.display().to_string());
+        }
+    };
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            flush(in_bench, &name, &path, harness_false, &mut files);
+            in_bench = line == "[[bench]]";
+            name = None;
+            path = None;
+            harness_false = false;
+            continue;
+        }
+        if !in_bench {
+            continue;
+        }
+        if let Some(value) = cargo_toml_string(line, "name") {
+            name = Some(value);
+        } else if let Some(value) = cargo_toml_string(line, "path") {
+            path = Some(value);
+        } else if line.replace(' ', "") == "harness=false" {
+            harness_false = true;
+        }
+    }
+    flush(in_bench, &name, &path, harness_false, &mut files);
+    files
+}
+
+fn cargo_toml_string(line: &str, key: &str) -> Option<String> {
+    let rest = line.strip_prefix(key)?;
+    if rest
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return None;
+    }
+    let rest = rest.trim().strip_prefix('=')?.trim();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    if !rest.ends_with(quote) || rest.chars().count() < 2 {
+        return None;
+    }
+    let body: String = rest
+        .chars()
+        .skip(1)
+        .take(rest.chars().count() - 2)
+        .collect();
+    (!body.is_empty()).then_some(body)
 }
 
 fn cargo_named_package(text: &str) -> bool {
@@ -14317,7 +14559,7 @@ fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::Pa
         }
         if matches!(
             arg,
-            "build" | "check" | "clippy" | "doc" | "run" | "rustc" | "test"
+            "bench" | "build" | "check" | "clippy" | "doc" | "run" | "rustc" | "test"
         ) {
             builds = true;
         }
@@ -14328,6 +14570,34 @@ fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::Pa
     }
     let manifest = shell_path(manifest.as_deref().unwrap_or("Cargo.toml"), dir);
     Some(std::path::Path::new(&manifest).parent()?.to_path_buf())
+}
+
+/// `cargo bench` runs `fn main` in a `[[bench]]` with `harness = false`.
+/// The default harness does not run `main`.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_benches<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !matches!(cargo_runner_kind(argv), Some(CargoInvoke::Bench)) {
+        return;
+    }
+    let Some(package) = cargo_runner_package(argv, dir) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for path in cargo_unharnessed_benches(&package) {
+        if let Some(text) = load_text(&path) {
+            commands.extend(rust_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
 /// `cargo test` runs `#[test]` functions in `src/lib.rs` and
@@ -29987,6 +30257,71 @@ mod tests {
             kind(&format!("cd {run_s} && cargo run -q")),
             Some("git.push")
         );
+        let bench = root.join("benchpkg");
+        std::fs::create_dir_all(bench.join("src")).expect("bench src");
+        std::fs::create_dir_all(bench.join("benches")).expect("benches");
+        std::fs::create_dir_all(bench.join(".cargo")).expect("bench cfg");
+        std::fs::write(
+            bench.join("Cargo.toml"),
+            "[package]\nname = \"p\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[[bench]]\nname = \"mark\"\nharness = false\n",
+        )
+        .expect("bench toml");
+        std::fs::write(bench.join("src/main.rs"), "fn main() {}\n").expect("bench main");
+        std::fs::write(
+            bench.join("benches/mark.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("mark");
+        let bench_s = bench.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {bench_s} && cargo bench -q")),
+            Some("git.push")
+        );
+        std::fs::write(bench.join("benches/mark.rs"), "fn main() {}\n").expect("quiet mark");
+        std::fs::write(
+            bench.join(".cargo/config.toml"),
+            "[target.'cfg(unix)']\nrunner = \"git push origin main\"\n",
+        )
+        .expect("bench runner");
+        assert_eq!(
+            kind(&format!("cd {bench_s} && cargo bench -q")),
+            Some("git.push")
+        );
+        let _ = std::fs::remove_file(bench.join(".cargo/config.toml"));
+        std::fs::write(
+            bench.join("benches/mark.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("default harness");
+        std::fs::write(bench.join("Cargo.toml"), package).expect("auto bench");
+        assert_eq!(kind(&format!("cd {bench_s} && cargo bench -q")), None);
+        std::fs::write(bench.join("Cargo.toml"), package).expect("no bench");
+        let _ = std::fs::remove_dir_all(bench.join("benches"));
+        let _ = std::fs::remove_file(bench.join(".cargo/config.toml"));
+        assert_eq!(kind(&format!("cd {bench_s} && cargo bench -q")), None);
+        let nim = root.join("run.nim");
+        std::fs::write(
+            &nim,
+            "import std/osproc\ndiscard execCmd(\"git push origin main\")\n",
+        )
+        .expect("nim");
+        let nim_s = nim.display().to_string();
+        assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim r {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim c {nim_s}")), None);
+        std::fs::write(
+            &nim,
+            "static:\n  echo staticExec(\"git push origin main\")\n",
+        )
+        .expect("static nim");
+        assert_eq!(kind(&format!("nim c {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
+        std::fs::write(
+            &nim,
+            "# discard execCmd(\"git push origin main\")\necho \"ok\"\n",
+        )
+        .expect("nim comment");
+        assert_eq!(kind(&format!("nim r {nim_s}")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
