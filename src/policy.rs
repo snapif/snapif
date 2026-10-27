@@ -5992,6 +5992,9 @@ fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec
             "post-merge",
         ],
         "pull" => &["post-merge"],
+        "rebase" if rebase_skips_pre(argv) => &["post-checkout", "post-rewrite"],
+        "rebase" => &["pre-rebase", "post-checkout", "post-rewrite"],
+        "am" => &["applypatch-msg", "pre-applypatch", "post-applypatch"],
         _ => return Vec::new(),
     };
     names
@@ -6015,6 +6018,12 @@ fn clone_checks_out(argv: &[String]) -> bool {
 /// `prepare-commit-msg`, and `commit-msg`.
 fn pull_merges(argv: &[String]) -> bool {
     argv.iter().any(|token| token == "--no-rebase")
+}
+
+/// `git rebase --no-verify` still runs `post-checkout` and
+/// `post-rewrite`. It does not run `pre-rebase`.
+fn rebase_skips_pre(argv: &[String]) -> bool {
+    argv.iter().any(|token| token == "--no-verify")
 }
 
 /// This git runs `prepare-commit-msg` and `post-commit` for a
@@ -21077,6 +21086,21 @@ mod tests {
         assert_eq!(kind(&pull), None, "{pull}");
         let pull_merge = format!("git -c core.hooksPath={dir} pull --no-rebase origin main");
         assert_eq!(kind(&pull_merge), Some("bash.rm"), "{pull_merge}");
+        write("pre-rebase", "rm -rf /tmp/prb\n");
+        let rebase = format!("git -c core.hooksPath={dir} rebase main");
+        assert_eq!(kind(&rebase), Some("bash.rm"), "{rebase}");
+        write("pre-rebase", "echo ok\n");
+        write("post-checkout", "echo ok\n");
+        write("post-rewrite", "echo ok\n");
+        assert_eq!(kind(&rebase), None, "{rebase}");
+        let rebase_nv = format!("git -c core.hooksPath={dir} rebase --no-verify main");
+        write("pre-rebase", "rm -rf /tmp/prb\n");
+        assert_eq!(kind(&rebase_nv), None, "{rebase_nv}");
+        write("post-rewrite", "rm -rf /tmp/rw\n");
+        assert_eq!(kind(&rebase_nv), Some("bash.rm"), "{rebase_nv}");
+        write("applypatch-msg", "rm -rf /tmp/am\n");
+        let am = format!("git -c core.hooksPath={dir} am patch");
+        assert_eq!(kind(&am), Some("bash.rm"), "{am}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
