@@ -813,6 +813,9 @@ fn consider_segment<'a>(
     };
     // `$(...)` does not see a prefix assignment. A child process does.
     let local = &executed.env;
+    if let Some(path) = cd_target(&executed.argv) {
+        scope.dir = Some(path);
+    }
     // Non-interactive bash runs `BASH_ENV`. An interactive bash runs
     // `--rcfile` or `--init-file`. The other combination does not.
     if let Some(path) = bash_startup_file(&executed.argv, &executed.env) {
@@ -970,6 +973,15 @@ fn consider_segment<'a>(
             score_haskell_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_mix_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_clojure_script(policy, tool_name, &executed.argv, depth, local, git, best);
+            let host_dir = scope.dir.as_deref();
+            let node_run = node_run_bodies(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &node_run, depth, local, git, best);
+            let bun_tests = bun_test_sources(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &bun_tests, depth, local, git, best);
+            let java_main = java_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &java_main, depth, local, git, best);
+            let kotlin = kotlin_commands(&executed.argv);
+            scan_isolated(policy, tool_name, &kotlin, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -1214,6 +1226,8 @@ fn export_drop_flag(token: &str) -> Option<bool> {
 /// array at that depth.
 #[derive(Clone, Default)]
 struct ShellScope {
+    /// Directory set by `cd` for a later command in this shell.
+    dir: Option<String>,
     global: Vec<(String, String)>,
     locals: Vec<Vec<(String, String)>>,
     alts: Vec<ShellAlt>,
@@ -6141,6 +6155,257 @@ fn go_commands(text: &str) -> Vec<String> {
     commands
 }
 
+fn cd_target(argv: &[String]) -> Option<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cd"))
+    {
+        return None;
+    }
+    let mut path = None;
+    for arg in argv.iter().skip(1) {
+        if arg == "--" {
+            continue;
+        }
+        if arg.starts_with('-') {
+            continue;
+        }
+        path = Some(arg.clone());
+    }
+    path
+}
+
+fn shell_dir(dir: Option<&str>) -> std::path::PathBuf {
+    dir.map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from)
+}
+
+fn node_run_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("node"))
+    {
+        return Vec::new();
+    }
+    let Some(name) = node_run_name(argv) else {
+        return Vec::new();
+    };
+    let path = shell_dir(dir).join("package.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    value
+        .get("scripts")
+        .and_then(|item| item.get(&name))
+        .and_then(|item| item.as_str())
+        .filter(|body| !body.is_empty())
+        .map(str::to_string)
+        .into_iter()
+        .collect()
+}
+
+fn node_run_name(argv: &[String]) -> Option<String> {
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--run" {
+            return argv.get(index + 1).cloned();
+        }
+        if let Some(name) = arg.strip_prefix("--run=").filter(|name| !name.is_empty()) {
+            return Some(name.to_string());
+        }
+        index += 1;
+    }
+    None
+}
+
+fn bun_test_sources(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("bun"))
+    {
+        return Vec::new();
+    }
+    let mut saw_test = false;
+    let mut paths = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if !saw_test {
+            if arg == "test" {
+                saw_test = true;
+            } else {
+                return Vec::new();
+            }
+            index += 1;
+            continue;
+        }
+        paths.push(arg.to_string());
+        index += 1;
+    }
+    if !saw_test {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut files = paths;
+    if files.is_empty() {
+        bun_test_walk(&shell_dir(dir), &mut files, 0);
+    }
+    for path in files {
+        if let Some(ScriptFile::Text(text)) = load_script_file(&path) {
+            texts.extend(interpreter_commands(HostLang::Node, &text));
+        }
+    }
+    texts
+}
+
+fn bun_test_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "node_modules" || name == ".git" || name == "target" || name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            bun_test_walk(&path, found, depth + 1);
+            continue;
+        }
+        if bun_test_name(&name) {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+fn bun_test_name(name: &str) -> bool {
+    name.ends_with(".test.js")
+        || name.ends_with(".spec.js")
+        || name.ends_with("_test.js")
+        || name.ends_with("_spec.js")
+}
+
+fn java_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("java"))
+    {
+        return Vec::new();
+    }
+    if argv.iter().any(|arg| arg == "-jar") {
+        return Vec::new();
+    }
+    let mut class = None;
+    for arg in argv.iter().skip(1) {
+        if arg.starts_with('-') {
+            continue;
+        }
+        class = Some(arg.as_str());
+    }
+    let Some(class) = class else {
+        return Vec::new();
+    };
+    if class.contains('.') || class.contains('/') || class.contains('\\') {
+        return Vec::new();
+    }
+    let path = shell_dir(dir).join(format!("{class}.java"));
+    let Some(ScriptFile::Text(text)) = load_script_file(&path.display().to_string()) else {
+        return Vec::new();
+    };
+    process_builder_commands(&text)
+}
+
+fn kotlin_commands(argv: &[String]) -> Vec<String> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("kotlinc"))
+    {
+        return Vec::new();
+    }
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-script" {
+            index += 1;
+            if let Some(path) = argv.get(index)
+                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+            {
+                texts.push(text);
+            }
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    let mut commands = Vec::new();
+    for text in &texts {
+        commands.extend(process_builder_commands(text));
+    }
+    commands
+}
+
+fn process_builder_commands(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let marker = "ProcessBuilder";
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with(&chars, index, "//") {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if starts_with(&chars, index, "/*") {
+            index = skip_block(&chars, index + 2);
+            continue;
+        }
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if starts_with(&chars, index, marker)
+            && (index == 0 || !chars[index - 1].is_ascii_alphanumeric())
+        {
+            let mut cursor = index + marker.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(')
+                && let Some((inner, end)) = balanced(&chars, cursor, '(', ')')
+            {
+                let mut words = Vec::new();
+                for part in split_args(&inner) {
+                    let Some(word) = arg_string(&part) else {
+                        break;
+                    };
+                    words.push(word);
+                }
+                if !words.is_empty() {
+                    commands.push(words.join(" "));
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    commands
+}
+
 fn score_coffee_script<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -6188,8 +6453,10 @@ fn score_haskell_script<'a>(
     best: &mut Option<&'a ActionId>,
 ) {
     let mut commands = Vec::new();
-    for text in flag_programs(argv, "ghci", &["-e"]) {
-        commands.extend(haskell_commands(&text));
+    for command in ["ghci", "ghc"] {
+        for text in flag_programs(argv, command, &["-e"]) {
+            commands.extend(haskell_commands(&text));
+        }
     }
     for command in ["runghc", "runhaskell"] {
         if let Some(text) = positional_script(argv, command) {
@@ -23023,6 +23290,37 @@ mod tests {
             "fn main() {\n    let _ = std::process::Command::new(\"git\")\n        .args([\"push\", \"origin\", \"main\"])\n        .output();\n}\n",
         )
         .expect("cargo main");
+        write(
+            "Main.java",
+            "public class Main {\n  public static void main(String[] args) throws Exception {\n    Process p = new ProcessBuilder(\"git\", \"push\", \"origin\", \"main\").inheritIO().start();\n    p.waitFor();\n  }\n}\n",
+        );
+        write(
+            "run.kts",
+            "ProcessBuilder(\"git\", \"push\", \"origin\", \"main\").inheritIO().start().waitFor()\n",
+        );
+        std::fs::create_dir_all(root.join("pkg")).expect("pkg");
+        std::fs::create_dir_all(root.join("buntest")).expect("buntest");
+        std::fs::create_dir_all(root.join("bunquiet")).expect("bunquiet");
+        std::fs::write(
+            root.join("pkg/package.json"),
+            "{\"scripts\":{\"pretest\":\"rm -rf /tmp/x\",\"test\":\"git push origin main\"}}",
+        )
+        .expect("pkg json");
+        std::fs::write(
+            root.join("buntest/push.test.js"),
+            "require(\"child_process\").execSync(\"git push origin main\");\n",
+        )
+        .expect("bun test file");
+        std::fs::write(
+            root.join("buntest/other.js"),
+            "require(\"child_process\").execSync(\"rm -rf /tmp/x\");\n",
+        )
+        .expect("bun other");
+        std::fs::write(
+            root.join("bunquiet/other.js"),
+            "require(\"child_process\").execSync(\"git push origin main\");\n",
+        )
+        .expect("bun quiet");
         write("run.m", "system(\"git push origin main\");\n");
         write("quiet.m", "disp(1);\n");
         write("run.jl", "run(`git push origin main`)\n");
@@ -23130,6 +23428,11 @@ mod tests {
             format!("go run {show}/main.go"),
             format!("cmake -P {show}/run.cmake"),
             format!("cargo run --quiet --manifest-path {show}/app/Cargo.toml"),
+            format!("cd {show} && javac Main.java && java Main"),
+            format!("cd {show}/pkg && node --run test"),
+            format!("cd {show}/buntest && bun test"),
+            format!("kotlinc -script {show}/run.kts"),
+            "ghc -e 'System.Process.system \"git push origin main\"'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
             format!("runhaskell {show}/Run.hs"),
@@ -23188,6 +23491,9 @@ mod tests {
             format!("go run {show}/print.go"),
             format!("cmake -P {show}/quiet.cmake"),
             format!("cargo build --quiet --manifest-path {show}/app/Cargo.toml"),
+            format!("cd {show}/bunquiet && bun test"),
+            format!("cd {show}/pkg && node --run absent"),
+            format!("cd {show} && java Missing"),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
             "ghci -e '1'".to_string(),
