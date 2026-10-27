@@ -9657,6 +9657,7 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
 
 /// `mvn <phase>` runs antrun `<exec>` and the exec plugin bound to
 /// that phase or an earlier one. `command` is a shell string.
+/// `mvn exec:exec` runs the plugin configuration outside an execution.
 /// `mvn -v` and a run with no goal do not. `-f` selects the pom.
 #[allow(clippy::too_many_arguments)]
 fn score_maven<'a>(
@@ -9675,15 +9676,51 @@ fn score_maven<'a>(
     {
         return;
     }
-    let Some(reached) = maven_phase_reached(argv) else {
-        return;
-    };
     let path = maven_pom_path(argv, dir);
     let Ok(text) = std::fs::read_to_string(path) else {
         return;
     };
-    let commands = maven_exec_commands(&text, reached);
+    let mut commands = maven_phase_reached(argv)
+        .map(|reached| maven_exec_commands(&text, reached))
+        .unwrap_or_default();
+    if maven_direct_exec(argv) {
+        commands.extend(maven_direct_exec_commands(&text));
+    }
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn maven_direct_exec(argv: &[String]) -> bool {
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "-f" || arg == "--file" || arg == "-P" || arg == "-pl" || arg == "-s" {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "exec:exec" || (arg.contains("exec-maven-plugin") && arg.ends_with(":exec")) {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn maven_direct_exec_commands(pom: &str) -> Vec<String> {
+    let text = strip_xml_comments(pom);
+    let text = strip_xml_element(&text, "profiles");
+    let text = strip_xml_element(&text, "pluginManagement");
+    let text = strip_xml_element(&text, "execution");
+    let mut commands = Vec::new();
+    for plugin in xml_blocks(&text, "plugin") {
+        if let Some(command) = maven_plugin_executable(plugin) {
+            commands.push(command);
+        }
+    }
+    commands
 }
 
 const MAVEN_PHASES: &[&str] = &[
@@ -10061,6 +10098,18 @@ fn sbt_shell_commands(source: &str) -> Vec<(Option<String>, String)> {
                 index += 1;
             }
             let ident: String = chars[start..index].iter().collect();
+            if ident == "Process"
+                && let Some((command, end)) = sbt_process_invocation(&chars, index)
+            {
+                let owner = if depth == 0 {
+                    pending.clone()
+                } else {
+                    task.clone()
+                };
+                commands.push((owner, command));
+                index = end;
+                continue;
+            }
             let mut after = index;
             while after < chars.len() && chars[after].is_whitespace() {
                 after += 1;
@@ -10074,6 +10123,107 @@ fn sbt_shell_commands(source: &str) -> Vec<(Option<String>, String)> {
         index += 1;
     }
     commands
+}
+
+fn sbt_process_invocation(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+    index = sbt_skip_ws(chars, index);
+    if chars.get(index) != Some(&'(') {
+        return None;
+    }
+    index += 1;
+    index = sbt_skip_ws(chars, index);
+    let command = if matches!(chars.get(index), Some('"' | '`')) {
+        let (body, end) = sbt_quoted(chars, index)?;
+        index = end;
+        body
+    } else if sbt_word(chars, index, "Seq") {
+        index += 3;
+        index = sbt_skip_ws(chars, index);
+        if chars.get(index) != Some(&'(') {
+            return None;
+        }
+        index += 1;
+        let mut words = Vec::new();
+        loop {
+            index = sbt_skip_ws(chars, index);
+            match chars.get(index) {
+                Some(')') => {
+                    index += 1;
+                    break;
+                }
+                Some(',') => index += 1,
+                Some('"' | '`') => {
+                    let (word, end) = sbt_quoted(chars, index)?;
+                    if word.is_empty() {
+                        return None;
+                    }
+                    words.push(word);
+                    index = end;
+                }
+                _ => return None,
+            }
+        }
+        if words.is_empty() {
+            return None;
+        }
+        words.join(" ")
+    } else {
+        return None;
+    };
+    if command.is_empty() {
+        return None;
+    }
+    index = sbt_skip_ws(chars, index);
+    if chars.get(index) != Some(&')') {
+        return None;
+    }
+    index += 1;
+    index = sbt_skip_ws(chars, index);
+    if chars.get(index) == Some(&'.') && chars.get(index + 1) == Some(&'!') {
+        Some((command, index + 2))
+    } else {
+        None
+    }
+}
+
+fn sbt_skip_ws(chars: &[char], mut index: usize) -> usize {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    index
+}
+
+fn sbt_word(chars: &[char], index: usize, word: &str) -> bool {
+    let got: String = chars
+        .iter()
+        .skip(index)
+        .take(word.chars().count())
+        .collect();
+    if got != word {
+        return false;
+    }
+    !chars
+        .get(index + word.chars().count())
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+}
+
+fn sbt_quoted(chars: &[char], mut index: usize) -> Option<(String, usize)> {
+    let quote = *chars.get(index)?;
+    index += 1;
+    let mut body = String::new();
+    while index < chars.len() && chars[index] != quote {
+        if chars[index] == '\\' && index + 1 < chars.len() {
+            body.push(chars[index + 1]);
+            index += 2;
+            continue;
+        }
+        body.push(chars[index]);
+        index += 1;
+    }
+    if index >= chars.len() {
+        return None;
+    }
+    Some((body, index + 1))
 }
 
 /// `brew ruby -e` and `brew ruby file.rb` run that Ruby. `puts` does not
@@ -29033,6 +29183,50 @@ mod tests {
             Some("git.push")
         );
         assert_eq!(kind(&format!("cd {app_s} && brew ruby puts.rb")), None);
+        std::fs::write(
+            app.join("pom.xml"),
+            r#"<project><modelVersion>4.0.0</modelVersion><groupId>g</groupId><artifactId>a</artifactId><version>0</version><build><plugins><plugin><groupId>org.codehaus.mojo</groupId><artifactId>exec-maven-plugin</artifactId><configuration><executable>git</executable><arguments><argument>push</argument><argument>origin</argument><argument>main</argument></arguments></configuration></plugin></plugins></build></project>"#,
+        )
+        .expect("direct exec");
+        assert_eq!(kind(&format!("cd {app_s} && mvn -q validate")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && mvn -q exec:exec")),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!(
+                "cd {app_s} && mvn -q org.codehaus.mojo:exec-maven-plugin:3.5.0:exec"
+            )),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = Process(\"git push origin main\").!\n",
+        )
+        .expect("process");
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "val ran = Process(Seq(\"git\", \"push\", \"origin\", \"main\")).!\n",
+        )
+        .expect("seq");
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch about")),
+            Some("git.push")
+        );
+        std::fs::write(
+            app.join("build.sbt"),
+            "extra := {\n  Process(\"git push origin main\").!\n}\n",
+        )
+        .expect("task process");
+        assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
+        assert_eq!(
+            kind(&format!("cd {app_s} && sbt -batch extra")),
+            Some("git.push")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
