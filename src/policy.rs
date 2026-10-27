@@ -951,13 +951,40 @@ fn consider_segment<'a>(
             // `bash script` starts a new process. `source script` is handled
             // below, in this shell. `cat`, `head`, and `tail` score the text
             // they would print.
-            score_shell_file(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_makefile(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_shell_file(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_makefile(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_just_recipe(policy, tool_name, &executed.argv, depth, local, git, best);
             score_uv_run(policy, tool_name, &executed.argv, depth, local, git, best);
             score_swift_script(policy, tool_name, &executed.argv, depth, local, git, best);
-            score_awk_program(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_awk_program(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_osascript(policy, tool_name, &executed.argv, depth, local, git, best);
             score_bun_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_expect_script(policy, tool_name, &executed.argv, depth, local, git, best);
@@ -2301,6 +2328,7 @@ fn score_ps_input<'a>(
 }
 
 /// `bash path` and `sh path` run that file in a new process.
+#[allow(clippy::too_many_arguments)]
 fn score_shell_file<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -2308,12 +2336,13 @@ fn score_shell_file<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(path) = shell_file_operand(argv) else {
         return;
     };
-    let Some(loaded) = load_script_file(path) else {
+    let Some(loaded) = load_script_file(&shell_path(path, dir)) else {
         return;
     };
     match loaded {
@@ -8027,6 +8056,7 @@ fn quoted_call(text: &str, name: &str, comments: &[char]) -> Vec<String> {
     commands
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_awk_program<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -8034,9 +8064,10 @@ fn score_awk_program<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let programs = awk_programs(argv);
+    let programs = awk_programs(argv, dir);
     let mut commands = Vec::new();
     for program in &programs {
         commands.extend(awk_systems(program));
@@ -8044,7 +8075,7 @@ fn score_awk_program<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-fn awk_programs(argv: &[String]) -> Vec<String> {
+fn awk_programs(argv: &[String], dir: Option<&str>) -> Vec<String> {
     let Some(first) = argv.first() else {
         return Vec::new();
     };
@@ -8064,7 +8095,7 @@ fn awk_programs(argv: &[String]) -> Vec<String> {
             saw_file = true;
             index += 1;
             if let Some(path) = argv.get(index)
-                && let Some(ScriptFile::Text(text)) = load_script_file(path)
+                && let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir))
             {
                 programs.push(text);
             }
@@ -8073,7 +8104,7 @@ fn awk_programs(argv: &[String]) -> Vec<String> {
         }
         if let Some(path) = arg.strip_prefix("-f").filter(|path| !path.is_empty()) {
             saw_file = true;
-            if let Some(ScriptFile::Text(text)) = load_script_file(path) {
+            if let Some(ScriptFile::Text(text)) = load_script_file(&shell_path(path, dir)) {
                 programs.push(text);
             }
             index += 1;
@@ -9523,6 +9554,7 @@ fn zsh_startup_file(argv: &[String], env: &[(String, String)]) -> Option<String>
 /// `make -f file` runs the tab recipes in that file. `make -n` only
 /// prints them. With no `-f`, GNU make reads `GNUmakefile`, then
 /// `makefile`, then `Makefile`.
+#[allow(clippy::too_many_arguments)]
 fn score_makefile<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -9530,12 +9562,13 @@ fn score_makefile<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
-    let Some(path) = make_file(argv) else {
+    let Some(path) = make_file(argv, dir) else {
         return;
     };
-    let Some(loaded) = load_script_file(path) else {
+    let Some(loaded) = load_script_file(&path) else {
         return;
     };
     match loaded {
@@ -9557,7 +9590,7 @@ fn score_makefile<'a>(
     }
 }
 
-fn make_file(argv: &[String]) -> Option<&str> {
+fn make_file(argv: &[String], dir: Option<&str>) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("make") && !base.eq_ignore_ascii_case("gmake") {
         return None;
@@ -9598,10 +9631,11 @@ fn make_file(argv: &[String]) -> Option<&str> {
         index += 1;
     }
     if let Some(path) = file.filter(|path| !path.is_empty()) {
-        return Some(path);
+        return Some(shell_path(path, dir));
     }
     ["GNUmakefile", "makefile", "Makefile"]
         .into_iter()
+        .map(|name| shell_path(name, dir))
         .find(|name| load_script_file(name).is_some())
 }
 
@@ -24193,6 +24227,8 @@ mod tests {
         );
         write("run.awk", "BEGIN { system(\"git push origin main\") }\n");
         write("push.awk", "BEGIN { system(\"git push origin main\") }\n");
+        write("push.sh", "git push origin main\n");
+        write("Makefile", "push:\n\tgit push origin main\n");
         write("print.awk", "BEGIN { print \"git push origin main\" }\n");
         write("run.scpt", "do shell script \"git push origin main\"\n");
         write("mod.py", "import os\nos.system(\"git push origin main\")\n");
@@ -24434,6 +24470,10 @@ mod tests {
             format!("cd {show}/empty-lib && perl -I.. -MPush -e 0"),
             format!("cd {show}/empty-lib && ruby -I.. -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && AWKPATH=.. awk -f push.awk"),
+            format!("cd {show}/empty-lib && bash ../push.sh"),
+            format!("cd {show}/empty-lib && sh ../push.sh"),
+            format!("cd {show}/empty-lib && awk -f ../push.awk"),
+            format!("cd {show}/empty-lib && make -f ../Makefile push"),
             format!("cd {show}/empty-lib && ruby -r../push.rb -e 0"),
             format!("cd {show}/empty-lib && lua ../push.lua"),
             format!("cd {show}/empty-lib && perl ../push.pl"),
@@ -24535,6 +24575,8 @@ mod tests {
             format!("cd {show}/empty-lib && perl -I.. -MMissing -e 0"),
             format!("cd {show}/empty-lib && ruby -I.. -e 'require \"missing\"'"),
             format!("cd {show}/empty-lib && AWKPATH=.. awk -f missing.awk"),
+            format!("cd {show}/empty-lib && bash ../missing.sh"),
+            format!("cd {show}/empty-lib && make -n -f ../Makefile push"),
             format!("cd {show}/empty-lib && lua ../missing.lua"),
             format!("cd {show}/empty-lib && R_PROFILE_USER=../push.R R --vanilla --no-save -e '1'"),
             format!("PYTHONPATH='{show}/empty-lib' python3 -c 'import push'"),
