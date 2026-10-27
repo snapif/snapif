@@ -1072,6 +1072,46 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_node_test(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_go_test_package(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_rake(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
+            score_cargo_build_script(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_ansible_playbook(
                 policy,
                 tool_name,
@@ -8318,20 +8358,43 @@ fn rust_command_at(chars: &[char], mut cursor: usize) -> Option<(Vec<String>, us
         words.push(program);
     }
     cursor = end;
-    while cursor < chars.len() && chars[cursor].is_whitespace() {
-        cursor += 1;
-    }
-    if starts_with(chars, cursor, ".args") {
-        cursor += ".args".len();
+    loop {
         while cursor < chars.len() && chars[cursor].is_whitespace() {
             cursor += 1;
         }
-        if chars.get(cursor) == Some(&'(')
-            && let Some((args_inner, args_end)) = balanced(chars, cursor, '(', ')')
-        {
-            words.extend(rust_string_list(&args_inner));
-            end = args_end;
+        if starts_with(chars, cursor, ".args") {
+            cursor += ".args".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(')
+                && let Some((args_inner, args_end)) = balanced(chars, cursor, '(', ')')
+            {
+                words.extend(rust_string_list(&args_inner));
+                cursor = args_end;
+                end = args_end;
+                continue;
+            }
+            break;
         }
+        if starts_with(chars, cursor, ".arg") {
+            cursor += ".arg".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(')
+                && let Some((arg_inner, arg_end)) = balanced(chars, cursor, '(', ')')
+            {
+                if let Some(word) = arg_string(arg_inner.trim()) {
+                    words.push(word);
+                }
+                cursor = arg_end;
+                end = arg_end;
+                continue;
+            }
+            break;
+        }
+        break;
     }
     Some((words, end))
 }
@@ -11136,11 +11199,45 @@ fn pytest_files(argv: &[String], dir: Option<&str>) -> Vec<String> {
     if !selected {
         return Vec::new();
     }
-    script_positionals(argv)
+    let explicit: Vec<String> = script_positionals(argv)
         .into_iter()
         .filter(|word| word.ends_with(".py"))
         .map(|word| shell_path(&word, dir))
-        .collect()
+        .collect();
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let mut found = Vec::new();
+    pytest_walk(&shell_dir(dir), &mut found, 0);
+    found
+}
+
+fn pytest_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "node_modules"
+            || name == ".git"
+            || name == "__pycache__"
+            || name == ".pytest_cache"
+        {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            pytest_walk(&path, found, depth + 1);
+            continue;
+        }
+        if name.ends_with("_test.py") || (name.starts_with("test_") && name.ends_with(".py")) {
+            found.push(path.display().to_string());
+        }
+    }
 }
 
 fn python_module_is(argv: &[String], module: &str) -> bool {
@@ -11187,6 +11284,265 @@ fn yaml_scalar(value: &str) -> String {
         }
     }
     value.to_string()
+}
+
+/// `node --test` runs `*.test.js`, `*_test.js`, `*-test.js`, `test-*.js`,
+/// and `test.js`, including in subdirectories. `node_modules` is skipped.
+/// `test_*.js` is not collected.
+#[allow(clippy::too_many_arguments)]
+fn score_node_test<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("node") {
+        return;
+    }
+    if !argv.iter().any(|arg| arg == "--test") {
+        return;
+    }
+    let mut files = Vec::new();
+    node_test_walk(&shell_dir(dir), &mut files, 0);
+    let mut commands = Vec::new();
+    for path in files {
+        if let Some(text) = load_text(&path) {
+            commands.extend(interpreter_commands(HostLang::Node, &text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn node_test_walk(dir: &std::path::Path, found: &mut Vec<String>, depth: u32) {
+    if depth > 8 || found.len() >= 64 {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name == "node_modules" || name == ".git" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            node_test_walk(&path, found, depth + 1);
+            continue;
+        }
+        if node_test_name(&name) {
+            found.push(path.display().to_string());
+        }
+    }
+}
+
+fn node_test_name(name: &str) -> bool {
+    name == "test.js"
+        || name.ends_with(".test.js")
+        || name.ends_with("_test.js")
+        || name.ends_with("-test.js")
+        || (name.starts_with("test-") && name.ends_with(".js"))
+}
+
+/// `go test` runs `exec.Command` in every `.go` file of the package
+/// directory, including `init`. Another package path is left alone.
+#[allow(clippy::too_many_arguments)]
+fn score_go_test_package<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("go") {
+        return;
+    }
+    if argv.iter().any(|arg| arg == "-c") {
+        return;
+    }
+    let words = script_positionals(argv);
+    if words.first().map(String::as_str) != Some("test") {
+        return;
+    }
+    if words.iter().skip(1).any(|word| word != ".") {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(shell_dir(dir)) else {
+        return;
+    };
+    let mut commands = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".go") {
+            continue;
+        }
+        if let Some(text) = load_text(&entry.path().display().to_string()) {
+            commands.extend(go_commands(&text));
+        }
+    }
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+/// `rake` runs `sh` in the `default` task. `rake name` runs that task.
+/// A missing task runs nothing.
+#[allow(clippy::too_many_arguments)]
+fn score_rake<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("rake") {
+        return;
+    }
+    if argv.iter().skip(1).any(|arg| arg.starts_with('-')) {
+        return;
+    }
+    let words = script_positionals(argv);
+    let task = words.first().map(String::as_str).unwrap_or("default");
+    let path = shell_dir(dir).join("Rakefile");
+    let Some(text) = load_text(&path.display().to_string()) else {
+        return;
+    };
+    let Some(body) = rake_task_body(&text, task) else {
+        return;
+    };
+    let commands = call_strings(&strip_hash_comments(&body), "sh");
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn rake_task_body(text: &str, task: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut index = 0usize;
+    while index < lines.len() {
+        if let Some(name) = rake_task_name(lines[index]) {
+            index += 1;
+            let mut body = String::new();
+            while index < lines.len() && lines[index].trim() != "end" {
+                body.push_str(lines[index]);
+                body.push('\n');
+                index += 1;
+            }
+            if name == task {
+                return Some(body);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn rake_task_name(line: &str) -> Option<String> {
+    let line = line.trim();
+    if line.starts_with('#') {
+        return None;
+    }
+    let rest = line.strip_prefix("task ")?.trim();
+    let rest = rest.strip_prefix(':')?;
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+fn strip_hash_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            out.extend(chars[index..end].iter());
+            index = end;
+            continue;
+        }
+        if chars[index] == '#' {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    out
+}
+
+/// `cargo build`, `check`, `run`, and `test` run `build.rs`.
+#[allow(clippy::too_many_arguments)]
+fn score_cargo_build_script<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(package) = cargo_package_dir(argv, dir) else {
+        return;
+    };
+    let Some(text) = load_text(&package.join("build.rs").display().to_string()) else {
+        return;
+    };
+    let commands = rust_commands(&text);
+    scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+}
+
+fn cargo_package_dir(argv: &[String], dir: Option<&str>) -> Option<std::path::PathBuf> {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("cargo"))
+    {
+        return None;
+    }
+    let mut manifest = None;
+    let mut builds = false;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg == "--" {
+            break;
+        }
+        if arg == "--manifest-path" {
+            index += 1;
+            manifest = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        if let Some(path) = arg.strip_prefix("--manifest-path=")
+            && !path.is_empty()
+        {
+            manifest = Some(path.to_string());
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if matches!(arg, "build" | "check" | "run" | "test") {
+            builds = true;
+        }
+        index += 1;
+    }
+    if !builds {
+        return None;
+    }
+    let manifest = shell_path(manifest.as_deref().unwrap_or("Cargo.toml"), dir);
+    Some(std::path::Path::new(&manifest).parent()?.to_path_buf())
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -26145,6 +26501,105 @@ mod tests {
         for (command, want) in cases {
             assert_eq!(kind(&command), want, "{command}");
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no file argument, pytest, `python3 -m pytest`, and
+    /// `node --test` run the tests they discover. `go test` runs
+    /// `exec.Command` in the package directory. `rake` runs `sh` in
+    /// the named task, or `default`. `cargo build`, `check`, `run`,
+    /// and `test` run `build.rs`.
+    #[test]
+    fn discovered_programs_score_the_command_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-disc-{}", std::process::id()));
+        let py = root.join("py");
+        let nested = py.join("sub");
+        let hidden = py.join("node_modules").join("pkg");
+        let js = root.join("js");
+        let js_hidden = js.join("node_modules").join("pkg");
+        let gomod = root.join("gomod");
+        let rk = root.join("rk");
+        let cg = root.join("cg");
+        for dir in [&py, &nested, &hidden, &js, &js_hidden, &gomod, &rk, &cg] {
+            std::fs::create_dir_all(dir).expect("dir");
+        }
+        let push = "import os\ndef test_h():\n    os.system(\"git push origin main\")\n";
+        let quiet = "def test_h():\n    print(\"git push origin main\")\n";
+        std::fs::write(py.join("test_quiet.py"), quiet).expect("py");
+        std::fs::write(py.join("plain.py"), push).expect("plain");
+        std::fs::write(hidden.join("test_hidden.py"), push).expect("hidden");
+        std::fs::write(nested.join("check_test.py"), push).expect("nest");
+        let js_push =
+            "require(\"child_process\").execFileSync(\"git\", [\"push\", \"origin\", \"main\"]);\n";
+        std::fs::write(
+            js.join("test.js"),
+            "console.log(\"git push origin main\")\n",
+        )
+        .expect("js");
+        std::fs::write(js.join("test_foo.js"), js_push).expect("underscored");
+        std::fs::write(js_hidden.join("hidden.test.js"), js_push).expect("nm");
+        std::fs::write(js.join("push.test.js"), js_push).expect("testjs");
+        std::fs::write(
+            gomod.join("plain.go"),
+            "package gomod\nimport \"os/exec\"\nfunc init() { exec.Command(\"git\", \"push\", \"origin\", \"main\").Run() }\n",
+        )
+        .expect("go");
+        std::fs::write(
+            gomod.join("plain_test.go"),
+            "package gomod\nimport \"testing\"\nfunc TestQuiet(t *testing.T) {}\n",
+        )
+        .expect("gotest");
+        std::fs::write(
+            rk.join("Rakefile"),
+            "task :default do\n  sh \"echo ok\"\nend\ntask :demo do\n  sh \"git push origin main\"\nend\n",
+        )
+        .expect("rake");
+        std::fs::write(
+            cg.join("build.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("build");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let py_s = py.display().to_string();
+        let js_s = js.display().to_string();
+        let go_s = gomod.display().to_string();
+        let rk_s = rk.display().to_string();
+        let cg_s = cg.display().to_string();
+        let cases = [
+            (format!("cd {py_s} && pytest -q"), Some("git.push")),
+            (
+                format!("cd {py_s} && python3 -m pytest -q"),
+                Some("git.push"),
+            ),
+            (format!("cd {js_s} && node --test"), Some("git.push")),
+            (format!("cd {go_s} && go test"), Some("git.push")),
+            (format!("cd {go_s} && go build"), None),
+            (format!("cd {rk_s} && rake"), None),
+            (format!("cd {rk_s} && rake demo"), Some("git.push")),
+            (format!("cd {rk_s} && rake missing"), None),
+            (format!("cd {cg_s} && cargo build -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo check -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo test -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo run -q"), Some("git.push")),
+            (format!("cd {cg_s} && cargo metadata"), None),
+        ];
+        for (command, want) in cases {
+            assert_eq!(kind(&command), want, "{command}");
+        }
+        let py_only = root.join("pyonly");
+        let py_nm = py_only.join("node_modules").join("pkg");
+        std::fs::create_dir_all(&py_nm).expect("pyonly");
+        std::fs::write(py_only.join("test_quiet.py"), quiet).expect("quiet");
+        std::fs::write(py_nm.join("test_hidden.py"), push).expect("hid");
+        let py_only_s = py_only.display().to_string();
+        let ignored = format!("cd {py_only_s} && pytest -q");
+        assert_eq!(kind(&ignored), None, "{ignored}");
+        std::fs::write(js.join("push.test.js"), "console.log(1)\n").expect("quietjs");
+        std::fs::write(js.join("test.js"), "console.log(1)\n").expect("quiettest");
+        let only_hidden = format!("cd {js_s} && node --test");
+        assert_eq!(kind(&only_hidden), None, "{only_hidden}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
