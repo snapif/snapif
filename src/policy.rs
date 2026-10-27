@@ -991,6 +991,7 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_ansible(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_scripts(policy, tool_name, &executed.argv, depth, local, git, best);
             score_package_exec(
                 policy,
@@ -10472,6 +10473,59 @@ fn vim_script_shells(path: &str) -> Vec<String> {
         return Vec::new();
     };
     text.lines().filter_map(vim_shell).collect()
+}
+
+/// `ansible -m command -a cmd` and `-m shell -a cmd` run `cmd`.
+/// `ansible -m ping` does not.
+fn score_ansible<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    if !command_basename(argv.first().unwrap_or(&String::new())).eq_ignore_ascii_case("ansible") {
+        return;
+    }
+    let mut module = None;
+    let mut args = None;
+    let mut index = 1usize;
+    while index < argv.len() {
+        let token = argv[index].as_str();
+        if token == "-m" {
+            index += 1;
+            module = argv.get(index).map(String::as_str);
+            index += 1;
+            continue;
+        }
+        if token == "-a" {
+            index += 1;
+            args = argv.get(index).cloned();
+            index += 1;
+            continue;
+        }
+        index += 1;
+    }
+    let Some(module) = module else {
+        return;
+    };
+    if module != "command" && module != "shell" {
+        return;
+    }
+    let Some(args) = args.filter(|args| !args.is_empty()) else {
+        return;
+    };
+    scan_isolated(
+        policy,
+        tool_name,
+        std::slice::from_ref(&args),
+        depth,
+        local,
+        git,
+        best,
+    );
 }
 
 fn shell_opt_takes_value(token: &str) -> bool {
@@ -25223,6 +25277,27 @@ mod tests {
             assert_eq!(kind(&command), want, "{command}");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `ansible -m command -a` and `-m shell -a` run that string.
+    /// `ansible -m ping` does not.
+    #[test]
+    fn ansible_command_scores_the_module_args() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let push = "git push origin main";
+        assert_eq!(
+            kind(&format!(
+                "ansible localhost -i localhost, -c local -m command -a '{push}'"
+            )),
+            Some("git.push")
+        );
+        assert_eq!(
+            kind(&format!("ansible localhost -m shell -a '{push}'")),
+            Some("git.push")
+        );
+        assert_eq!(kind("ansible localhost -m ping"), None);
     }
 
     /// The host ran these interpreters and package scripts. A file that
