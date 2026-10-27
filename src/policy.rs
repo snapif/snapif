@@ -655,10 +655,16 @@ fn check_action(
 /// `powershell -File script.ps1 -Command rm` does not match when
 /// `script.ps1` is missing. When the file exists, its body is scored
 /// and the later `-Command` is not the engine command. `-File` and
-/// `-f` read the first operand. `powershell -Command` of `& path` and
-/// of `Invoke-Expression (Get-Content -Raw path)` read that file.
-/// `Get-Content` without `-Raw` does not. `cmd /c` of a `.bat` or
-/// `.cmd` path reads the file, and `call` of that path does too.
+/// `-f` read the first operand. `-File -` reads the heredoc or the
+/// `< path` redirect, not a file named `-`. `powershell -Command` of
+/// a `.ps1` path reads that file. Arguments after the path stay
+/// arguments. `& path` reads that file. `Invoke-Expression` of
+/// `Get-Content -Raw` reads that file when `-Raw` is before or after
+/// the path, and when the same `Get-Content` is piped into
+/// `Invoke-Expression`. `Get-Content` without `-Raw`, and `iex`, do
+/// not. `-Command -` reads the heredoc and a `< path` redirect.
+/// `cmd /c` of a `.bat` or `.cmd` path reads the file, and `call`
+/// of that path does too.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -866,10 +872,13 @@ fn consider_segment<'a>(
             } else if is_stdin_script(&script)
                 && is_powershell_base(executed.argv.first().map(String::as_str))
             {
-                scan_isolated(
+                score_ps_input(
                     policy,
                     tool_name,
-                    &segment.heredocs,
+                    PsInput {
+                        heredocs: &segment.heredocs,
+                        stdin_file: segment.stdin_file.as_deref(),
+                    },
                     depth,
                     local,
                     git,
@@ -880,7 +889,22 @@ fn consider_segment<'a>(
                 run_detached(&script, &mut child, best);
             }
         } else if let Some(path) = powershell_file_operand(&executed.argv) {
-            score_script_path(policy, tool_name, path, depth, local, git, best);
+            if path == "-" {
+                score_ps_input(
+                    policy,
+                    tool_name,
+                    PsInput {
+                        heredocs: &segment.heredocs,
+                        stdin_file: segment.stdin_file.as_deref(),
+                    },
+                    depth,
+                    local,
+                    git,
+                    best,
+                );
+            } else {
+                score_script_path(policy, tool_name, path, depth, local, git, best);
+            }
         } else if let Some(scripts) =
             eval_script(&executed.argv, &executed.in_eval, scope, exported, local)
         {
@@ -2167,6 +2191,28 @@ fn score_script_path<'a>(
         }
         Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
         None => {}
+    }
+}
+
+struct PsInput<'a> {
+    heredocs: &'a [String],
+    stdin_file: Option<&'a str>,
+}
+
+/// PowerShell `-Command -` and `-File -` read the heredoc and a
+/// `< path` redirect. The dash is not a file name.
+fn score_ps_input<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    input: PsInput<'_>,
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    best: &mut Option<&'a ActionId>,
+) {
+    scan_isolated(policy, tool_name, input.heredocs, depth, local, git, best);
+    if let Some(path) = input.stdin_file {
+        score_script_path(policy, tool_name, path, depth, local, git, best);
     }
 }
 
@@ -4355,14 +4401,51 @@ fn powershell_file_operand(argv: &[String]) -> Option<&str> {
     None
 }
 
-/// `& path` and `Invoke-Expression (Get-Content -Raw path)` run that file.
-/// Other `Get-Content` shapes are not this.
+/// `& path`, a `.ps1` path, and `Invoke-Expression` of `Get-Content -Raw`
+/// run that file. `iex` and `Get-Content` without `-Raw` do not.
 fn powershell_launched_file(argv: &[String], script: &str) -> Option<String> {
     let base = command_basename(argv.first()?);
     if !base.eq_ignore_ascii_case("powershell") && !base.eq_ignore_ascii_case("pwsh") {
         return None;
     }
-    ps_call_file(script).or_else(|| ps_iex_raw_file(script))
+    ps_call_file(script)
+        .or_else(|| ps_iex_raw_file(script))
+        .or_else(|| ps_command_script_path(script))
+}
+
+fn is_ps1_file(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    let name = name.trim_end_matches([' ', '\t']);
+    std::path::Path::new(name)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("ps1"))
+}
+
+/// `-Command path.ps1` runs that file, including a quoted path that
+/// contains spaces. A later `;`, `|`, or `&` is a second statement,
+/// so this stays out of the way and the text scan still sees it.
+fn ps_command_script_path(script: &str) -> Option<String> {
+    let script = script.trim();
+    if script
+        .chars()
+        .any(|ch| matches!(ch, ';' | '|' | '&' | '<' | '>'))
+    {
+        return None;
+    }
+    if is_ps1_file(script) {
+        return Some(script.to_string());
+    }
+    let (path, rest) = take_ps_literal(script)?;
+    if !is_ps1_file(&path) {
+        return None;
+    }
+    if !rest.trim().is_empty() && path.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(path)
 }
 
 fn ps_call_file(script: &str) -> Option<String> {
@@ -4381,16 +4464,48 @@ fn ps_call_file(script: &str) -> Option<String> {
 }
 
 fn ps_iex_raw_file(script: &str) -> Option<String> {
+    ps_iex_call(script).or_else(|| ps_iex_pipeline(script))
+}
+
+fn ps_iex_call(script: &str) -> Option<String> {
     let rest = split_ps_name(script, "invoke-expression")?;
     let rest = rest.trim_start().strip_prefix('(')?.trim_start();
     let rest = split_ps_name(rest, "get-content")?;
-    let rest = split_ps_name(rest.trim_start(), "-raw")?;
-    let (path, rest) = take_ps_literal(rest)?;
+    let (path, rest) = ps_get_content_raw_args(rest)?;
     let rest = rest.trim_start().strip_prefix(')')?;
-    if path.is_empty() || !rest.trim().is_empty() {
+    if !rest.trim().is_empty() {
         return None;
     }
     Some(path)
+}
+
+fn ps_iex_pipeline(script: &str) -> Option<String> {
+    let rest = split_ps_name(script, "get-content")?;
+    let (path, rest) = ps_get_content_raw_args(rest)?;
+    let rest = rest.trim_start().strip_prefix('|')?.trim_start();
+    let rest = split_ps_name(rest, "invoke-expression")?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(path)
+}
+
+/// `-Raw` may sit before the path or after it. Both run the file.
+fn ps_get_content_raw_args(text: &str) -> Option<(String, &str)> {
+    let text = text.trim_start();
+    if let Some(rest) = split_ps_name(text, "-raw") {
+        let (path, rest) = take_ps_literal(rest)?;
+        if path.is_empty() {
+            return None;
+        }
+        return Some((path, rest));
+    }
+    let (path, rest) = take_ps_literal(text)?;
+    if path.is_empty() || path.starts_with('-') {
+        return None;
+    }
+    let rest = split_ps_name(rest, "-raw")?;
+    Some((path, rest))
 }
 
 fn split_ps_name<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -16995,6 +17110,8 @@ mod tests {
             "pwsh -set C:\\x.json -Command rm -rf /tmp/x",
             "pwsh -NoProfile -Command - <<'EOF'\nrm -rf /tmp/x\nEOF",
             "powershell -c - <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "pwsh -File - <<'EOF'\nrm -rf /tmp/x\nEOF",
+            "powershell -File - <<'EOF'\nrm -rf /tmp/x\nEOF",
         ];
         for command in rm {
             assert_eq!(
@@ -19738,6 +19855,9 @@ mod tests {
             for name in names {
                 std::fs::write(dir.join(name), body).expect(name);
             }
+            let spaced = dir.join("Program Files");
+            std::fs::create_dir_all(&spaced).expect("spaced");
+            std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
             let shown = dir.display().to_string().replace('/', "\\");
             (
                 HostFiles {
@@ -19754,6 +19874,9 @@ mod tests {
             for name in names {
                 std::fs::write(dir.join(name), body).expect(name);
             }
+            let spaced = dir.join("Program Files");
+            std::fs::create_dir_all(&spaced).expect("spaced");
+            std::fs::write(spaced.join("payload.ps1"), body).expect("spaced ps1");
             let previous = std::env::current_dir().expect("cwd");
             std::env::set_current_dir(&root).expect("chdir");
             (
@@ -19798,6 +19921,25 @@ mod tests {
             format!("pwsh {ps1} -Command rm -rf /tmp/x"),
             format!("powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& '{ps1}'\""),
             format!("powershell -Command \"Invoke-Expression (Get-Content -Raw '{ps1}')\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content '{ps1}' -Raw)\""),
+            format!("powershell -Command \"Get-Content -Raw '{ps1}' | Invoke-Expression\""),
+            format!("powershell -Command \"Get-Content '{ps1}' -Raw | Invoke-Expression\""),
+            format!("powershell {ps1}"),
+            format!("powershell -Command {ps1}"),
+            format!("powershell -Command '{ps1}'"),
+            format!("powershell -Command \"{ps1}\""),
+            format!("pwsh -NoProfile -Command {ps1}"),
+            format!("pwsh -NoProfile -Command {ps1} arg"),
+            format!(
+                "powershell -Command '{}'",
+                path("Program Files\\payload.ps1")
+            ),
+            format!(
+                "powershell -Command \"{}\"",
+                path("Program Files\\payload.ps1")
+            ),
+            format!("pwsh -NoProfile -Command - < '{ps1}'"),
+            format!("powershell -Command - < '{ps1}'"),
             format!("cmd.exe /d /c {bat}"),
             format!("cmd /c {bat}"),
             format!("cmd.exe /d /c \"{bat}\""),
@@ -19826,7 +19968,11 @@ mod tests {
             format!("powershell -Command \"iex (Get-Content -Raw '{ps1}')\""),
             format!("cmd /c {bat}.missing"),
             format!("cmd /c call {bat}.missing"),
-            format!("powershell {ps1}"),
+            format!("powershell -Command \"{ps1}.missing\""),
+            format!("powershell -Command \"Get-Content -Raw '{ps1}'\""),
+            format!("powershell -Command \"Get-Content -Raw '{ps1}.missing' | Invoke-Expression\""),
+            format!("powershell -Command \"Invoke-Expression (Get-Content '{ps1}.missing' -Raw)\""),
+            format!("pwsh -Command - < '{ps1}.missing'"),
             "pwsh rm -rf /tmp/x".to_string(),
         ];
         for command in &quiet {
