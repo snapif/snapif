@@ -13063,7 +13063,8 @@ fn score_crystal<'a>(
     scan_isolated(policy, tool_name, &commands, depth, local, git, best);
 }
 
-/// `nim c -r` and `nim r` run `execCmd`. `nim c` runs `staticExec`
+/// `nim c -r`, `nim cpp -r`, and `nim r` run `execCmd`. `nim c` and
+/// `nim cpp` run `staticExec`
 /// while compiling and does not run `execCmd`. Every `config.nims`
 /// from the source file's directory up to the root runs `exec`.
 /// `name.nims` beside `name.nim` runs `exec` too.
@@ -13172,7 +13173,7 @@ fn nim_script(argv: &[String], dir: Option<&str>) -> Option<(bool, String)> {
         index += 1;
     }
     let command = command?;
-    if command != "c" && command != "r" {
+    if command != "c" && command != "cpp" && command != "r" {
         return None;
     }
     let file = file?;
@@ -30346,14 +30347,18 @@ mod tests {
         .expect("nim");
         let nim_s = nim.display().to_string();
         assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim cpp -r {nim_s}")), Some("git.push"));
         assert_eq!(kind(&format!("nim r {nim_s}")), Some("git.push"));
         assert_eq!(kind(&format!("nim c {nim_s}")), None);
+        assert_eq!(kind(&format!("nim cpp {nim_s}")), None);
+        assert_eq!(kind(&format!("nim js -r {nim_s}")), None);
         std::fs::write(
             &nim,
             "static:\n  echo staticExec(\"git push origin main\")\n",
         )
         .expect("static nim");
         assert_eq!(kind(&format!("nim c {nim_s}")), Some("git.push"));
+        assert_eq!(kind(&format!("nim cpp {nim_s}")), Some("git.push"));
         assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
         std::fs::write(
             &nim,
