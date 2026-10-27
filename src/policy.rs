@@ -984,6 +984,8 @@ fn consider_segment<'a>(
             scan_isolated(policy, tool_name, &kotlin, depth, local, git, best);
             let lua_modules = lua_module_commands(&executed.argv, host_dir);
             scan_isolated(policy, tool_name, &lua_modules, depth, local, git, best);
+            let loaded = inline_loaded_commands(&executed.argv, host_dir);
+            scan_isolated(policy, tool_name, &loaded, depth, local, git, best);
             score_cmake_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_sbcl_script(policy, tool_name, &executed.argv, depth, local, git, best);
             score_interpreter(
@@ -6371,6 +6373,177 @@ fn lua_module_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
         }
     }
     commands
+}
+
+fn inline_loaded_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
+    let Some(first) = argv.first() else {
+        return Vec::new();
+    };
+    let Some(lang) = host_lang(first) else {
+        return Vec::new();
+    };
+    let mut commands = Vec::new();
+    for text in inline_code(lang, argv) {
+        for raw in load_paths(lang, &text) {
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(interpreter_commands(lang, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn inline_code(lang: HostLang, argv: &[String]) -> Vec<String> {
+    let flags: &[&str] = match lang {
+        HostLang::Python => &["-c"],
+        HostLang::Node | HostLang::Ruby | HostLang::Perl | HostLang::Lua => &["-e"],
+        _ => return Vec::new(),
+    };
+    let mut texts = Vec::new();
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if flags.contains(&arg) {
+            index += 1;
+            if let Some(code) = argv.get(index) {
+                texts.push(code.clone());
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(lang, HostLang::Node)
+            && let Some(code) = arg.strip_prefix("--eval=").filter(|code| !code.is_empty())
+        {
+            texts.push(code.to_string());
+        }
+        index += 1;
+    }
+    texts
+}
+
+fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
+    match lang {
+        HostLang::Lua => call_strings(text, "dofile"),
+        HostLang::Ruby => call_strings(text, "load"),
+        HostLang::Node => call_strings(text, "require")
+            .into_iter()
+            .filter(|path| path.contains('/') || path.contains('\\'))
+            .collect(),
+        HostLang::Python => python_exec_opens(text),
+        HostLang::Perl => call_strings(text, "do")
+            .into_iter()
+            .filter(|path| path.contains('/') || path.contains('\\'))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn call_strings(text: &str, word: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, word) {
+            let mut cursor = index + word.len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(') {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+            }
+            if let Some((path, _)) = read_quoted(&chars, cursor)
+                && !path.is_empty()
+            {
+                paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn python_exec_opens(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "open") && exec_before_open(&chars, index) {
+            let mut cursor = index + "open".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'(') {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+            }
+            if let Some((path, end)) = read_quoted(&chars, cursor)
+                && !path.is_empty()
+                && read_call_follows(&chars, end)
+            {
+                paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn exec_before_open(chars: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    if cursor > 0 && chars[cursor - 1] == '(' {
+        cursor -= 1;
+    }
+    while cursor > 0 && chars[cursor - 1].is_whitespace() {
+        cursor -= 1;
+    }
+    cursor >= 4
+        && starts_with(chars, cursor - 4, "exec")
+        && (cursor == 4 || !chars[cursor - 5].is_ascii_alphanumeric())
+}
+
+fn read_call_follows(chars: &[char], mut index: usize) -> bool {
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    if chars.get(index) == Some(&')') {
+        index += 1;
+    }
+    while index < chars.len() && chars[index].is_whitespace() {
+        index += 1;
+    }
+    starts_with(chars, index, ".read")
+}
+
+fn resolve_script_path(dir: Option<&str>, raw: &str) -> Option<String> {
+    if raw.is_empty() || raw.split(['/', '\\']).any(|part| part == "..") {
+        return None;
+    }
+    let path = std::path::Path::new(raw);
+    let full = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        shell_dir(dir).join(path)
+    };
+    Some(full.display().to_string())
 }
 
 fn lua_module_names(argv: &[String]) -> Vec<String> {
@@ -23407,6 +23580,16 @@ mod tests {
         );
         write("quiet.hs", "main = putStrLn \"git push origin main\"\n");
         write("push.lua", "os.execute(\"git push origin main\")\n");
+        write("push.rb", "system(\"git push origin main\")\n");
+        write(
+            "push.js",
+            "require(\"child_process\").execSync(\"git push origin main\", {stdio:\"inherit\"});\n",
+        );
+        write(
+            "push.py",
+            "import os\nos.system(\"git push origin main\")\n",
+        );
+        write("push.pl", "system(\"git push origin main\");\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -23501,6 +23684,11 @@ mod tests {
             "ghc -e 'System.Process.system \"git push origin main\"'".to_string(),
             format!("cd {show} && lua -l push -e '0'"),
             format!("cd {show} && lua -lpush -e '0'"),
+            format!("cd {show} && lua -e 'dofile(\"push.lua\")'"),
+            format!("cd {show} && ruby -e 'load \"push.rb\"'"),
+            format!("cd {show} && node -e 'require(\"./push.js\")'"),
+            format!("cd {show} && python3 -c 'exec(open(\"push.py\").read())'"),
+            format!("cd {show} && perl -e 'do \"./push.pl\"'"),
             "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
@@ -23564,6 +23752,11 @@ mod tests {
             format!("cd {show}/pkg && node --run absent"),
             format!("cd {show} && java Missing"),
             format!("cd {show} && lua -l missing -e '0'"),
+            format!("cd {show} && lua -e 'dofile(\"missing.lua\")'"),
+            format!("cd {show} && ruby -e 'print 1'"),
+            format!("cd {show} && node -e 'require(\"fs\")'"),
+            format!("cd {show} && python3 -c 'open(\"push.py\").read()'"),
+            format!("cd {show} && perl -e 'do \"push.pl\"'"),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
