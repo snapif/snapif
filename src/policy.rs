@@ -6399,8 +6399,9 @@ fn inline_loaded_commands(argv: &[String], dir: Option<&str>) -> Vec<String> {
 fn inline_code(lang: HostLang, argv: &[String]) -> Vec<String> {
     let flags: &[&str] = match lang {
         HostLang::Python => &["-c"],
+        HostLang::Php => &["-r"],
         HostLang::Node | HostLang::Ruby | HostLang::Perl | HostLang::Lua => &["-e"],
-        _ => return Vec::new(),
+        HostLang::R => return Vec::new(),
     };
     let mut texts = Vec::new();
     let mut index = 1usize;
@@ -6427,17 +6428,34 @@ fn inline_code(lang: HostLang, argv: &[String]) -> Vec<String> {
 fn load_paths(lang: HostLang, text: &str) -> Vec<String> {
     match lang {
         HostLang::Lua => call_strings(text, "dofile"),
-        HostLang::Ruby => call_strings(text, "load"),
+        HostLang::Ruby => {
+            let mut paths = call_strings(text, "load");
+            paths.extend(
+                call_strings(text, "require")
+                    .into_iter()
+                    .filter(|path| path.contains('/') || path.contains('\\')),
+            );
+            paths
+        }
         HostLang::Node => call_strings(text, "require")
             .into_iter()
             .filter(|path| path.contains('/') || path.contains('\\'))
             .collect(),
-        HostLang::Python => python_exec_opens(text),
-        HostLang::Perl => call_strings(text, "do")
-            .into_iter()
-            .filter(|path| path.contains('/') || path.contains('\\'))
-            .collect(),
-        _ => Vec::new(),
+        HostLang::Python => {
+            let mut paths = python_exec_opens(text);
+            paths.extend(python_imports(text));
+            paths
+        }
+        HostLang::Php => call_strings(text, "include"),
+        HostLang::Perl => {
+            let mut paths = call_strings(text, "do");
+            paths.extend(call_strings(text, "require"));
+            paths
+                .into_iter()
+                .filter(|path| path.contains('/') || path.contains('\\'))
+                .collect()
+        }
+        HostLang::R => Vec::new(),
     }
 }
 
@@ -6465,6 +6483,38 @@ fn call_strings(text: &str, word: &str) -> Vec<String> {
                 && !path.is_empty()
             {
                 paths.push(path);
+            }
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn python_imports(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut paths = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((_, end)) = read_quoted(&chars, index) {
+            index = end;
+            continue;
+        }
+        if haskell_word(&chars, index, "import") {
+            let mut cursor = index + "import".len();
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            let start = cursor;
+            if cursor < chars.len() && (chars[cursor].is_ascii_alphabetic() || chars[cursor] == '_')
+            {
+                cursor += 1;
+                while cursor < chars.len()
+                    && (chars[cursor].is_ascii_alphanumeric() || chars[cursor] == '_')
+                {
+                    cursor += 1;
+                }
+                let name: String = chars[start..cursor].iter().collect();
+                paths.push(format!("{name}.py"));
             }
         }
         index += 1;
@@ -23590,6 +23640,7 @@ mod tests {
             "import os\nos.system(\"git push origin main\")\n",
         );
         write("push.pl", "system(\"git push origin main\");\n");
+        write("push.php", "<?php\nsystem(\"git push origin main\");\n");
         write("print.swift", "print(\"git push origin main\")\n");
         write(
             "note.swift",
@@ -23689,6 +23740,10 @@ mod tests {
             format!("cd {show} && node -e 'require(\"./push.js\")'"),
             format!("cd {show} && python3 -c 'exec(open(\"push.py\").read())'"),
             format!("cd {show} && perl -e 'do \"./push.pl\"'"),
+            format!("cd {show} && python3 -c 'import push'"),
+            format!("cd {show} && ruby -e 'require \"./push.rb\"'"),
+            format!("cd {show} && php -r 'include \"push.php\";'"),
+            format!("cd {show} && perl -e 'require \"./push.pl\";'"),
             "swift -e 'import Foundation; let t = Process(); t.executableURL = URL(fileURLWithPath: \"/usr/bin/env\"); t.arguments = [\"git\", \"push\", \"origin\", \"main\"]; try? t.run(); t.waitUntilExit()'".to_string(),
             format!("coffee {show}/run.coffee"),
             format!("runghc {show}/Run.hs"),
@@ -23757,6 +23812,10 @@ mod tests {
             format!("cd {show} && node -e 'require(\"fs\")'"),
             format!("cd {show} && python3 -c 'open(\"push.py\").read()'"),
             format!("cd {show} && perl -e 'do \"push.pl\"'"),
+            format!("cd {show} && python3 -c 'import os'"),
+            format!("cd {show} && ruby -e 'require \"json\"'"),
+            format!("cd {show} && php -r 'echo 1;'"),
+            format!("cd {show} && perl -e 'require \"push.pl\";'"),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
