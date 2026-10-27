@@ -4955,9 +4955,7 @@ impl GitBindings {
             push_selected_tool(commands, argv, &self.merge_tool, &self.mergetools);
         }
         commands.extend(ssh_scripts(&self.ssh, argv, env));
-        if subcommand == "commit" {
-            shells.extend(commit_hook_scripts(self.hooks.as_deref(), argv));
-        }
+        shells.extend(git_hook_scripts(self.hooks.as_deref(), subcommand, argv));
         if subcommand == "credential" {
             commands.extend(self.helpers.iter().cloned());
         }
@@ -5112,24 +5110,31 @@ fn ssh_scripts(
     Vec::new()
 }
 
-/// `git -c core.hooksPath=dir commit` runs the executable hooks in
-/// that directory. `--no-verify` skips `pre-commit` and `commit-msg`.
-/// `prepare-commit-msg` and `post-commit` still run.
-fn commit_hook_scripts(dir: Option<&str>, argv: &[String]) -> Vec<String> {
+/// `git -c core.hooksPath=dir commit` runs the executable commit
+/// hooks. `merge` runs `pre-merge-commit`, `prepare-commit-msg`, and
+/// `post-merge`. `--no-verify` skips `pre-commit`, `commit-msg`, and
+/// `pre-merge-commit`.
+fn git_hook_scripts(dir: Option<&str>, subcommand: &str, argv: &[String]) -> Vec<String> {
     let Some(dir) = dir.filter(|dir| !dir.is_empty()) else {
         return Vec::new();
     };
     let skip_verify = commit_no_verify(argv);
-    [
-        "pre-commit",
-        "prepare-commit-msg",
-        "commit-msg",
-        "post-commit",
-    ]
-    .into_iter()
-    .filter(|name| !skip_verify || !matches!(*name, "pre-commit" | "commit-msg"))
-    .filter_map(|name| hook_body(dir, name))
-    .collect()
+    let names: &[&str] = match subcommand {
+        "commit" if skip_verify => &["prepare-commit-msg", "post-commit"],
+        "commit" => &[
+            "pre-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-commit",
+        ],
+        "merge" if skip_verify => &["prepare-commit-msg", "post-merge"],
+        "merge" => &["pre-merge-commit", "prepare-commit-msg", "post-merge"],
+        _ => return Vec::new(),
+    };
+    names
+        .iter()
+        .filter_map(|name| hook_body(dir, name))
+        .collect()
 }
 
 fn commit_no_verify(argv: &[String]) -> bool {
@@ -20142,6 +20147,13 @@ mod tests {
         assert_eq!(kind(&skip), None, "{skip}");
         write("post-commit", "rm -rf /tmp/y\n");
         assert_eq!(kind(&skip), Some("bash.rm"), "{skip}");
+        write("pre-merge-commit", "rm -rf /tmp/z\n");
+        let merge = format!("git -c core.hooksPath={dir} merge side");
+        assert_eq!(kind(&merge), Some("bash.rm"), "{merge}");
+        let merge_skip = format!("git -c core.hooksPath={dir} merge --no-verify side");
+        assert_eq!(kind(&merge_skip), None, "{merge_skip}");
+        write("post-merge", "rm -rf /tmp/w\n");
+        assert_eq!(kind(&merge_skip), Some("bash.rm"), "{merge_skip}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
