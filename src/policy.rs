@@ -6700,24 +6700,30 @@ fn env_preload_commands(
     let Some(first) = argv.first() else {
         return Vec::new();
     };
-    let base = command_basename(first);
-    if base.eq_ignore_ascii_case("ruby") {
-        return env_option_files(env, "RUBYOPT", "ruby", dir, HostLang::Ruby, ruby_requires);
-    }
-    if base.eq_ignore_ascii_case("node") {
-        return env_option_files(
+    match host_lang(first) {
+        Some(HostLang::Ruby) => {
+            let mut commands =
+                env_option_files(env, "RUBYOPT", "ruby", dir, HostLang::Ruby, ruby_requires);
+            commands.extend(ruby_lib_files(argv, env, dir));
+            commands
+        }
+        Some(HostLang::Node) => env_option_files(
             env,
             "NODE_OPTIONS",
             "node",
             dir,
             HostLang::Node,
             node_preloads,
-        );
+        ),
+        Some(HostLang::Perl) => {
+            let mut commands = perl_opt_files(env, dir);
+            commands.extend(perl_lib_files(argv, env, dir));
+            commands
+        }
+        Some(HostLang::Python) => python_path_files(argv, env, dir),
+        Some(HostLang::Lua) => lua_path_files(argv, env, dir),
+        _ => Vec::new(),
     }
-    if base.eq_ignore_ascii_case("perl") {
-        return perl_opt_files(env, dir);
-    }
-    Vec::new()
 }
 
 fn env_option_files(
@@ -6795,6 +6801,119 @@ fn perl_opt_files(env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
             if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
                 commands.extend(interpreter_commands(HostLang::Perl, &body));
                 break;
+            }
+        }
+    }
+    commands
+}
+
+fn perl_lib_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PERL5LIB") else {
+        return Vec::new();
+    };
+    let mut fake = vec!["perl".to_string()];
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(entry);
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            shell_dir(dir).join(root)
+        };
+        fake.push(format!("-I{}", root.display()));
+    }
+    fake.extend(argv.iter().skip(1).cloned());
+    let mut commands = Vec::new();
+    for path in perl_module_files(&fake) {
+        if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+            commands.extend(interpreter_commands(HostLang::Perl, &body));
+        }
+    }
+    commands
+}
+
+fn python_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "PYTHONPATH") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Python, argv) {
+        names.extend(python_imports(&text));
+        names.extend(python_from_imports(&text));
+        names.extend(python_import_modules(&text));
+    }
+    library_scripts(value, &names, dir, HostLang::Python)
+}
+
+fn ruby_lib_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "RUBYLIB") else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for text in inline_code(HostLang::Ruby, argv) {
+        for raw in call_strings(&text, "require") {
+            if raw.contains('/') || raw.contains('\\') {
+                continue;
+            }
+            if raw.ends_with(".rb") {
+                names.push(raw);
+            } else {
+                names.push(format!("{raw}.rb"));
+            }
+        }
+    }
+    library_scripts(value, &names, dir, HostLang::Ruby)
+}
+
+fn lua_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    let Some(value) = last_assignment(env, "LUA_PATH") else {
+        return Vec::new();
+    };
+    let names = lua_module_names(argv);
+    let mut commands = Vec::new();
+    for template in value.split(';') {
+        if !template.contains('?') {
+            continue;
+        }
+        for name in &names {
+            if name.is_empty() || name.contains('.') || name.contains('/') || name.contains('\\') {
+                continue;
+            }
+            let raw = template.replace('?', name);
+            let Some(path) = resolve_script_path(dir, &raw) else {
+                continue;
+            };
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path) {
+                commands.extend(interpreter_commands(HostLang::Lua, &body));
+            }
+        }
+    }
+    commands
+}
+
+fn library_scripts(
+    value: &str,
+    names: &[String],
+    dir: Option<&str>,
+    lang: HostLang,
+) -> Vec<String> {
+    let mut commands = Vec::new();
+    for entry in value.split(':') {
+        if entry.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(entry);
+        let root = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            shell_dir(dir).join(root)
+        };
+        for name in names {
+            let path = root.join(name);
+            if let Some(ScriptFile::Text(body)) = load_script_file(&path.display().to_string()) {
+                commands.extend(interpreter_commands(lang, &body));
             }
         }
     }
@@ -23909,6 +24028,7 @@ mod tests {
         write("push.R", "system(\"git push origin main\")\n");
         write("push.jl", "run(`git push origin main`)\n");
         write("push.m", "system(\"git push origin main\");\n");
+        std::fs::create_dir_all(root.join("empty-lib")).expect("empty-lib");
         std::fs::create_dir_all(root.join("gogen")).expect("gogen");
         std::fs::write(
             root.join("gogen/main.go"),
@@ -24037,6 +24157,10 @@ mod tests {
             format!("cd {show} && RUBYOPT='-r./push.rb' ruby -e '0'"),
             format!("cd {show} && NODE_OPTIONS='--require ./push.js' node -e '0'"),
             format!("cd {show} && PERL5OPT='-I. -MPush' perl -e '0'"),
+            format!("cd {show} && PERL5LIB=. perl -MPush -e 0"),
+            format!("PYTHONPATH='{show}' python3 -c 'import push'"),
+            format!("RUBYLIB='{show}' ruby -e 'require \"push\"'"),
+            format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l push -e '0'"),
             format!(
                 "cd {show} && python3 -c 'exec(compile(open(\"push.py\").read(), \"push.py\", \"exec\"))'"
             ),
@@ -24121,6 +24245,10 @@ mod tests {
             format!("cd {show} && RUBYOPT='-r./missing.rb' ruby -e '0'"),
             format!("cd {show} && NODE_OPTIONS='--require ./missing.js' node -e '0'"),
             format!("cd {show} && PERL5OPT='-I. -MMissing' perl -e '0'"),
+            format!("cd {show} && PERL5LIB=. perl -MMissing -e 0"),
+            format!("PYTHONPATH='{show}/empty-lib' python3 -c 'import push'"),
+            format!("RUBYLIB='{show}/empty-lib' ruby -e 'require \"push\"'"),
+            format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l missing -e '0'"),
             "swift -e 'print(1)'".to_string(),
             format!("coffee -c {show}/run.coffee"),
             format!("runghc {show}/quiet.hs"),
