@@ -1379,6 +1379,16 @@ fn consider_segment<'a>(
                 best,
             );
             score_mix_run(policy, tool_name, &executed.argv, depth, local, git, best);
+            score_mix_shell(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_clojure_script(policy, tool_name, &executed.argv, depth, local, git, best);
             let host_dir = scope.dir.as_deref();
             let node_run = node_run_bodies(&executed.argv, host_dir);
@@ -8357,6 +8367,106 @@ fn mix_inline(argv: &[String]) -> Vec<String> {
         index += 1;
     }
     if running { texts } else { Vec::new() }
+}
+
+/// `mix cmd command` runs that command. `mix name` runs an alias
+/// whose value starts with `cmd `.
+#[allow(clippy::too_many_arguments)]
+fn score_mix_shell<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    if argv
+        .first()
+        .is_none_or(|word| !command_basename(word).eq_ignore_ascii_case("mix"))
+    {
+        return;
+    }
+    if let Some(command) = mix_cmd_line(argv) {
+        scan_isolated(
+            policy,
+            tool_name,
+            std::slice::from_ref(&command),
+            depth,
+            local,
+            git,
+            best,
+        );
+        return;
+    }
+    let Some(task) = mix_task(argv) else {
+        return;
+    };
+    let path = shell_dir(dir).join("mix.exs");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    if let Some(command) = mix_alias_shell(&text, &task) {
+        scan_isolated(
+            policy,
+            tool_name,
+            std::slice::from_ref(&command),
+            depth,
+            local,
+            git,
+            best,
+        );
+    }
+}
+
+fn mix_cmd_line(argv: &[String]) -> Option<String> {
+    let mut index = 1usize;
+    let mut command = false;
+    let mut words = Vec::new();
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if !command {
+            if arg == "cmd" {
+                command = true;
+            } else if !arg.starts_with('-') {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        words.push(arg.to_string());
+        index += 1;
+    }
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" "))
+    }
+}
+
+fn mix_task(argv: &[String]) -> Option<String> {
+    argv.iter()
+        .skip(1)
+        .find(|arg| !arg.starts_with('-'))
+        .cloned()
+}
+
+fn mix_alias_shell(text: &str, task: &str) -> Option<String> {
+    let patterns = [format!("{task}: \""), format!("{task}:\"")];
+    for pattern in &patterns {
+        let Some(start) = text.find(pattern) else {
+            continue;
+        };
+        let rest = &text[start + pattern.len()..];
+        let end = rest.find('"')?;
+        if let Some(command) = rest[..end].strip_prefix("cmd ")
+            && !command.is_empty()
+        {
+            return Some(command.to_string());
+        }
+    }
+    None
 }
 
 fn score_clojure_script<'a>(
@@ -29834,6 +29944,33 @@ mod tests {
         )
         .expect("not equal");
         assert_eq!(kind(&format!("cd {app_s} && sbt -batch about")), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `mix cmd` runs the following command. `mix name` runs an alias
+    /// in `mix.exs` whose value starts with `cmd `.
+    #[test]
+    fn mix_commands_score_the_shell_they_run() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-mix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(
+            root.join("mix.exs"),
+            "defmodule P.MixProject do\n  use Mix.Project\n  def project do\n    [app: :p, version: \"0.0.0\", aliases: [go: \"cmd git push origin main\", nope: \"cmd echo safe\"]]\n  end\nend\n",
+        )
+        .expect("mix.exs");
+        let kind =
+            |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
+        let root_s = root.display().to_string();
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix cmd git push origin main")),
+            Some("git.push")
+        );
+        assert_eq!(kind(&format!("cd {root_s} && mix cmd")), None);
+        assert_eq!(kind(&format!("cd {root_s} && mix go")), Some("git.push"));
+        assert_eq!(kind(&format!("cd {root_s} && mix nope")), None);
+        assert_eq!(kind(&format!("cd {root_s} && mix missing")), None);
         let _ = std::fs::remove_dir_all(&root);
     }
 
