@@ -1008,6 +1008,7 @@ fn consider_segment<'a>(
                 depth,
                 local,
                 git,
+                host_dir,
                 best,
             );
             score_printed_file(
@@ -5484,6 +5485,7 @@ fn score_package_scripts<'a>(
     scan_isolated(policy, tool_name, &scripts, depth, local, git, best);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn score_interpreter<'a>(
     policy: &'a Policy,
     tool_name: &str,
@@ -5491,12 +5493,13 @@ fn score_interpreter<'a>(
     depth: u32,
     local: &[(String, String)],
     git: &GitBindings,
+    dir: Option<&str>,
     best: &mut Option<&'a ActionId>,
 ) {
     let Some(lang) = source.argv.first().and_then(|word| host_lang(word)) else {
         return;
     };
-    match interpreter_program(lang, &source) {
+    match interpreter_program(lang, &source, dir) {
         Some(LoadedProgram::Text(text)) => {
             let commands = interpreter_commands(lang, &text);
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -5505,7 +5508,7 @@ fn score_interpreter<'a>(
         None => {}
     }
     for path in preload_files(lang, source.argv) {
-        match load_script_file(&path) {
+        match load_script_file(&shell_path(&path, dir)) {
             Some(ScriptFile::Text(text)) => {
                 let commands = interpreter_commands(lang, &text);
                 scan_isolated(policy, tool_name, &commands, depth, local, git, best);
@@ -6215,6 +6218,15 @@ fn shell_dir(dir: Option<&str>) -> std::path::PathBuf {
     dir.map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from)
 }
 
+fn shell_path(path: &str, dir: Option<&str>) -> String {
+    let file = std::path::Path::new(path);
+    if file.is_absolute() || dir.is_none() {
+        path.to_string()
+    } else {
+        shell_dir(dir).join(file).display().to_string()
+    }
+}
+
 fn node_run_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
     if argv
         .first()
@@ -6735,6 +6747,7 @@ fn env_preload_commands(
         }
         Some(HostLang::Php) => php_include_path_files(argv, dir),
         Some(HostLang::Lua) => lua_path_files(argv, env, dir),
+        Some(HostLang::R) => r_profile_commands(argv, env, dir),
         _ => Vec::new(),
     }
 }
@@ -7104,6 +7117,22 @@ fn ruby_lib_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) 
         }
     }
     library_scripts(value, &names, dir, HostLang::Ruby)
+}
+
+fn r_profile_commands(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
+    if argv
+        .iter()
+        .any(|arg| arg == "--vanilla" || arg == "--no-init-file")
+    {
+        return Vec::new();
+    }
+    let Some(value) = last_assignment(env, "R_PROFILE_USER") else {
+        return Vec::new();
+    };
+    let Some(ScriptFile::Text(body)) = load_script_file(&shell_path(value, dir)) else {
+        return Vec::new();
+    };
+    interpreter_commands(HostLang::R, &body)
 }
 
 fn lua_path_files(argv: &[String], env: &[(String, String)], dir: Option<&str>) -> Vec<String> {
@@ -8237,7 +8266,11 @@ fn host_lang(token: &str) -> Option<HostLang> {
     }
 }
 
-fn interpreter_program(lang: HostLang, source: &InterpSource<'_>) -> Option<LoadedProgram> {
+fn interpreter_program(
+    lang: HostLang,
+    source: &InterpSource<'_>,
+    dir: Option<&str>,
+) -> Option<LoadedProgram> {
     let mut index = 1usize;
     let mut inline = None;
     let mut file: Option<&str> = None;
@@ -8285,7 +8318,7 @@ fn interpreter_program(lang: HostLang, source: &InterpSource<'_>) -> Option<Load
         Some("-") | None => source.stdin_file,
         Some(path) => Some(path),
     }?;
-    match load_script_file(path) {
+    match load_script_file(&shell_path(path, dir)) {
         Some(ScriptFile::Text(text)) => Some(LoadedProgram::Text(text)),
         Some(ScriptFile::Unscanned) => Some(LoadedProgram::Unscanned),
         None => None,
@@ -24401,6 +24434,11 @@ mod tests {
             format!("cd {show}/empty-lib && perl -I.. -MPush -e 0"),
             format!("cd {show}/empty-lib && ruby -I.. -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && AWKPATH=.. awk -f push.awk"),
+            format!("cd {show}/empty-lib && ruby -r../push.rb -e 0"),
+            format!("cd {show}/empty-lib && lua ../push.lua"),
+            format!("cd {show}/empty-lib && perl ../push.pl"),
+            format!("cd {show}/empty-lib && python3 ../push.py"),
+            format!("cd {show}/empty-lib && R_PROFILE_USER=../push.R R --no-save -e '1'"),
             format!("PYTHONPATH='{show}' python3 -c 'import push'"),
             format!("RUBYLIB='{show}' ruby -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l push -e '0'"),
@@ -24497,6 +24535,8 @@ mod tests {
             format!("cd {show}/empty-lib && perl -I.. -MMissing -e 0"),
             format!("cd {show}/empty-lib && ruby -I.. -e 'require \"missing\"'"),
             format!("cd {show}/empty-lib && AWKPATH=.. awk -f missing.awk"),
+            format!("cd {show}/empty-lib && lua ../missing.lua"),
+            format!("cd {show}/empty-lib && R_PROFILE_USER=../push.R R --vanilla --no-save -e '1'"),
             format!("PYTHONPATH='{show}/empty-lib' python3 -c 'import push'"),
             format!("RUBYLIB='{show}/empty-lib' ruby -e 'require \"push\"'"),
             format!("cd {show}/empty-lib && LUA_PATH='{show}/?.lua' lua -l missing -e '0'"),
