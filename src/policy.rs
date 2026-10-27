@@ -8427,17 +8427,39 @@ fn mix_env_name(local: &[(String, String)]) -> String {
 }
 
 fn mix_config_commands(root: &std::path::Path, env_name: &str) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(root.join("config/config.exs")) else {
-        return Vec::new();
-    };
-    let mut commands = elixir_commands(&text);
-    let config_dir = root.join("config");
-    for name in mix_imported_configs(&text, env_name) {
-        if let Ok(body) = std::fs::read_to_string(config_dir.join(&name)) {
-            commands.extend(elixir_commands(&body));
-        }
-    }
+    let mut commands = Vec::new();
+    let mut seen = Vec::new();
+    mix_read_config(
+        &root.join("config/config.exs"),
+        env_name,
+        &mut seen,
+        &mut commands,
+        0,
+    );
     commands
+}
+
+fn mix_read_config(
+    path: &std::path::Path,
+    env_name: &str,
+    seen: &mut Vec<std::path::PathBuf>,
+    commands: &mut Vec<String>,
+    depth: u32,
+) {
+    if depth > 8 || seen.iter().any(|item| item == path) {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return;
+    };
+    seen.push(path.to_path_buf());
+    commands.extend(elixir_commands(&text));
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    for name in mix_imported_configs(&text, env_name) {
+        mix_read_config(&dir.join(name), env_name, seen, commands, depth + 1);
+    }
 }
 
 fn mix_imported_configs(text: &str, env_name: &str) -> Vec<String> {
@@ -30317,6 +30339,34 @@ mod tests {
         )
         .expect("dev push");
         assert_eq!(kind(&format!("cd {root_s} && mix help")), Some("git.push"));
+        std::fs::write(
+            root.join("config/config.exs"),
+            "import Config\nimport_config \"dev.exs\"\n",
+        )
+        .expect("nest config");
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "import Config\nimport_config \"local.exs\"\n",
+        )
+        .expect("nest dev");
+        std::fs::write(
+            root.join("config/local.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("local");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
+        std::fs::write(
+            root.join("config/dev.exs"),
+            "import Config\nSystem.cmd(\"git\", [\"push\", \"origin\", \"main\"])\nimport_config \"config.exs\"\n",
+        )
+        .expect("cycle");
+        assert_eq!(
+            kind(&format!("cd {root_s} && mix compile")),
+            Some("git.push")
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
