@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.8](https://github.com/snapif/snapif/compare/snapif-v0.2.7...snapif-v0.2.8) (2026-10-28)
+
+
+### Bug Fixes
+
+* score the Windows py launcher and cscript ([#260](https://github.com/snapif/snapif/issues/260)) ([62a584c](https://github.com/snapif/snapif/commit/62a584c960f13f89879ff999a37dd3e874baf172)), closes [#258](https://github.com/snapif/snapif/issues/258) [#259](https://github.com/snapif/snapif/issues/259)
+
 ## [0.2.7](https://github.com/snapif/snapif/compare/snapif-v0.2.6...snapif-v0.2.7) (2026-10-27)
 
 
