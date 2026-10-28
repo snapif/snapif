@@ -1335,6 +1335,16 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
+            score_cscript(
+                policy,
+                tool_name,
+                &executed.argv,
+                depth,
+                local,
+                git,
+                scope.dir.as_deref(),
+                best,
+            );
             score_bun_script(
                 policy,
                 tool_name,
@@ -9533,6 +9543,157 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
     texts
 }
 
+/// `cscript //nologo file.vbs` runs that file. A `//` word is a host
+/// switch, not the script. `WScript.Shell` `Run` of a string is the
+/// command. A missing file stays unmatched.
+#[allow(clippy::too_many_arguments)]
+fn score_cscript<'a>(
+    policy: &'a Policy,
+    tool_name: &str,
+    argv: &[String],
+    depth: u32,
+    local: &[(String, String)],
+    git: &GitBindings,
+    dir: Option<&str>,
+    best: &mut Option<&'a ActionId>,
+) {
+    let Some(first) = argv.first() else {
+        return;
+    };
+    if !command_basename(first).eq_ignore_ascii_case("cscript") {
+        return;
+    }
+    let mut index = 1usize;
+    while index < argv.len() {
+        let arg = argv[index].as_str();
+        if arg.starts_with("//") {
+            index += 1;
+            continue;
+        }
+        match load_script_file(&shell_path(arg, dir)) {
+            Some(ScriptFile::Text(text)) => {
+                let commands = vbs_shell_runs(&text);
+                scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+            }
+            Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+            None => {}
+        }
+        return;
+    }
+}
+
+fn vbs_shell_runs(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut shell = false;
+    let mut index = 0usize;
+    while index < chars.len() {
+        if vbs_comment(&chars, index) {
+            index = skip_line(&chars, index);
+            continue;
+        }
+        if chars[index] == '"'
+            && let Some((body, end)) = read_vbs_string(&chars, index)
+        {
+            if body.eq_ignore_ascii_case("WScript.Shell") {
+                shell = true;
+            }
+            index = end;
+            continue;
+        }
+        if vbs_run_at(&chars, index) {
+            let mut cursor = index + 4;
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            if cursor < chars.len() && chars[cursor] == '(' {
+                cursor += 1;
+                while cursor < chars.len() && chars[cursor].is_whitespace() {
+                    cursor += 1;
+                }
+            }
+            if let Some((command, end)) = read_vbs_string(&chars, cursor) {
+                if !command.is_empty() {
+                    commands.push(command);
+                }
+                index = end;
+                continue;
+            }
+        }
+        index += 1;
+    }
+    if shell { commands } else { Vec::new() }
+}
+
+fn vbs_comment(chars: &[char], index: usize) -> bool {
+    if chars[index] == '\'' {
+        return true;
+    }
+    if !starts_with_ignore(chars, index, "rem") {
+        return false;
+    }
+    let after = index + 3;
+    if chars
+        .get(after)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+    {
+        return false;
+    }
+    let mut prev = index;
+    while prev > 0 {
+        prev -= 1;
+        let ch = chars[prev];
+        if ch == '\n' || ch == ':' {
+            return true;
+        }
+        if !ch.is_whitespace() {
+            return false;
+        }
+    }
+    true
+}
+
+fn vbs_run_at(chars: &[char], index: usize) -> bool {
+    if chars[index] != '.' || !starts_with_ignore(chars, index + 1, "run") {
+        return false;
+    }
+    !chars
+        .get(index + 4)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+}
+
+fn read_vbs_string(chars: &[char], index: usize) -> Option<(String, usize)> {
+    if chars.get(index) != Some(&'"') {
+        return None;
+    }
+    let mut cursor = index + 1;
+    let mut text = String::new();
+    while cursor < chars.len() {
+        if chars[cursor] == '"' {
+            if chars.get(cursor + 1) == Some(&'"') {
+                text.push('"');
+                cursor += 2;
+                continue;
+            }
+            return Some((text, cursor + 1));
+        }
+        if chars[cursor] == '\n' {
+            return None;
+        }
+        text.push(chars[cursor]);
+        cursor += 1;
+    }
+    None
+}
+
+fn starts_with_ignore(chars: &[char], index: usize, text: &str) -> bool {
+    text.chars().enumerate().all(|(offset, ch)| {
+        chars
+            .get(index + offset)
+            .is_some_and(|got| got.eq_ignore_ascii_case(&ch))
+    })
+}
+
 fn applescript_shells(text: &str) -> Vec<String> {
     let marker = "do shell script";
     let folded = text.to_ascii_lowercase();
@@ -9559,7 +9720,9 @@ fn applescript_shells(text: &str) -> Vec<String> {
 fn host_lang(token: &str) -> Option<HostLang> {
     let base = command_basename(token).to_ascii_lowercase();
     match base.as_str() {
-        "python" | "python2" | "python3" => Some(HostLang::Python),
+        // `py` is the Windows launcher. `py -3 file.py` and `py -3 -c`
+        // run the same program as `python`.
+        "python" | "python2" | "python3" | "py" => Some(HostLang::Python),
         "node" => Some(HostLang::Node),
         "ruby" => Some(HostLang::Ruby),
         "perl" => Some(HostLang::Perl),
@@ -32263,6 +32426,37 @@ mod tests {
             )
         };
         let path = |name: &str| format!("{dir_shown}\\{name}");
+        let write_host = |name: &str, body: &str| {
+            let shown = path(name);
+            std::fs::write(super::openable_path(&shown).as_ref(), body).expect(name);
+        };
+        write_host(
+            "payload.py",
+            "import os\nos.system('git push origin main')\n",
+        );
+        write_host("print.py", "print('git push origin main')\n");
+        write_host(
+            "payload.vbs",
+            "CreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n",
+        );
+        write_host(
+            "call.vbs",
+            "CreateObject(\"WScript.Shell\").Run(\"git push origin main\")\n",
+        );
+        write_host(
+            "set.vbs",
+            "Set sh = CreateObject(\"WScript.Shell\")\nsh.Run \"git push origin main\", 0, True\n",
+        );
+        write_host(
+            "fold.vbs",
+            "createobject(\"wscript.shell\").run \"git push origin main\", 0, True\n",
+        );
+        write_host("echo.vbs", "WScript.Echo \"git push origin main\"\n");
+        write_host(
+            "note.vbs",
+            "' CreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\nWScript.Echo \"ok\"\n",
+        );
+        write_host("other.vbs", "sh.Run \"git push origin main\", 0, True\n");
         let sh = path("payload.sh");
         let ps1 = path("payload.ps1");
         let bat = path("payload.bat");
@@ -32348,6 +32542,14 @@ mod tests {
             format!("cmd.exe /d /c call {bat}"),
             format!("cmd /k {cmd_file}"),
             format!("cmd /c call {cmd_file} arg"),
+            format!("py -3 {}", path("payload.py")),
+            format!("py.exe -3 {}", path("payload.py")),
+            "py -3 -c \"import os; os.system('git push origin main')\"".to_string(),
+            format!("cscript //nologo {}", path("payload.vbs")),
+            format!("cscript.exe //NoLogo {}", path("payload.vbs")),
+            format!("cscript //B //nologo {}", path("call.vbs")),
+            format!("cscript {}", path("set.vbs")),
+            format!("cscript //nologo {}", path("fold.vbs")),
         ];
         for command in &review {
             assert_eq!(
@@ -32387,6 +32589,20 @@ mod tests {
             format!("powershell -Command \"Invoke-Expression (Get-Content '{ps1}.missing' -Raw)\""),
             format!("pwsh -Command - < '{ps1}.missing'"),
             "pwsh rm -rf /tmp/x".to_string(),
+            format!(
+                "py -3 {}",
+                path("payload.py").replace("payload.py", "missing.py")
+            ),
+            format!("py -3 {}", path("print.py")),
+            "py -3 -c \"print('git push origin main')\"".to_string(),
+            format!(
+                "cscript //nologo {}",
+                path("payload.vbs").replace("payload.vbs", "missing.vbs")
+            ),
+            format!("cscript //nologo {}", path("echo.vbs")),
+            format!("cscript //nologo {}", path("note.vbs")),
+            format!("cscript //nologo {}", path("other.vbs")),
+            format!("echo py -3 {}", path("payload.py")),
         ];
         for command in &quiet {
             assert!(
