@@ -9543,9 +9543,11 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
     texts
 }
 
-/// `cscript //nologo file.vbs` runs that file. A `//` word is a host
-/// switch, not the script. `WScript.Shell` `Run` of a string is the
-/// command. A missing file stays unmatched.
+/// `cscript //nologo file.vbs` and `cscript /nologo file.vbs` run that
+/// file. A `//` word is a host switch, and so is `/nologo` in any ASCII
+/// case. `WScript.Shell` `Run` of a string is the command. Adjacent
+/// quoted pieces joined with `&` are one command. A missing file stays
+/// unmatched.
 #[allow(clippy::too_many_arguments)]
 fn score_cscript<'a>(
     policy: &'a Policy,
@@ -9566,7 +9568,7 @@ fn score_cscript<'a>(
     let mut index = 1usize;
     while index < argv.len() {
         let arg = argv[index].as_str();
-        if arg.starts_with("//") {
+        if cscript_switch(arg) {
             index += 1;
             continue;
         }
@@ -9613,6 +9615,7 @@ fn vbs_shell_runs(text: &str) -> Vec<String> {
                 }
             }
             if let Some((command, end)) = read_vbs_string(&chars, cursor) {
+                let (command, end) = join_vbs_ampersand(&chars, command, end);
                 if !command.is_empty() {
                     commands.push(command);
                 }
@@ -9623,6 +9626,38 @@ fn vbs_shell_runs(text: &str) -> Vec<String> {
         index += 1;
     }
     if shell { commands } else { Vec::new() }
+}
+
+fn cscript_switch(arg: &str) -> bool {
+    if arg.starts_with("//") {
+        return true;
+    }
+    arg.strip_prefix('/')
+        .is_some_and(|rest| rest.eq_ignore_ascii_case("nologo"))
+}
+
+/// `"git " & "push origin main"` is one command. A piece that is not a
+/// quoted string stops the join and keeps the text already read.
+fn join_vbs_ampersand(chars: &[char], mut command: String, mut end: usize) -> (String, usize) {
+    loop {
+        let mut look = end;
+        while chars.get(look).is_some_and(|ch| *ch == ' ' || *ch == '\t') {
+            look += 1;
+        }
+        if chars.get(look) != Some(&'&') {
+            break;
+        }
+        look += 1;
+        while chars.get(look).is_some_and(|ch| *ch == ' ' || *ch == '\t') {
+            look += 1;
+        }
+        let Some((next, next_end)) = read_vbs_string(chars, look) else {
+            break;
+        };
+        command.push_str(&next);
+        end = next_end;
+    }
+    (command, end)
 }
 
 fn vbs_comment(chars: &[char], index: usize) -> bool {
@@ -32451,6 +32486,10 @@ mod tests {
             "fold.vbs",
             "createobject(\"wscript.shell\").run \"git push origin main\", 0, True\n",
         );
+        write_host(
+            "concat.vbs",
+            "CreateObject(\"WScript.Shell\").Run \"git \" & \"push origin main\", 0, True\n",
+        );
         write_host("echo.vbs", "WScript.Echo \"git push origin main\"\n");
         write_host(
             "note.vbs",
@@ -32546,7 +32585,10 @@ mod tests {
             format!("py.exe -3 {}", path("payload.py")),
             "py -3 -c \"import os; os.system('git push origin main')\"".to_string(),
             format!("cscript //nologo {}", path("payload.vbs")),
+            format!("cscript /nologo {}", path("payload.vbs")),
+            format!("cscript /NoLogo {}", path("payload.vbs")),
             format!("cscript.exe //NoLogo {}", path("payload.vbs")),
+            format!("cscript //nologo {}", path("concat.vbs")),
             format!("cscript //B //nologo {}", path("call.vbs")),
             format!("cscript {}", path("set.vbs")),
             format!("cscript //nologo {}", path("fold.vbs")),
