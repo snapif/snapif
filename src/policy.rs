@@ -669,6 +669,15 @@ fn check_action(
 /// not. `-Command -` reads the heredoc and a `< path` redirect.
 /// `cmd /c` of a `.bat` or `.cmd` path reads the file, and `call`
 /// of that path does too.
+/// `cscript` and `wscript`, including `.exe`, run a script file.
+/// A word that starts with `//` is a host switch. One slash is a
+/// host switch for `B`, `D`, `I`, `Logo`, `Nologo`, `S`, `U`, `X`,
+/// and for `E:`, `H:`, `Job:`, and `T:` when the value is in that
+/// word, in any ASCII case. Any other `/word` is the script name,
+/// so `/?` does not skip ahead to a later file. A missing file
+/// stays unmatched. `WScript.Shell` `Run` of a string is the
+/// command. Adjacent quoted pieces joined with `&` are one command.
+/// A script that only prints stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -1335,7 +1344,7 @@ fn consider_segment<'a>(
                 scope.dir.as_deref(),
                 best,
             );
-            score_cscript(
+            score_wsh(
                 policy,
                 tool_name,
                 &executed.argv,
@@ -9543,13 +9552,14 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
     texts
 }
 
-/// `cscript //nologo file.vbs` and `cscript /nologo file.vbs` run that
-/// file. A `//` word is a host switch, and so is `/nologo` in any ASCII
-/// case. `WScript.Shell` `Run` of a string is the command. Adjacent
-/// quoted pieces joined with `&` are one command. A missing file stays
-/// unmatched.
+/// `cscript` and `wscript` run a script file. `wscript.exe` is the
+/// same host. A `//` word is a host switch. One slash is a switch
+/// only for the documented names, so an unknown `/word` stays the
+/// script name. `WScript.Shell` `Run` of a string is the command.
+/// Adjacent quoted pieces joined with `&` are one command. A missing
+/// file stays unmatched.
 #[allow(clippy::too_many_arguments)]
-fn score_cscript<'a>(
+fn score_wsh<'a>(
     policy: &'a Policy,
     tool_name: &str,
     argv: &[String],
@@ -9562,13 +9572,14 @@ fn score_cscript<'a>(
     let Some(first) = argv.first() else {
         return;
     };
-    if !command_basename(first).eq_ignore_ascii_case("cscript") {
+    let base = command_basename(first);
+    if !base.eq_ignore_ascii_case("cscript") && !base.eq_ignore_ascii_case("wscript") {
         return;
     }
     let mut index = 1usize;
     while index < argv.len() {
         let arg = argv[index].as_str();
-        if cscript_switch(arg) {
+        if wsh_switch(arg) {
             index += 1;
             continue;
         }
@@ -9628,12 +9639,30 @@ fn vbs_shell_runs(text: &str) -> Vec<String> {
     if shell { commands } else { Vec::new() }
 }
 
-fn cscript_switch(arg: &str) -> bool {
+/// Host options use `//`, or one slash for a documented name.
+/// `B`, `D`, `I`, `Logo`, `Nologo`, `S`, `U`, and `X` are exact.
+/// `E:`, `H:`, `Job:`, and `T:` keep the value in the same word.
+/// `/?` and any other `/word` are not switches: that word may be
+/// the script, and skipping it would score a later file the host
+/// does not run.
+fn wsh_switch(arg: &str) -> bool {
     if arg.starts_with("//") {
         return true;
     }
-    arg.strip_prefix('/')
-        .is_some_and(|rest| rest.eq_ignore_ascii_case("nologo"))
+    let Some(rest) = arg.strip_prefix('/') else {
+        return false;
+    };
+    const FLAGS: &[&str] = &["b", "d", "i", "logo", "nologo", "s", "u", "x"];
+    if FLAGS.iter().any(|flag| rest.eq_ignore_ascii_case(flag)) {
+        return true;
+    }
+    let Some((name, _)) = rest.split_once(':') else {
+        return false;
+    };
+    name.eq_ignore_ascii_case("e")
+        || name.eq_ignore_ascii_case("h")
+        || name.eq_ignore_ascii_case("job")
+        || name.eq_ignore_ascii_case("t")
 }
 
 /// `"git " & "push origin main"` is one command. A piece that is not a
@@ -32496,6 +32525,15 @@ mod tests {
             "' CreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\nWScript.Echo \"ok\"\n",
         );
         write_host("other.vbs", "sh.Run \"git push origin main\", 0, True\n");
+        write_host(
+            "payload.js",
+            "new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\");\n",
+        );
+        write_host(
+            "payload.wsf",
+            "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
+        );
+        write_host("echo.js", "WScript.Echo(\"git push origin main\");\n");
         let sh = path("payload.sh");
         let ps1 = path("payload.ps1");
         let bat = path("payload.bat");
@@ -32592,6 +32630,29 @@ mod tests {
             format!("cscript //B //nologo {}", path("call.vbs")),
             format!("cscript {}", path("set.vbs")),
             format!("cscript //nologo {}", path("fold.vbs")),
+            format!("wscript {}", path("payload.vbs")),
+            format!("wscript.exe //nologo {}", path("payload.vbs")),
+            format!("WScript.exe /NoLogo {}", path("payload.vbs")),
+            format!("C:\\Windows\\System32\\wscript.exe {}", path("payload.vbs")),
+            format!("wscript /b {}", path("payload.vbs")),
+            format!("wscript /B {}", path("call.vbs")),
+            format!("wscript /nologo /b {}", path("concat.vbs")),
+            format!("cscript /b {}", path("payload.vbs")),
+            format!("cscript /B {}", path("payload.vbs")),
+            format!("cscript /d {}", path("payload.vbs")),
+            format!("cscript /I {}", path("payload.vbs")),
+            format!("cscript /logo {}", path("payload.vbs")),
+            format!("cscript /S {}", path("payload.vbs")),
+            format!("cscript /u {}", path("payload.vbs")),
+            format!("cscript /X {}", path("payload.vbs")),
+            format!("cscript /E:VBScript {}", path("payload.vbs")),
+            format!("cscript /h:wscript {}", path("payload.vbs")),
+            format!("cscript /Job:main {}", path("payload.vbs")),
+            format!("cscript /T:5 {}", path("set.vbs")),
+            format!("cscript /nologo /b /t:2 {}", path("fold.vbs")),
+            format!("wscript {}", path("payload.js")),
+            format!("wscript //nologo {}", path("payload.wsf")),
+            format!("cscript /b {}", path("payload.js")),
         ];
         for command in &review {
             assert_eq!(
@@ -32644,6 +32705,26 @@ mod tests {
             format!("cscript //nologo {}", path("echo.vbs")),
             format!("cscript //nologo {}", path("note.vbs")),
             format!("cscript //nologo {}", path("other.vbs")),
+            format!(
+                "wscript {}",
+                path("payload.vbs").replace("payload.vbs", "missing.vbs")
+            ),
+            format!("wscript /b {}", path("echo.vbs")),
+            format!("wscript //nologo {}", path("echo.js")),
+            format!("cscript /b {}", path("echo.vbs")),
+            format!("cscript /b {}", path("note.vbs")),
+            format!("cscript /b {}", path("other.vbs")),
+            format!(
+                "cscript /b {}",
+                path("payload.vbs").replace("payload.vbs", "missing.vbs")
+            ),
+            format!("cscript /notaswitch {}", path("payload.vbs")),
+            format!("cscript /? {}", path("payload.vbs")),
+            format!("cscript /E {}", path("payload.vbs")),
+            format!("cscript /blog {}", path("payload.vbs")),
+            format!("cscript /nolog {}", path("payload.vbs")),
+            "wscript /b".to_string(),
+            "cscript /H:CScript".to_string(),
             format!("echo py -3 {}", path("payload.py")),
         ];
         for command in &quiet {
