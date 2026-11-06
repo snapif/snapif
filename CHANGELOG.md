@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.9](https://github.com/snapif/snapif/compare/snapif-v0.2.8...snapif-v0.2.9) (2026-11-06)
+
+
+### Bug Fixes
+
+* score cscript /nologo and a joined Run string ([#265](https://github.com/snapif/snapif/issues/265)) ([02ecdd1](https://github.com/snapif/snapif/commit/02ecdd1ea4f01827a5ca2ea1114a3c59d0f57687)), closes [#262](https://github.com/snapif/snapif/issues/262)
+
 ## [0.2.8](https://github.com/snapif/snapif/compare/snapif-v0.2.7...snapif-v0.2.8) (2026-10-28)
 
 
