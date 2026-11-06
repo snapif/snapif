@@ -253,6 +253,8 @@ The library entry points are `Policy::shipped`, `GateRequest`, `Client`, and `Ve
 
 `Verdict::Auto` means this policy has no objection. The host still decides whether to run the tool.
 
+The local matcher picks the policy row. The decision model answers the shipped tool-gate questions about the original tool call. The row's thresholds turn those answers into Auto, Review, or Escalate. `matched_action` reads the shell text and returns an id such as `bash.rm` or `git.push`. A command that matches nothing stays on the default row. A milder harm label than the row stays off Auto.
+
 ## Environment
 
 | Variable | Role |
