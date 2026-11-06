@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.10](https://github.com/snapif/snapif/compare/snapif-v0.2.9...snapif-v0.2.10) (2026-11-06)
+
+
+### Bug Fixes
+
+* inflate 7z members with sevenz-rust2 0.25 ([#275](https://github.com/snapif/snapif/issues/275)) ([992f191](https://github.com/snapif/snapif/commit/992f1913c0ac68398e844ababfe559562d7f02a1))
+* score wscript and the other cscript switches ([#271](https://github.com/snapif/snapif/issues/271)) ([b4f77ba](https://github.com/snapif/snapif/commit/b4f77ba7529b4e0fbd3d40a8bfeea4f9d33ed477))
+
 ## [0.2.9](https://github.com/snapif/snapif/compare/snapif-v0.2.8...snapif-v0.2.9) (2026-11-06)
 
 
