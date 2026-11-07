@@ -675,9 +675,10 @@ fn check_action(
 /// and for `E:`, `H:`, `Job:`, and `T:` when the value is in that
 /// word, in any ASCII case. Any other `/word` is the script name,
 /// so `/?` does not skip ahead to a later file. A missing file
-/// stays unmatched. `WScript.Shell` `Run` of a string is the
-/// command. Adjacent quoted pieces joined with `&` are one command.
-/// A script that only prints stays unmatched.
+/// stays unmatched. `WScript.Shell` `Run` or `Exec` of a string is
+/// the command. A `.js` file also reads a single-quoted string.
+/// Adjacent quoted pieces joined with `&` are one command. A script
+/// that only prints stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -9555,7 +9556,8 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// `cscript` and `wscript` run a script file. `wscript.exe` is the
 /// same host. A `//` word is a host switch. One slash is a switch
 /// only for the documented names, so an unknown `/word` stays the
-/// script name. `WScript.Shell` `Run` of a string is the command.
+/// script name. `WScript.Shell` `Run` or `Exec` of a string is the
+/// command. A `.js` file also reads a single-quoted string.
 /// Adjacent quoted pieces joined with `&` are one command. A missing
 /// file stays unmatched.
 #[allow(clippy::too_many_arguments)]
@@ -9583,9 +9585,10 @@ fn score_wsh<'a>(
             index += 1;
             continue;
         }
-        match load_script_file(&shell_path(arg, dir)) {
+        let script_path = shell_path(arg, dir);
+        match load_script_file(&script_path) {
             Some(ScriptFile::Text(text)) => {
-                let commands = vbs_shell_runs(&text);
+                let commands = vbs_shell_runs(&text, wsh_jscript(&script_path));
                 scan_isolated(policy, tool_name, &commands, depth, local, git, best);
             }
             Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
@@ -9595,27 +9598,46 @@ fn score_wsh<'a>(
     }
 }
 
-fn vbs_shell_runs(text: &str) -> Vec<String> {
+/// A `.js` path is JScript: `'` starts a string. Any other path
+/// keeps the VBScript rule that `'` starts a comment.
+fn wsh_jscript(path: &str) -> bool {
+    let name = path
+        .rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(path)
+        .trim_end_matches([' ', '\t', '.']);
+    name.rsplit_once('.')
+        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("js"))
+}
+
+fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
     let mut shell = false;
     let mut index = 0usize;
     while index < chars.len() {
-        if vbs_comment(&chars, index) {
+        if jscript {
+            if starts_with(&chars, index, "//") {
+                index = skip_line(&chars, index);
+                continue;
+            }
+            if starts_with(&chars, index, "/*") {
+                index = skip_block(&chars, index + 2);
+                continue;
+            }
+        } else if vbs_comment(&chars, index) {
             index = skip_line(&chars, index);
             continue;
         }
-        if chars[index] == '"'
-            && let Some((body, end)) = read_vbs_string(&chars, index)
-        {
+        if let Some((body, end)) = read_wsh_string(&chars, index, jscript) {
             if body.eq_ignore_ascii_case("WScript.Shell") {
                 shell = true;
             }
             index = end;
             continue;
         }
-        if vbs_run_at(&chars, index) {
-            let mut cursor = index + 4;
+        if let Some(after) = vbs_call_at(&chars, index) {
+            let mut cursor = after;
             while cursor < chars.len() && chars[cursor].is_whitespace() {
                 cursor += 1;
             }
@@ -9625,8 +9647,8 @@ fn vbs_shell_runs(text: &str) -> Vec<String> {
                     cursor += 1;
                 }
             }
-            if let Some((command, end)) = read_vbs_string(&chars, cursor) {
-                let (command, end) = join_vbs_ampersand(&chars, command, end);
+            if let Some((command, end)) = read_wsh_string(&chars, cursor, jscript) {
+                let (command, end) = join_vbs_ampersand(&chars, command, end, jscript);
                 if !command.is_empty() {
                     commands.push(command);
                 }
@@ -9667,7 +9689,12 @@ fn wsh_switch(arg: &str) -> bool {
 
 /// `"git " & "push origin main"` is one command. A piece that is not a
 /// quoted string stops the join and keeps the text already read.
-fn join_vbs_ampersand(chars: &[char], mut command: String, mut end: usize) -> (String, usize) {
+fn join_vbs_ampersand(
+    chars: &[char],
+    mut command: String,
+    mut end: usize,
+    jscript: bool,
+) -> (String, usize) {
     loop {
         let mut look = end;
         while chars.get(look).is_some_and(|ch| *ch == ' ' || *ch == '\t') {
@@ -9680,7 +9707,7 @@ fn join_vbs_ampersand(chars: &[char], mut command: String, mut end: usize) -> (S
         while chars.get(look).is_some_and(|ch| *ch == ' ' || *ch == '\t') {
             look += 1;
         }
-        let Some((next, next_end)) = read_vbs_string(chars, look) else {
+        let Some((next, next_end)) = read_wsh_string(chars, look, jscript) else {
             break;
         };
         command.push_str(&next);
@@ -9717,13 +9744,68 @@ fn vbs_comment(chars: &[char], index: usize) -> bool {
     true
 }
 
-fn vbs_run_at(chars: &[char], index: usize) -> bool {
-    if chars[index] != '.' || !starts_with_ignore(chars, index + 1, "run") {
-        return false;
+/// `.Run` and `.Exec` take the command string. `.Execute` and
+/// `.Running` are longer names, so the next character ends the match.
+fn vbs_call_at(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'.') {
+        return None;
     }
-    !chars
-        .get(index + 4)
-        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+    for name in ["exec", "run"] {
+        if !starts_with_ignore(chars, index + 1, name) {
+            continue;
+        }
+        let after = index + 1 + name.len();
+        if chars
+            .get(after)
+            .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        {
+            return None;
+        }
+        return Some(after);
+    }
+    None
+}
+
+fn read_wsh_string(chars: &[char], index: usize, jscript: bool) -> Option<(String, usize)> {
+    let quote = *chars.get(index)?;
+    if jscript && (quote == '"' || quote == '\'') {
+        return read_js_string(chars, index);
+    }
+    if quote == '"' {
+        return read_vbs_string(chars, index);
+    }
+    None
+}
+
+/// JScript uses `\'` and `\\`. A bare newline still ends the string,
+/// which is the same rule as a VBScript quote.
+fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
+    let quote = *chars.get(index)?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let mut cursor = index + 1;
+    let mut text = String::new();
+    while cursor < chars.len() {
+        if chars[cursor] == '\\' {
+            let next = *chars.get(cursor + 1)?;
+            if next == '\n' {
+                return None;
+            }
+            text.push(unescape(next));
+            cursor += 2;
+            continue;
+        }
+        if chars[cursor] == quote {
+            return Some((text, cursor + 1));
+        }
+        if chars[cursor] == '\n' {
+            return None;
+        }
+        text.push(chars[cursor]);
+        cursor += 1;
+    }
+    None
 }
 
 fn read_vbs_string(chars: &[char], index: usize) -> Option<(String, usize)> {
@@ -32420,6 +32502,90 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// JScript quotes `WScript.Shell` and `Run` with `'`. `Exec`
+    /// passes the same string `Run` does. A VBScript `'` is a comment,
+    /// and `Execute` is not `Exec`.
+    #[test]
+    fn wsh_single_quoted_jscript_and_exec_are_the_command() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('cmd /c echo single', 0, true);\n",
+                true,
+            ),
+            vec!["cmd /c echo single".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('cmd /c echo it\\'s');\n",
+                true,
+            ),
+            vec!["cmd /c echo it's".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Exec \"cmd /c echo exec\"\n",
+                false,
+            ),
+            vec!["cmd /c echo exec".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Exec \"cmd /c echo exec> \"\"C:\\Temp\\ex.txt\"\"\"\n",
+                false,
+            ),
+            vec!["cmd /c echo exec> \"C:\\Temp\\ex.txt\"".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Exec \"git \" & \"push origin main\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run 'git push origin main'\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Execute \"git push origin main\"\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "// new ActiveXObject('WScript.Shell').Run('git push origin main');\nWScript.Echo('ok');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "// note\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "/* new ActiveXObject('WScript.Shell').Run('git push origin main'); */\nWScript.Echo('ok');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "/* note */ new ActiveXObject('WScript.Shell').Run('git push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+    }
+
     /// These are the command strings a Windows host ran. The backslashes
     /// stay in the string. Replacing them with `/` before the call is a
     /// different spelling, and a missing `script.ps1` does not prove the
@@ -32530,10 +32696,39 @@ mod tests {
             "new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\");\n",
         );
         write_host(
+            "single.js",
+            "new ActiveXObject('WScript.Shell').Run('git push origin main', 0, true);\n",
+        );
+        write_host(
+            "exec.vbs",
+            "CreateObject(\"WScript.Shell\").Exec \"git push origin main\"\n",
+        );
+        write_host(
+            "exec-call.vbs",
+            "CreateObject(\"WScript.Shell\").Exec(\"git push origin main\")\n",
+        );
+        write_host(
             "payload.wsf",
             "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
         );
         write_host("echo.js", "WScript.Echo(\"git push origin main\");\n");
+        write_host("echo-single.js", "WScript.Echo('git push origin main');\n");
+        write_host(
+            "echo-exec.vbs",
+            "CreateObject(\"WScript.Shell\").Exec \"cmd /c echo exec\"\n",
+        );
+        write_host(
+            "execute.vbs",
+            "CreateObject(\"WScript.Shell\").Execute \"git push origin main\"\n",
+        );
+        write_host(
+            "quote-note.vbs",
+            "CreateObject(\"WScript.Shell\").Run 'git push origin main'\n",
+        );
+        write_host(
+            "comment.js",
+            "// new ActiveXObject('WScript.Shell').Run('git push origin main');\nWScript.Echo('ok');\n",
+        );
         let sh = path("payload.sh");
         let ps1 = path("payload.ps1");
         let bat = path("payload.bat");
@@ -32653,6 +32848,9 @@ mod tests {
             format!("wscript {}", path("payload.js")),
             format!("wscript //nologo {}", path("payload.wsf")),
             format!("cscript /b {}", path("payload.js")),
+            format!("cscript //nologo {}", path("single.js")),
+            format!("cscript //nologo {}", path("exec.vbs")),
+            format!("cscript //nologo {}", path("exec-call.vbs")),
         ];
         for command in &review {
             assert_eq!(
@@ -32711,6 +32909,11 @@ mod tests {
             ),
             format!("wscript /b {}", path("echo.vbs")),
             format!("wscript //nologo {}", path("echo.js")),
+            format!("cscript //nologo {}", path("echo-single.js")),
+            format!("cscript //nologo {}", path("echo-exec.vbs")),
+            format!("cscript //nologo {}", path("execute.vbs")),
+            format!("cscript //nologo {}", path("quote-note.vbs")),
+            format!("cscript //nologo {}", path("comment.js")),
             format!("cscript /b {}", path("echo.vbs")),
             format!("cscript /b {}", path("note.vbs")),
             format!("cscript /b {}", path("other.vbs")),
