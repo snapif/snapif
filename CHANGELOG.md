@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.11](https://github.com/snapif/snapif/compare/snapif-v0.2.10...snapif-v0.2.11) (2026-11-07)
+
+
+### Bug Fixes
+
+* score single-quoted JScript and WScript.Shell Exec ([#278](https://github.com/snapif/snapif/issues/278)) ([95a6b83](https://github.com/snapif/snapif/commit/95a6b83f72e75b25fd269b5c215c80a7d9c4ac8f))
+
 ## [0.2.10](https://github.com/snapif/snapif/compare/snapif-v0.2.9...snapif-v0.2.10) (2026-11-06)
 
 
