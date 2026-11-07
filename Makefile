@@ -33,7 +33,7 @@ workflows: ## actionlint and zizmor, same bar as CI
 	actionlint
 	zizmor --min-severity=high .github/workflows
 
-check: ## fmt, stealth, clippy, test, deny, workflow lint
+check: ## fmt, stealth, clippy, rustdoc, test, deny, workflow lint
 	cargo fmt --check
 	$(MAKE) stealth
 	RUSTFLAGS="-D warnings" cargo clippy --locked --all-targets -- -D warnings
