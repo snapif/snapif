@@ -14,7 +14,7 @@ cd snapif
 make check
 ```
 
-`make check` is the local gate: format, stealth, clippy, tests, deny, and workflow lint.
+`make check` is the local gate: format, stealth, clippy, rustdoc, tests, deny, and workflow lint.
 
 ## Pull requests
 
