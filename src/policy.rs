@@ -677,8 +677,9 @@ fn check_action(
 /// so `/?` does not skip ahead to a later file. A missing file
 /// stays unmatched. `WScript.Shell` `Run` or `Exec` of a string is
 /// the command. A `.js` file also reads a single-quoted string.
-/// Adjacent quoted pieces joined with `&` or `+` are one command. A
-/// script that only prints stays unmatched.
+/// `+` joins quoted pieces in both languages, and `&` joins them only
+/// in VBScript. A `.js` `&` keeps the first piece. A script that only
+/// prints stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -9558,7 +9559,8 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// only for the documented names, so an unknown `/word` stays the
 /// script name. `WScript.Shell` `Run` or `Exec` of a string is the
 /// command. A `.js` file also reads a single-quoted string.
-/// Adjacent quoted pieces joined with `&` or `+` are one command. A
+/// `+` joins quoted pieces in both languages, and `&` joins them only
+/// in VBScript. A `.js` `&` keeps the first piece. A
 /// VBScript `_` at the end of a line continues `Run` or `Exec`. A
 /// missing file stays unmatched.
 #[allow(clippy::too_many_arguments)]
@@ -9840,9 +9842,11 @@ fn read_wsh_string(chars: &[char], index: usize, jscript: bool) -> Option<(Strin
 }
 
 /// JScript uses `\'` and `\\`. `\n`, `\t`, and `\r` are those
-/// characters. `\u` plus four hex digits, and `\x` plus two, are that
-/// scalar. A short or non-hex `\u` or `\x` stays the letter. A bare
-/// newline still ends the string, which is the same rule as a
+/// characters. `\u` plus four hex digits becomes that scalar when it
+/// is a Unicode scalar. A surrogate is not a scalar, so the letter `u`
+/// and the four digits stay in the text. `\x` plus two hex digits is
+/// that character. A short or non-hex `\u` or `\x` stays the letter. A
+/// bare newline still ends the string, which is the same rule as a
 /// VBScript quote.
 fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
     let quote = *chars.get(index)?;
@@ -32591,8 +32595,10 @@ mod tests {
     }
 
     /// JScript quotes `WScript.Shell` and `Run` with `'`. `Exec`
-    /// passes the same string `Run` does. `\u` plus four hex digits and
-    /// `\x` plus two hex digits are those characters. A short or
+    /// passes the same string `Run` does. `\u` plus four hex digits
+    /// becomes that scalar when it is a Unicode scalar. A surrogate is
+    /// not a scalar, so the letter `u` and the four digits stay in the
+    /// text. `\x` plus two hex digits is that character. A short or
     /// non-hex `\u` or `\x` stays the letter. A VBScript `'` is a
     /// comment, and `Execute` is not `Exec`.
     #[test]
