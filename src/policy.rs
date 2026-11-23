@@ -677,8 +677,8 @@ fn check_action(
 /// so `/?` does not skip ahead to a later file. A missing file
 /// stays unmatched. `WScript.Shell` `Run` or `Exec` of a string is
 /// the command. A `.js` file also reads a single-quoted string.
-/// Adjacent quoted pieces joined with `&` are one command. A script
-/// that only prints stays unmatched.
+/// Adjacent quoted pieces joined with `&` or `+` are one command. A
+/// script that only prints stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -9558,8 +9558,8 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// only for the documented names, so an unknown `/word` stays the
 /// script name. `WScript.Shell` `Run` or `Exec` of a string is the
 /// command. A `.js` file also reads a single-quoted string.
-/// Adjacent quoted pieces joined with `&` are one command. A missing
-/// file stays unmatched.
+/// Adjacent quoted pieces joined with `&` or `+` are one command. A
+/// missing file stays unmatched.
 #[allow(clippy::too_many_arguments)]
 fn score_wsh<'a>(
     policy: &'a Policy,
@@ -9648,7 +9648,7 @@ fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
                 }
             }
             if let Some((command, end)) = read_wsh_string(&chars, cursor, jscript) {
-                let (command, end) = join_vbs_ampersand(&chars, command, end, jscript);
+                let (command, end) = join_wsh_strings(&chars, command, end, jscript);
                 if !command.is_empty() {
                     commands.push(command);
                 }
@@ -9687,9 +9687,11 @@ fn wsh_switch(arg: &str) -> bool {
         || name.eq_ignore_ascii_case("t")
 }
 
-/// `"git " & "push origin main"` is one command. A piece that is not a
-/// quoted string stops the join and keeps the text already read.
-fn join_vbs_ampersand(
+/// `"git " & "push origin main"` and `"git " + "push origin main"` are
+/// one command. JScript concatenates with `+`. VBScript uses `&` and
+/// `+`. A piece that is not a quoted string stops the join and keeps
+/// the text already read.
+fn join_wsh_strings(
     chars: &[char],
     mut command: String,
     mut end: usize,
@@ -9700,7 +9702,7 @@ fn join_vbs_ampersand(
         while chars.get(look).is_some_and(|ch| *ch == ' ' || *ch == '\t') {
             look += 1;
         }
-        if chars.get(look) != Some(&'&') {
+        if !matches!(chars.get(look), Some('&' | '+')) {
             break;
         }
         look += 1;
@@ -32586,6 +32588,79 @@ mod tests {
         );
     }
 
+    /// JScript joins strings with `+`. VBScript accepts `+` as well as
+    /// `&`. A following piece that is not a quoted string stays off the
+    /// command. A print, a comment, and `.Execute` stay unmatched.
+    #[test]
+    fn wsh_plus_joins_quoted_pieces() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git ' + 'push origin main', 0, true);\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Exec('git '+'push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git ' + \"push \" + 'origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" + \"push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Exec(\"cmd /c echo \" + \"joined-by-plus\")\n",
+                false,
+            ),
+            vec!["cmd /c echo joined-by-plus".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" & \"push \" + \"origin main\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" + 1, 0, True\n",
+                false,
+            ),
+            vec!["git ".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs("WScript.Echo('git ' + 'push origin main');\n", true,).is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "' CreateObject(\"WScript.Shell\").Run \"git \" + \"push origin main\"\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Execute \"git \" + \"push origin main\"\n",
+                false,
+            )
+            .is_empty()
+        );
+    }
+
     /// These are the command strings a Windows host ran. The backslashes
     /// stay in the string. Replacing them with `/` before the call is a
     /// different spelling, and a missing `script.ps1` does not prove the
@@ -32684,6 +32759,18 @@ mod tests {
         write_host(
             "concat.vbs",
             "CreateObject(\"WScript.Shell\").Run \"git \" & \"push origin main\", 0, True\n",
+        );
+        write_host(
+            "plus.vbs",
+            "CreateObject(\"WScript.Shell\").Run \"git \" + \"push origin main\", 0, True\n",
+        );
+        write_host(
+            "plus.js",
+            "new ActiveXObject('WScript.Shell').Run('git ' + 'push origin main', 0, true);\n",
+        );
+        write_host(
+            "echo-plus.js",
+            "WScript.Echo('git ' + 'push origin main');\n",
         );
         write_host("echo.vbs", "WScript.Echo \"git push origin main\"\n");
         write_host(
@@ -32822,6 +32909,8 @@ mod tests {
             format!("cscript /NoLogo {}", path("payload.vbs")),
             format!("cscript.exe //NoLogo {}", path("payload.vbs")),
             format!("cscript //nologo {}", path("concat.vbs")),
+            format!("cscript //nologo {}", path("plus.vbs")),
+            format!("cscript //nologo {}", path("plus.js")),
             format!("cscript //B //nologo {}", path("call.vbs")),
             format!("cscript {}", path("set.vbs")),
             format!("cscript //nologo {}", path("fold.vbs")),
@@ -32910,6 +32999,7 @@ mod tests {
             format!("wscript /b {}", path("echo.vbs")),
             format!("wscript //nologo {}", path("echo.js")),
             format!("cscript //nologo {}", path("echo-single.js")),
+            format!("cscript //nologo {}", path("echo-plus.js")),
             format!("cscript //nologo {}", path("echo-exec.vbs")),
             format!("cscript //nologo {}", path("execute.vbs")),
             format!("cscript //nologo {}", path("quote-note.vbs")),
