@@ -9661,9 +9661,9 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32) -> Vec<String> {
             if cursor < chars.len() && chars[cursor] == '(' {
                 cursor = skip_wsh_call_gap(&chars, cursor + 1, jscript);
             }
-            cursor = skip_wsh_open_groups(&chars, cursor, jscript);
+            let (cursor, depth) = skip_wsh_open_groups(&chars, cursor, jscript);
             if let Some((command, end)) = read_wsh_string(&chars, cursor, jscript) {
-                let (command, end) = join_wsh_strings(&chars, command, end, jscript);
+                let (command, end) = join_wsh_strings(&chars, command, end, jscript, depth);
                 if !command.is_empty() {
                     commands.push(command);
                 }
@@ -9773,6 +9773,8 @@ fn wsh_switch(arg: &str) -> bool {
 /// not space. A `_` with only spaces or tabs before the newline is the
 /// VBScript continuation, so the join keeps looking. Parentheses
 /// around a quoted piece are grouping, so the join reads that piece.
+/// A `)` closes only a `(` this join opened. The `)` that ends `Run(`
+/// stays put, so a `+` after the call is not part of the command.
 /// A piece that is not a quoted string stops the join and keeps the
 /// text already read.
 fn join_wsh_strings(
@@ -9780,9 +9782,14 @@ fn join_wsh_strings(
     mut command: String,
     mut end: usize,
     jscript: bool,
+    mut depth: usize,
 ) -> (String, usize) {
     loop {
-        let mut look = skip_wsh_close_groups(chars, end, jscript);
+        let mut look = skip_wsh_join_gap(chars, end, jscript);
+        while depth > 0 && chars.get(look) == Some(&')') {
+            depth -= 1;
+            look = skip_wsh_join_gap(chars, look + 1, jscript);
+        }
         let joins = match chars.get(look) {
             Some('+') => true,
             Some('&') => !jscript,
@@ -9792,8 +9799,9 @@ fn join_wsh_strings(
             break;
         }
         look += 1;
-        look = skip_wsh_open_groups(chars, look, jscript);
-        let Some((next, next_end)) = read_wsh_string(chars, look, jscript) else {
+        let (next_look, opened) = skip_wsh_open_groups(chars, look, jscript);
+        depth += opened;
+        let Some((next, next_end)) = read_wsh_string(chars, next_look, jscript) else {
             break;
         };
         command.push_str(&next);
@@ -9820,24 +9828,16 @@ fn skip_wsh_call_gap(chars: &[char], mut cursor: usize, jscript: bool) -> usize 
     }
 }
 
-/// `(` before a joined quote is grouping. The quote itself stays put.
-fn skip_wsh_open_groups(chars: &[char], mut look: usize, jscript: bool) -> usize {
+/// `(` before a joined quote is grouping. The count is how many opened.
+/// The quote itself stays put.
+fn skip_wsh_open_groups(chars: &[char], mut look: usize, jscript: bool) -> (usize, usize) {
+    let mut depth = 0usize;
     loop {
         look = skip_wsh_join_gap(chars, look, jscript);
         if chars.get(look) != Some(&'(') {
-            return look;
+            return (look, depth);
         }
-        look += 1;
-    }
-}
-
-/// `)` after a grouped quote is grouping. The next operator stays put.
-fn skip_wsh_close_groups(chars: &[char], mut look: usize, jscript: bool) -> usize {
-    loop {
-        look = skip_wsh_join_gap(chars, look, jscript);
-        if chars.get(look) != Some(&')') {
-            return look;
-        }
+        depth += 1;
         look += 1;
     }
 }
@@ -33177,6 +33177,20 @@ mod tests {
                 true,
             ),
             vec!["git ".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git push') + ' origin main';\n",
+                true,
+            ),
+            vec!["git push".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run((('git ')) + 'push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
         );
         assert!(
             super::vbs_shell_runs("WScript.Echo('git ' + 'push origin main');\n", true,).is_empty()
