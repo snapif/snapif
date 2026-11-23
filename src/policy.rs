@@ -9559,6 +9559,7 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// script name. `WScript.Shell` `Run` or `Exec` of a string is the
 /// command. A `.js` file also reads a single-quoted string.
 /// Adjacent quoted pieces joined with `&` or `+` are one command. A
+/// VBScript `_` at the end of a line continues `Run` or `Exec`. A
 /// missing file stays unmatched.
 #[allow(clippy::too_many_arguments)]
 fn score_wsh<'a>(
@@ -9637,15 +9638,9 @@ fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
             continue;
         }
         if let Some(after) = vbs_call_at(&chars, index) {
-            let mut cursor = after;
-            while cursor < chars.len() && chars[cursor].is_whitespace() {
-                cursor += 1;
-            }
+            let mut cursor = skip_wsh_call_gap(&chars, after, jscript);
             if cursor < chars.len() && chars[cursor] == '(' {
-                cursor += 1;
-                while cursor < chars.len() && chars[cursor].is_whitespace() {
-                    cursor += 1;
-                }
+                cursor = skip_wsh_call_gap(&chars, cursor + 1, jscript);
             }
             if let Some((command, end)) = read_wsh_string(&chars, cursor, jscript) {
                 let (command, end) = join_wsh_strings(&chars, command, end, jscript);
@@ -9690,9 +9685,10 @@ fn wsh_switch(arg: &str) -> bool {
 /// `"git " & "push origin main"` and `"git " + "push origin main"` are
 /// one command. JScript concatenates with `+` and treats newline and
 /// CR as space on both sides of that operator. JScript `&` is bitwise
-/// AND, so the join stops. VBScript uses `&` and `+`, and a line break
-/// is not space. A piece that is not a quoted string stops the join
-/// and keeps the text already read.
+/// AND, so the join stops. VBScript uses `&` and `+`. A line break is
+/// not space. A `_` with only spaces or tabs before the newline is the
+/// VBScript continuation, so the join keeps looking. A piece that is
+/// not a quoted string stops the join and keeps the text already read.
 fn join_wsh_strings(
     chars: &[char],
     mut command: String,
@@ -9700,12 +9696,7 @@ fn join_wsh_strings(
     jscript: bool,
 ) -> (String, usize) {
     loop {
-        let mut look = end;
-        while chars.get(look).is_some_and(|ch| {
-            *ch == ' ' || *ch == '\t' || (jscript && (*ch == '\n' || *ch == '\r'))
-        }) {
-            look += 1;
-        }
+        let mut look = skip_wsh_join_gap(chars, end, jscript);
         let joins = match chars.get(look) {
             Some('+') => true,
             Some('&') => !jscript,
@@ -9715,11 +9706,7 @@ fn join_wsh_strings(
             break;
         }
         look += 1;
-        while chars.get(look).is_some_and(|ch| {
-            *ch == ' ' || *ch == '\t' || (jscript && (*ch == '\n' || *ch == '\r'))
-        }) {
-            look += 1;
-        }
+        look = skip_wsh_join_gap(chars, look, jscript);
         let Some((next, next_end)) = read_wsh_string(chars, look, jscript) else {
             break;
         };
@@ -9727,6 +9714,68 @@ fn join_wsh_strings(
         end = next_end;
     }
     (command, end)
+}
+
+/// Whitespace between `.Run` or `.Exec` and the command. VBScript also
+/// skips a `_` with only spaces or tabs before the newline, then keeps
+/// looking. A `_` with more code on that line stays put.
+fn skip_wsh_call_gap(chars: &[char], mut cursor: usize, jscript: bool) -> usize {
+    loop {
+        while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+            cursor += 1;
+        }
+        if jscript {
+            return cursor;
+        }
+        let Some(next) = vbs_line_continuation(chars, cursor) else {
+            return cursor;
+        };
+        cursor = next;
+    }
+}
+
+/// Space around a VBScript or JScript join operator. JScript also
+/// skips a newline. VBScript skips a `_` line continuation instead,
+/// and a bare newline still stops the join.
+fn skip_wsh_join_gap(chars: &[char], mut look: usize, jscript: bool) -> usize {
+    loop {
+        while chars.get(look).is_some_and(|ch| {
+            *ch == ' ' || *ch == '\t' || (jscript && (*ch == '\n' || *ch == '\r'))
+        }) {
+            look += 1;
+        }
+        if jscript {
+            return look;
+        }
+        let Some(next) = vbs_line_continuation(chars, look) else {
+            return look;
+        };
+        look = next;
+    }
+}
+
+/// `_` then only spaces or tabs, then a newline, continues a VBScript
+/// line. More code on that line is not a continuation. The index is
+/// just after the break, and `\r\n` counts as one break.
+fn vbs_line_continuation(chars: &[char], index: usize) -> Option<usize> {
+    if chars.get(index) != Some(&'_') {
+        return None;
+    }
+    let mut look = index + 1;
+    while chars.get(look).is_some_and(|ch| *ch == ' ' || *ch == '\t') {
+        look += 1;
+    }
+    match chars.get(look)? {
+        '\n' => Some(look + 1),
+        '\r' => {
+            let mut next = look + 1;
+            if chars.get(next) == Some(&'\n') {
+                next += 1;
+            }
+            Some(next)
+        }
+        _ => None,
+    }
 }
 
 fn vbs_comment(chars: &[char], index: usize) -> bool {
@@ -9790,8 +9839,11 @@ fn read_wsh_string(chars: &[char], index: usize, jscript: bool) -> Option<(Strin
     None
 }
 
-/// JScript uses `\'` and `\\`. A bare newline still ends the string,
-/// which is the same rule as a VBScript quote.
+/// JScript uses `\'` and `\\`. `\n`, `\t`, and `\r` are those
+/// characters. `\u` plus four hex digits, and `\x` plus two, are that
+/// scalar. A short or non-hex `\u` or `\x` stays the letter. A bare
+/// newline still ends the string, which is the same rule as a
+/// VBScript quote.
 fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
     let quote = *chars.get(index)?;
     if quote != '"' && quote != '\'' {
@@ -9804,6 +9856,18 @@ fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
             let next = *chars.get(cursor + 1)?;
             if next == '\n' {
                 return None;
+            }
+            let width = match next {
+                'u' => Some(4),
+                'x' => Some(2),
+                _ => None,
+            };
+            if let Some(width) = width
+                && let Some(ch) = js_hex_escape(chars, cursor + 2, width)
+            {
+                text.push(ch);
+                cursor += 2 + width;
+                continue;
             }
             text.push(unescape(next));
             cursor += 2;
@@ -9819,6 +9883,17 @@ fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
         cursor += 1;
     }
     None
+}
+
+/// `\u` is four hex digits and `\x` is two. Anything shorter, or a
+/// non-hex digit, is not this escape. A surrogate is not a scalar.
+fn js_hex_escape(chars: &[char], index: usize, width: usize) -> Option<char> {
+    let mut value = 0u32;
+    for offset in 0..width {
+        let digit = chars.get(index + offset)?.to_digit(16)?;
+        value = value * 16 + digit;
+    }
+    char::from_u32(value)
 }
 
 fn read_vbs_string(chars: &[char], index: usize) -> Option<(String, usize)> {
@@ -32516,8 +32591,10 @@ mod tests {
     }
 
     /// JScript quotes `WScript.Shell` and `Run` with `'`. `Exec`
-    /// passes the same string `Run` does. A VBScript `'` is a comment,
-    /// and `Execute` is not `Exec`.
+    /// passes the same string `Run` does. `\u` plus four hex digits and
+    /// `\x` plus two hex digits are those characters. A short or
+    /// non-hex `\u` or `\x` stays the letter. A VBScript `'` is a
+    /// comment, and `Execute` is not `Exec`.
     #[test]
     fn wsh_single_quoted_jscript_and_exec_are_the_command() {
         assert_eq!(
@@ -32597,13 +32674,73 @@ mod tests {
             ),
             vec!["git push origin main".to_string()],
         );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run(\"\\u0067it push origin main\");\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\x67it push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\u67it push origin main');\n",
+                true,
+            ),
+            vec!["u67it push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\x6it push origin main');\n",
+                true,
+            ),
+            vec!["x6it push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\xGGit push origin main');\n",
+                true,
+            ),
+            vec!["xGGit push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\u{0067}it push origin main');\n",
+                true,
+            ),
+            vec!["u{0067}it push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('a\\nb\\tc\\rd');\n",
+                true,
+            ),
+            vec!["a\nb\tc\rd".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"\\u0067it push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["\\u0067it push origin main".to_string()],
+        );
     }
 
     /// JScript joins strings with `+`, including across a newline or
     /// CR. JScript `&` is bitwise AND, so that call keeps the first
-    /// piece. VBScript accepts `+` as well as `&`, and a line break is
-    /// not a join. A following piece that is not a quoted string stays
-    /// off the command. A print, a comment, and `.Execute` stay unmatched.
+    /// piece. VBScript accepts `+` as well as `&`. A line break is not
+    /// a join. A `_` with only spaces or tabs before the newline is the
+    /// VBScript continuation, so `Run` still reads the string. A `_`
+    /// with more code on that line is not a continuation. JScript does
+    /// not continue on `_`. A following piece that is not a quoted
+    /// string stays off the command. A print, a comment, and `.Execute`
+    /// stay unmatched.
     #[test]
     fn wsh_plus_joins_quoted_pieces() {
         assert_eq!(
@@ -32713,6 +32850,76 @@ mod tests {
                 false,
             )
             .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run _\n\"git push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run _\r\n\"git push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run _ \t\n\"git push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Exec _\n\"git push origin main\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" & _\n\"push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" _\n& \"push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" &\n\"push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git ".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"git \" & _ \"push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git ".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run _ \"git push origin main\", 0, True\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git ' + _\n'push origin main');\n",
+                true,
+            ),
+            vec!["git ".to_string()],
         );
     }
 
@@ -32826,6 +33033,18 @@ mod tests {
         write_host(
             "plus-line.js",
             "new ActiveXObject('WScript.Shell').Run('git ' +\n'push origin main');\n",
+        );
+        write_host(
+            "continue.vbs",
+            "CreateObject(\"WScript.Shell\").Run _\n\"git push origin main\", 0, True\n",
+        );
+        write_host(
+            "bare.vbs",
+            "CreateObject(\"WScript.Shell\").Run \"git \" +\n\"push origin main\"\n",
+        );
+        write_host(
+            "unicode.js",
+            "new ActiveXObject('WScript.Shell').Run(\"\\u0067it push origin main\");\n",
         );
         write_host(
             "and.js",
@@ -33004,6 +33223,8 @@ mod tests {
             format!("cscript //nologo {}", path("single.js")),
             format!("cscript //nologo {}", path("exec.vbs")),
             format!("cscript //nologo {}", path("exec-call.vbs")),
+            format!("cscript //nologo {}", path("continue.vbs")),
+            format!("cscript //nologo {}", path("unicode.js")),
         ];
         for command in &review {
             assert_eq!(
@@ -33065,6 +33286,7 @@ mod tests {
             format!("cscript //nologo {}", path("echo-single.js")),
             format!("cscript //nologo {}", path("echo-plus.js")),
             format!("cscript //nologo {}", path("and.js")),
+            format!("cscript //nologo {}", path("bare.vbs")),
             format!("cscript //nologo {}", path("echo-exec.vbs")),
             format!("cscript //nologo {}", path("execute.vbs")),
             format!("cscript //nologo {}", path("quote-note.vbs")),
