@@ -9653,10 +9653,6 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// including a missing one, stays VBScript. A `<![CDATA[` wrapper is
 /// not part of the script. `src` is loaded from beside the `.wsf`
 /// file.
-fn wsf_shell_runs(text: &str) -> Vec<String> {
-    wsf_shell_runs_at(text, None)
-}
-
 fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
@@ -33543,20 +33539,23 @@ mod tests {
     #[test]
     fn wsf_jscript_block_scores_single_quotes() {
         assert_eq!(
-            super::wsf_shell_runs(
+            super::wsf_shell_runs_at(
                 "<job><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
+                None,
             ),
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs(
+            super::wsf_shell_runs_at(
                 "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
+                None,
             ),
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs(
+            super::wsf_shell_runs_at(
                 "<job><script language='JScript'><![CDATA[\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n]]></script></job>\n",
+                None,
             ),
             vec!["git push origin main".to_string()],
         );
