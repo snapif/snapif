@@ -9615,7 +9615,11 @@ fn score_wsh<'a>(
         let script_path = shell_path(arg, dir);
         match load_script_file(&script_path) {
             Some(ScriptFile::Text(text)) => {
-                let commands = vbs_shell_runs(&text, wsh_jscript(&script_path));
+                let commands = if wsh_wsf(&script_path) {
+                    wsf_shell_runs(&text)
+                } else {
+                    vbs_shell_runs(&text, wsh_jscript(&script_path))
+                };
                 scan_isolated(policy, tool_name, &commands, depth, local, git, best);
             }
             Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
@@ -9628,13 +9632,138 @@ fn score_wsh<'a>(
 /// A `.js` path is JScript: `'` starts a string. Any other path
 /// keeps the VBScript rule that `'` starts a comment.
 fn wsh_jscript(path: &str) -> bool {
+    wsh_extension(path).is_some_and(|ext| ext.eq_ignore_ascii_case("js"))
+}
+
+fn wsh_wsf(path: &str) -> bool {
+    wsh_extension(path).is_some_and(|ext| ext.eq_ignore_ascii_case("wsf"))
+}
+
+fn wsh_extension(path: &str) -> Option<&str> {
     let name = path
         .rsplit(['/', '\\'])
         .find(|part| !part.is_empty())
         .unwrap_or(path)
         .trim_end_matches([' ', '\t', '.']);
-    name.rsplit_once('.')
-        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("js"))
+    name.rsplit_once('.').map(|(_, ext)| ext)
+}
+
+/// A `.wsf` file runs each `<script>` body. `language="JScript"` or
+/// `JavaScript` scores that body as JScript. Any other language,
+/// including a missing one, stays VBScript. A `<![CDATA[` wrapper is
+/// not part of the script.
+fn wsf_shell_runs(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut commands = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let Some(tag) = wsf_script_tag(&chars, index) else {
+            break;
+        };
+        let Some(header_end) = chars[tag..].iter().position(|ch| *ch == '>') else {
+            break;
+        };
+        let header_end = tag + header_end;
+        let header: String = chars[tag..header_end].iter().collect();
+        let jscript = wsf_header_jscript(&header);
+        let body_start = header_end + 1;
+        let Some(close) = wsf_script_close(&chars, body_start) else {
+            break;
+        };
+        let body: String = chars[body_start..close].iter().collect();
+        commands.extend(vbs_shell_runs(&wsf_strip_cdata(&body), jscript));
+        index = close + "</script>".chars().count();
+    }
+    commands
+}
+
+fn wsf_script_tag(chars: &[char], mut index: usize) -> Option<usize> {
+    while index < chars.len() {
+        if chars[index] == '<' {
+            let mut name = index + 1;
+            while chars.get(name).is_some_and(|ch| ch.is_whitespace()) {
+                name += 1;
+            }
+            if starts_with_ignore(chars, name, "script") {
+                let after = name + "script".len();
+                if !chars
+                    .get(after)
+                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                {
+                    return Some(index);
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn wsf_script_close(chars: &[char], mut index: usize) -> Option<usize> {
+    while index < chars.len() {
+        if chars[index] == '<' {
+            let mut name = index + 1;
+            if chars.get(name) == Some(&'/') {
+                name += 1;
+                while chars.get(name).is_some_and(|ch| ch.is_whitespace()) {
+                    name += 1;
+                }
+                if starts_with_ignore(chars, name, "script") {
+                    let after = name + "script".len();
+                    if !chars
+                        .get(after)
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                    {
+                        return Some(index);
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn wsf_header_jscript(header: &str) -> bool {
+    let chars: Vec<char> = header.chars().collect();
+    let mut index = 0usize;
+    while index < chars.len() {
+        if starts_with_ignore(&chars, index, "language") {
+            let mut cursor = index + "language".len();
+            while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+                cursor += 1;
+            }
+            if chars.get(cursor) == Some(&'=') {
+                cursor += 1;
+                while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+                    cursor += 1;
+                }
+                let quote = chars
+                    .get(cursor)
+                    .copied()
+                    .filter(|ch| *ch == '"' || *ch == '\'');
+                if quote.is_some() {
+                    cursor += 1;
+                }
+                return starts_with_ignore(&chars, cursor, "jscript")
+                    || starts_with_ignore(&chars, cursor, "javascript");
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn wsf_strip_cdata(body: &str) -> String {
+    let chars: Vec<char> = body.trim().chars().collect();
+    if !starts_with_ignore(&chars, 0, "<![cdata[") {
+        return body.to_string();
+    }
+    let mut end = chars.len();
+    if end >= 3 && chars[end - 3] == ']' && chars[end - 2] == ']' && chars[end - 1] == '>' {
+        end -= 3;
+    }
+    chars["<![cdata[".len()..end].iter().collect()
 }
 
 fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
@@ -33344,6 +33473,31 @@ mod tests {
                 true,
             ),
             vec!["git ".to_string()],
+        );
+    }
+
+    /// A `.wsf` `<script language="JScript">` block is JScript, so
+    /// single quotes are strings. Scoring the file as VBScript turns
+    /// the quote into a comment and drops the command.
+    #[test]
+    fn wsf_jscript_block_scores_single_quotes() {
+        assert_eq!(
+            super::wsf_shell_runs(
+                "<job><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::wsf_shell_runs(
+                "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::wsf_shell_runs(
+                "<job><script language='JScript'><![CDATA[\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n]]></script></job>\n",
+            ),
+            vec!["git push origin main".to_string()],
         );
     }
 
