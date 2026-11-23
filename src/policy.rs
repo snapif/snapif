@@ -9620,7 +9620,7 @@ fn score_wsh<'a>(
         match load_script_file(&script_path) {
             Some(ScriptFile::Text(text)) => {
                 let commands = if wsh_wsf(&script_path) {
-                    wsf_shell_runs_at(&text, Some(&script_path))
+                    wsf_shell_runs_at(&text, Some(&script_path), engine_js)
                 } else {
                     let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
                     vbs_shell_runs(&text, jscript)
@@ -9657,8 +9657,9 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// `JavaScript` scores that body as JScript. Any other language,
 /// including a missing one, stays VBScript. A `<![CDATA[` wrapper is
 /// not part of the script. `src` is loaded from beside the `.wsf`
-/// file.
-fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>) -> Vec<String> {
+/// file. A block with no language is JScript, unless `/E` names
+/// another engine.
+fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>, engine_js: Option<bool>) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
     let mut index = 0usize;
@@ -9671,7 +9672,7 @@ fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>) -> Vec<String> {
         };
         let header_end = tag + header_end;
         let header: String = chars[tag..header_end].iter().collect();
-        let jscript = wsf_header_jscript(&header);
+        let jscript = wsf_block_jscript(&header, engine_js);
         if let Some(src) = wsf_attr(&header, "src").filter(|src| !src.is_empty()) {
             let path = wsf_src_file(&src, wsf_path);
             if let Some(ScriptFile::Text(src_text)) = load_script_file(&path) {
@@ -9740,11 +9741,13 @@ fn wsf_script_close(chars: &[char], mut index: usize) -> Option<usize> {
     None
 }
 
-fn wsf_header_jscript(header: &str) -> bool {
-    wsf_attr(header, "language").is_some_and(|value| {
+fn wsf_block_jscript(header: &str, engine_js: Option<bool>) -> bool {
+    if let Some(value) = wsf_attr(header, "language") {
         let chars: Vec<char> = value.chars().collect();
-        starts_with_ignore(&chars, 0, "jscript") || starts_with_ignore(&chars, 0, "javascript")
-    })
+        return starts_with_ignore(&chars, 0, "jscript")
+            || starts_with_ignore(&chars, 0, "javascript");
+    }
+    engine_js.unwrap_or(true)
 }
 
 fn wsf_attr(header: &str, name: &str) -> Option<String> {
@@ -33564,12 +33567,14 @@ mod tests {
             super::wsf_shell_runs_at(
                 "<job><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
                 None,
+                None,
             ),
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
             super::wsf_shell_runs_at(
                 "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
+                None,
                 None,
             ),
             vec!["git push origin main".to_string()],
@@ -33578,8 +33583,32 @@ mod tests {
             super::wsf_shell_runs_at(
                 "<job><script language='JScript'><![CDATA[\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n]]></script></job>\n",
                 None,
+                None,
             ),
             vec!["git push origin main".to_string()],
+        );
+    }
+
+    /// A `<script>` block with no language is JScript. Single quotes
+    /// are strings, so the push scores. VBScript is only the blocks
+    /// that say so.
+    #[test]
+    fn wsf_block_without_language_is_jscript() {
+        assert_eq!(
+            super::wsf_shell_runs_at(
+                "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
+                None,
+                None,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::wsf_shell_runs_at(
+                "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
+                None,
+                Some(false),
+            ),
+            Vec::<String>::new(),
         );
     }
 
@@ -33605,7 +33634,7 @@ mod tests {
         let wsf = root.join("job.wsf");
         let text = "<job><script language=\"JScript\" src=\"push.js\"/></job>\n";
         std::fs::write(&wsf, text).expect("wsf");
-        let loaded = super::wsf_shell_runs_at(text, Some(&wsf.display().to_string()));
+        let loaded = super::wsf_shell_runs_at(text, Some(&wsf.display().to_string()), None);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(loaded, vec!["git push origin main".to_string()]);
     }
@@ -33814,6 +33843,10 @@ mod tests {
             "new ActiveXObject('WScript.Shell').Run('git push origin main');\n",
         );
         write_host(
+            "nolan.wsf",
+            "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
+        );
+        write_host(
             "comment.js",
             "// new ActiveXObject('WScript.Shell').Run('git push origin main');\nWScript.Echo('ok');\n",
         );
@@ -33933,6 +33966,7 @@ mod tests {
             format!("cscript /X {}", path("payload.vbs")),
             format!("cscript /E:VBScript {}", path("payload.vbs")),
             format!("cscript /E:JScript {}", path("engine.vbs")),
+            format!("cscript {}", path("nolan.wsf")),
             format!("cscript //E:JScript {}", path("engine.vbs")),
             format!("cscript /h:wscript {}", path("payload.vbs")),
             format!("cscript /Job:main {}", path("payload.vbs")),
@@ -34006,6 +34040,7 @@ mod tests {
             format!("wscript //nologo {}", path("echo.js")),
             format!("cscript //nologo {}", path("echo-single.js")),
             format!("cscript /E:VBScript {}", path("single.js")),
+            format!("cscript /E:VBScript {}", path("nolan.wsf")),
             format!("cscript //nologo {}", path("echo-plus.js")),
             format!("cscript //nologo {}", path("and.js")),
             format!("cscript //nologo {}", path("bare.vbs")),
