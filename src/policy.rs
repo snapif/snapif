@@ -9605,10 +9605,14 @@ fn score_wsh<'a>(
     if !base.eq_ignore_ascii_case("cscript") && !base.eq_ignore_ascii_case("wscript") {
         return;
     }
+    let mut engine_js = None;
     let mut index = 1usize;
     while index < argv.len() {
         let arg = argv[index].as_str();
         if wsh_switch(arg) {
+            if let Some(js) = wsh_engine_js(arg) {
+                engine_js = Some(js);
+            }
             index += 1;
             continue;
         }
@@ -9618,7 +9622,8 @@ fn score_wsh<'a>(
                 let commands = if wsh_wsf(&script_path) {
                     wsf_shell_runs_at(&text, Some(&script_path))
                 } else {
-                    vbs_shell_runs(&text, wsh_jscript(&script_path))
+                    let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
+                    vbs_shell_runs(&text, jscript)
                 };
                 scan_isolated(policy, tool_name, &commands, depth, local, git, best);
             }
@@ -9956,6 +9961,23 @@ fn skip_js_gap(chars: &[char], mut cursor: usize) -> usize {
 /// `/?` and any other `/word` are not switches: that word may be
 /// the script, and skipping it would score a later file the host
 /// does not run.
+/// `/E:JScript` and `//E:JScript` force JScript. `/E:VBScript` forces
+/// VBScript. The extension is used when this flag is absent.
+fn wsh_engine_js(arg: &str) -> Option<bool> {
+    let rest = arg.strip_prefix("//").or_else(|| arg.strip_prefix('/'))?;
+    let (name, value) = rest.split_once(':')?;
+    if !name.eq_ignore_ascii_case("e") {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("jscript") || value.eq_ignore_ascii_case("javascript") {
+        Some(true)
+    } else if value.eq_ignore_ascii_case("vbscript") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn wsh_switch(arg: &str) -> bool {
     if arg.starts_with("//") {
         return true;
@@ -33788,6 +33810,10 @@ mod tests {
             "CreateObject(\"WScript.Shell\").Run 'git push origin main'\n",
         );
         write_host(
+            "engine.vbs",
+            "new ActiveXObject('WScript.Shell').Run('git push origin main');\n",
+        );
+        write_host(
             "comment.js",
             "// new ActiveXObject('WScript.Shell').Run('git push origin main');\nWScript.Echo('ok');\n",
         );
@@ -33906,6 +33932,8 @@ mod tests {
             format!("cscript /u {}", path("payload.vbs")),
             format!("cscript /X {}", path("payload.vbs")),
             format!("cscript /E:VBScript {}", path("payload.vbs")),
+            format!("cscript /E:JScript {}", path("engine.vbs")),
+            format!("cscript //E:JScript {}", path("engine.vbs")),
             format!("cscript /h:wscript {}", path("payload.vbs")),
             format!("cscript /Job:main {}", path("payload.vbs")),
             format!("cscript /T:5 {}", path("set.vbs")),
@@ -33977,6 +34005,7 @@ mod tests {
             format!("wscript /b {}", path("echo.vbs")),
             format!("wscript //nologo {}", path("echo.js")),
             format!("cscript //nologo {}", path("echo-single.js")),
+            format!("cscript /E:VBScript {}", path("single.js")),
             format!("cscript //nologo {}", path("echo-plus.js")),
             format!("cscript //nologo {}", path("and.js")),
             format!("cscript //nologo {}", path("bare.vbs")),
