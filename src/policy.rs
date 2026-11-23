@@ -4520,7 +4520,31 @@ fn load_script_file(path: &str) -> Option<ScriptFile> {
             return Some(ScriptFile::Unscanned);
         }
     }
-    Some(ScriptFile::Text(String::from_utf8_lossy(&buf).into_owned()))
+    Some(ScriptFile::Text(decode_script_bytes(&buf)))
+}
+
+/// A BOM marks UTF-16, which is how Notepad saves "Unicode". `cscript`
+/// runs that text. Any other bytes are UTF-8, with U+FFFD for a bad
+/// sequence.
+fn decode_script_bytes(buf: &[u8]) -> String {
+    let (units, le) = if buf.starts_with(&[0xFF, 0xFE]) {
+        (&buf[2..], true)
+    } else if buf.starts_with(&[0xFE, 0xFF]) {
+        (&buf[2..], false)
+    } else {
+        return String::from_utf8_lossy(buf).into_owned();
+    };
+    let decoded: Vec<u16> = units
+        .chunks_exact(2)
+        .map(|pair| {
+            if le {
+                u16::from_le_bytes([pair[0], pair[1]])
+            } else {
+                u16::from_be_bytes([pair[0], pair[1]])
+            }
+        })
+        .collect();
+    String::from_utf16_lossy(&decoded)
 }
 
 /// `O_NONBLOCK` so `open` of a fifo returns. The bit is not the same on
@@ -33321,6 +33345,34 @@ mod tests {
             ),
             vec!["git ".to_string()],
         );
+    }
+
+    /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
+    /// file. The bytes are not UTF-8.
+    #[test]
+    fn load_script_file_reads_a_utf16_le_bom() {
+        let root = std::env::temp_dir().join(format!(
+            "snapif-utf16-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let path = root.join("push.js");
+        let text = "new ActiveXObject('WScript.Shell').Run('git push origin main');\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, &bytes).expect("write");
+        let loaded = super::load_script_file(&path.display().to_string());
+        let _ = std::fs::remove_dir_all(&root);
+        let Some(super::ScriptFile::Text(body)) = loaded else {
+            panic!("utf-16 script was not text");
+        };
+        assert!(body.contains("git push origin main"), "{body:?}");
     }
 
     /// These are the command strings a Windows host ran. The backslashes
