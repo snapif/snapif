@@ -9616,7 +9616,7 @@ fn score_wsh<'a>(
         match load_script_file(&script_path) {
             Some(ScriptFile::Text(text)) => {
                 let commands = if wsh_wsf(&script_path) {
-                    wsf_shell_runs(&text)
+                    wsf_shell_runs_at(&text, Some(&script_path))
                 } else {
                     vbs_shell_runs(&text, wsh_jscript(&script_path))
                 };
@@ -9651,8 +9651,13 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// A `.wsf` file runs each `<script>` body. `language="JScript"` or
 /// `JavaScript` scores that body as JScript. Any other language,
 /// including a missing one, stays VBScript. A `<![CDATA[` wrapper is
-/// not part of the script.
+/// not part of the script. `src` is loaded from beside the `.wsf`
+/// file.
 fn wsf_shell_runs(text: &str) -> Vec<String> {
+    wsf_shell_runs_at(text, None)
+}
+
+fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
     let mut index = 0usize;
@@ -9666,6 +9671,16 @@ fn wsf_shell_runs(text: &str) -> Vec<String> {
         let header_end = tag + header_end;
         let header: String = chars[tag..header_end].iter().collect();
         let jscript = wsf_header_jscript(&header);
+        if let Some(src) = wsf_attr(&header, "src").filter(|src| !src.is_empty()) {
+            let path = wsf_src_file(&src, wsf_path);
+            if let Some(ScriptFile::Text(src_text)) = load_script_file(&path) {
+                commands.extend(vbs_shell_runs(&src_text, jscript));
+            }
+        }
+        if header_end > tag && chars[header_end - 1] == '/' {
+            index = header_end + 1;
+            continue;
+        }
         let body_start = header_end + 1;
         let Some(close) = wsf_script_close(&chars, body_start) else {
             break;
@@ -9725,33 +9740,79 @@ fn wsf_script_close(chars: &[char], mut index: usize) -> Option<usize> {
 }
 
 fn wsf_header_jscript(header: &str) -> bool {
+    wsf_attr(header, "language").is_some_and(|value| {
+        let chars: Vec<char> = value.chars().collect();
+        starts_with_ignore(&chars, 0, "jscript") || starts_with_ignore(&chars, 0, "javascript")
+    })
+}
+
+fn wsf_attr(header: &str, name: &str) -> Option<String> {
     let chars: Vec<char> = header.chars().collect();
     let mut index = 0usize;
     while index < chars.len() {
-        if starts_with_ignore(&chars, index, "language") {
-            let mut cursor = index + "language".len();
-            while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
-                cursor += 1;
-            }
-            if chars.get(cursor) == Some(&'=') {
-                cursor += 1;
+        if starts_with_ignore(&chars, index, name) {
+            let whole = index == 0 || chars[index - 1].is_whitespace() || chars[index - 1] == '<';
+            let after = index + name.chars().count();
+            if whole
+                && !chars
+                    .get(after)
+                    .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            {
+                let mut cursor = after;
                 while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
                     cursor += 1;
                 }
-                let quote = chars
-                    .get(cursor)
-                    .copied()
-                    .filter(|ch| *ch == '"' || *ch == '\'');
-                if quote.is_some() {
-                    cursor += 1;
+                if chars.get(cursor) == Some(&'=') {
+                    return Some(wsf_attr_value(&chars, cursor + 1));
                 }
-                return starts_with_ignore(&chars, cursor, "jscript")
-                    || starts_with_ignore(&chars, cursor, "javascript");
             }
         }
         index += 1;
     }
-    false
+    None
+}
+
+fn wsf_attr_value(chars: &[char], mut cursor: usize) -> String {
+    while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+        cursor += 1;
+    }
+    let quote = chars
+        .get(cursor)
+        .copied()
+        .filter(|ch| *ch == '"' || *ch == '\'');
+    if let Some(quote) = quote {
+        cursor += 1;
+        let start = cursor;
+        while cursor < chars.len() && chars[cursor] != quote {
+            cursor += 1;
+        }
+        return chars[start..cursor].iter().collect();
+    }
+    let start = cursor;
+    while cursor < chars.len()
+        && !chars[cursor].is_whitespace()
+        && chars[cursor] != '/'
+        && chars[cursor] != '>'
+    {
+        cursor += 1;
+    }
+    chars[start..cursor].iter().collect()
+}
+
+/// `src` is next to the `.wsf` file unless it is already absolute.
+fn wsf_src_file(src: &str, wsf_path: Option<&str>) -> String {
+    let src = src.trim();
+    let file = std::path::Path::new(src);
+    if file.is_absolute() {
+        return openable_path(src).into_owned();
+    }
+    let Some(wsf_path) = wsf_path else {
+        return src.to_string();
+    };
+    match std::path::Path::new(wsf_path).parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir.join(src).display().to_string(),
+        _ => src.to_string(),
+    }
 }
 
 fn wsf_strip_cdata(body: &str) -> String {
@@ -33499,6 +33560,33 @@ mod tests {
             ),
             vec!["git push origin main".to_string()],
         );
+    }
+
+    /// `cscript` loads `<script src="push.js">` from the `.wsf` directory.
+    /// The tag body is empty, so the command is only in that file.
+    #[test]
+    fn wsf_script_src_scores_the_file() {
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let script = root.join("push.js");
+        std::fs::write(
+            &script,
+            "new ActiveXObject('WScript.Shell').Run('git push origin main');\n",
+        )
+        .expect("js");
+        let wsf = root.join("job.wsf");
+        let text = "<job><script language=\"JScript\" src=\"push.js\"/></job>\n";
+        std::fs::write(&wsf, text).expect("wsf");
+        let loaded = super::wsf_shell_runs_at(text, Some(&wsf.display().to_string()));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(loaded, vec!["git push origin main".to_string()]);
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
