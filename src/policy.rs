@@ -9841,13 +9841,16 @@ fn read_wsh_string(chars: &[char], index: usize, jscript: bool) -> Option<(Strin
     None
 }
 
-/// JScript uses `\'` and `\\`. `\n`, `\t`, and `\r` are those
-/// characters. `\u` plus four hex digits becomes that scalar when it
-/// is a Unicode scalar. A surrogate is not a scalar, so the letter `u`
-/// and the four digits stay in the text. `\x` plus two hex digits is
-/// that character. A short or non-hex `\u` or `\x` stays the letter. A
-/// bare newline still ends the string, which is the same rule as a
-/// VBScript quote.
+/// JScript uses `\'` and `\\`. `\n`, `\t`, `\r`, `\b`, `\f`, and `\v`
+/// are those characters. An octal escape is one to three digits:
+/// a leading digit 0-3 takes up to three, and 4-7 takes at most two,
+/// so `\147` is `g` and `\400` is a space then `0`. `\u` plus four hex
+/// digits becomes that scalar when it is a Unicode scalar. A surrogate
+/// is not a scalar, so the letter `u` and the four digits stay in the
+/// text. `\x` plus two hex digits is that character. A short or
+/// non-hex `\u` or `\x` stays the letter. A backslash before LF, CR,
+/// or CRLF continues the string and is not part of it. A bare newline
+/// still ends the string, which is the same rule as a VBScript quote.
 fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
     let quote = *chars.get(index)?;
     if quote != '"' && quote != '\'' {
@@ -9859,7 +9862,20 @@ fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
         if chars[cursor] == '\\' {
             let next = *chars.get(cursor + 1)?;
             if next == '\n' {
-                return None;
+                cursor += 2;
+                continue;
+            }
+            if next == '\r' {
+                cursor += 2;
+                if chars.get(cursor) == Some(&'\n') {
+                    cursor += 1;
+                }
+                continue;
+            }
+            if let Some((ch, width)) = js_octal_escape(chars, cursor + 1) {
+                text.push(ch);
+                cursor += 1 + width;
+                continue;
             }
             let width = match next {
                 'u' => Some(4),
@@ -9873,7 +9889,7 @@ fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
                 cursor += 2 + width;
                 continue;
             }
-            text.push(unescape(next));
+            text.push(js_unescape(next));
             cursor += 2;
             continue;
         }
@@ -9887,6 +9903,36 @@ fn read_js_string(chars: &[char], index: usize) -> Option<(String, usize)> {
         cursor += 1;
     }
     None
+}
+
+/// JScript octal escape. A leading digit 0-3 takes up to three octal
+/// digits. A leading digit 4-7 takes at most two. The value is that
+/// character. A non-octal digit stops the escape.
+fn js_octal_escape(chars: &[char], index: usize) -> Option<(char, usize)> {
+    let first = chars.get(index)?.to_digit(8)?;
+    let max = if first <= 3 { 3 } else { 2 };
+    let mut width = 1usize;
+    let mut value = first;
+    while width < max {
+        let Some(digit) = chars.get(index + width).and_then(|ch| ch.to_digit(8)) else {
+            break;
+        };
+        value = value * 8 + digit;
+        width += 1;
+    }
+    Some((char::from_u32(value)?, width))
+}
+
+/// `\b`, `\f`, and `\v` are JScript controls. Other single-character
+/// escapes stay on the shared map, so `\n` is still a newline and an
+/// unknown letter stays that letter.
+fn js_unescape(ch: char) -> char {
+    match ch {
+        'b' => '\u{0008}',
+        'f' => '\u{000c}',
+        'v' => '\u{000b}',
+        other => unescape(other),
+    }
 }
 
 /// `\u` is four hex digits and `\x` is two. Anything shorter, or a
@@ -32735,6 +32781,98 @@ mod tests {
                 false,
             ),
             vec!["\\u0067it push origin main".to_string()],
+        );
+    }
+
+    /// JScript `\147` is `g`. A digit 4-7 takes two octal digits, so
+    /// `\400` is a space and then `0`. A backslash before LF, CR, or
+    /// CRLF continues the string. A bare newline still ends it. `\b`
+    /// is a backspace. VBScript keeps the backslash as text.
+    #[test]
+    fn wsh_jscript_octal_and_continued_string() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\147it push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git\\40push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git\\400push origin main');\n",
+                true,
+            ),
+            vec!["git 0push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\147it ' + 'push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git \\\npush origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git \\\r\npush origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git \\\rpush origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git\\\npush origin main');\n",
+                true,
+            ),
+            vec!["gitpush origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git \npush origin main');\n",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('a\\b\\f\\vc');\n",
+                true,
+            ),
+            vec!["a\u{0008}\u{000c}\u{000b}c".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('\\8it push origin main');\n",
+                true,
+            ),
+            vec!["8it push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Run \"\\147it push origin main\"\n",
+                false,
+            ),
+            vec!["\\147it push origin main".to_string()],
         );
     }
 
