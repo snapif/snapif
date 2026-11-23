@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.12](https://github.com/snapif/snapif/compare/snapif-v0.2.11...snapif-v0.2.12) (2026-11-23)
+
+
+### Bug Fixes
+
+* join WScript quoted strings with + ([#289](https://github.com/snapif/snapif/issues/289)) ([da43e2f](https://github.com/snapif/snapif/commit/da43e2fe2a7730c0f5e677dfedcb8bd73e4ac5ce)), closes [#281](https://github.com/snapif/snapif/issues/281)
+* score JScript strings the host runs ([#291](https://github.com/snapif/snapif/issues/291)) ([ad5cafe](https://github.com/snapif/snapif/commit/ad5cafe3574ffa6ca32d8a12218e14f273a6b282))
+
 ## [0.2.11](https://github.com/snapif/snapif/compare/snapif-v0.2.10...snapif-v0.2.11) (2026-11-07)
 
 
