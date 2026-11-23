@@ -9614,8 +9614,18 @@ fn wsh_jscript(path: &str) -> bool {
 }
 
 fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
+    vbs_shell_runs_depth(text, jscript, 0)
+}
+
+/// Bare JScript `eval("...")` runs that text. A chain stops at
+/// `MAX_SHELL_DEPTH`. `obj.eval` and a longer name are not this call.
+fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32) -> Vec<String> {
+    if depth > MAX_SHELL_DEPTH {
+        return Vec::new();
+    }
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
+    let mut nested = Vec::new();
     let mut shell = false;
     let mut index = 0usize;
     while index < chars.len() {
@@ -9626,6 +9636,13 @@ fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
             }
             if starts_with(&chars, index, "/*") {
                 index = skip_block(&chars, index + 2);
+                continue;
+            }
+            if js_eval_at(&chars, index)
+                && let Some((body, end)) = js_eval_string(&chars, index)
+            {
+                nested.extend(vbs_shell_runs_depth(&body, true, depth + 1));
+                index = end;
                 continue;
             }
         } else if vbs_comment(&chars, index) {
@@ -9655,7 +9672,50 @@ fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
         }
         index += 1;
     }
-    if shell { commands } else { Vec::new() }
+    if !shell {
+        commands.clear();
+    }
+    commands.extend(nested);
+    commands
+}
+
+/// `eval` at `index`, not a method and not a longer name.
+fn js_eval_at(chars: &[char], index: usize) -> bool {
+    if index > 0 {
+        let prev = chars[index - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, '_' | '.' | '$') {
+            return false;
+        }
+    }
+    if !starts_with(chars, index, "eval") {
+        return false;
+    }
+    let after = index + 4;
+    !chars
+        .get(after)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
+}
+
+/// The string argument of `eval`, including space and a line break
+/// before `(`. A non-string argument is not this call.
+fn js_eval_string(chars: &[char], index: usize) -> Option<(String, usize)> {
+    let mut cursor = index + 4;
+    cursor = skip_js_gap(chars, cursor);
+    if chars.get(cursor) != Some(&'(') {
+        return None;
+    }
+    cursor = skip_js_gap(chars, cursor + 1);
+    read_wsh_string(chars, cursor, true)
+}
+
+fn skip_js_gap(chars: &[char], mut cursor: usize) -> usize {
+    while chars
+        .get(cursor)
+        .is_some_and(|ch| matches!(ch, ' ' | '\t' | '\n' | '\r'))
+    {
+        cursor += 1;
+    }
+    cursor
 }
 
 /// Host options use `//`, or one slash for a documented name.
@@ -32873,6 +32933,42 @@ mod tests {
                 false,
             ),
             vec!["\\147it push origin main".to_string()],
+        );
+    }
+
+    /// A bare JScript `eval` of a string runs that text. The same
+    /// `Run` inside the string is the command. `obj.eval` is a method
+    /// call, and a name that only starts with `eval` is not `eval`.
+    #[test]
+    fn wsh_jscript_eval_runs_the_string() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval('new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval('eval(\\'new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\")\\')');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "obj.eval('new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\")');\n",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs("var evaluation = 'git push origin main';\n", true,),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs("eval('WScript.Echo(\"git push origin main\")');\n", true,),
+            Vec::<String>::new(),
         );
     }
 
