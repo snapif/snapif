@@ -9606,31 +9606,34 @@ fn score_wsh<'a>(
         return;
     }
     let mut engine_js = None;
-    let mut index = 1usize;
-    while index < argv.len() {
-        let arg = argv[index].as_str();
+    let mut script = None;
+    for arg in argv.iter().skip(1) {
         if wsh_switch(arg) {
             if let Some(js) = wsh_engine_js(arg) {
                 engine_js = Some(js);
             }
-            index += 1;
             continue;
         }
-        let script_path = shell_path(arg, dir);
-        match load_script_file(&script_path) {
-            Some(ScriptFile::Text(text)) => {
-                let commands = if wsh_wsf(&script_path) {
-                    wsf_shell_runs_at(&text, Some(&script_path), engine_js)
-                } else {
-                    let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
-                    vbs_shell_runs(&text, jscript)
-                };
-                scan_isolated(policy, tool_name, &commands, depth, local, git, best);
-            }
-            Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
-            None => {}
+        if script.is_none() {
+            script = Some(arg.as_str());
         }
+    }
+    let Some(script) = script else {
         return;
+    };
+    let script_path = shell_path(script, dir);
+    match load_script_file(&script_path) {
+        Some(ScriptFile::Text(text)) => {
+            let commands = if wsh_wsf(&script_path) {
+                wsf_shell_runs_at(&text, Some(&script_path), engine_js)
+            } else {
+                let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
+                vbs_shell_runs(&text, jscript)
+            };
+            scan_isolated(policy, tool_name, &commands, depth, local, git, best);
+        }
+        Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
+        None => {}
     }
 }
 
@@ -9965,7 +9968,8 @@ fn skip_js_gap(chars: &[char], mut cursor: usize) -> usize {
 /// the script, and skipping it would score a later file the host
 /// does not run.
 /// `/E:JScript` and `//E:JScript` force JScript. `/E:VBScript` forces
-/// VBScript. The extension is used when this flag is absent.
+/// VBScript. The flag may sit before or after the script path. The
+/// extension is used when this flag is absent.
 fn wsh_engine_js(arg: &str) -> Option<bool> {
     let rest = arg.strip_prefix("//").or_else(|| arg.strip_prefix('/'))?;
     let (name, value) = rest.split_once(':')?;
@@ -33966,6 +33970,7 @@ mod tests {
             format!("cscript /X {}", path("payload.vbs")),
             format!("cscript /E:VBScript {}", path("payload.vbs")),
             format!("cscript /E:JScript {}", path("engine.vbs")),
+            format!("cscript {} /E:JScript", path("engine.vbs")),
             format!("cscript {}", path("nolan.wsf")),
             format!("cscript //E:JScript {}", path("engine.vbs")),
             format!("cscript /h:wscript {}", path("payload.vbs")),
@@ -34040,6 +34045,7 @@ mod tests {
             format!("wscript //nologo {}", path("echo.js")),
             format!("cscript //nologo {}", path("echo-single.js")),
             format!("cscript /E:VBScript {}", path("single.js")),
+            format!("cscript {} /E:VBScript", path("single.js")),
             format!("cscript /E:VBScript {}", path("nolan.wsf")),
             format!("cscript //nologo {}", path("echo-plus.js")),
             format!("cscript //nologo {}", path("and.js")),
