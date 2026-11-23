@@ -9696,16 +9696,37 @@ fn js_eval_at(chars: &[char], index: usize) -> bool {
         .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
 }
 
-/// The string argument of `eval`, including space and a line break
-/// before `(`. A non-string argument is not this call.
+/// The string argument of `eval`. Space, line breaks, and comments
+/// may sit before `(`, and between `(` and the string. A non-string
+/// argument is not this call.
 fn js_eval_string(chars: &[char], index: usize) -> Option<(String, usize)> {
     let mut cursor = index + 4;
-    cursor = skip_js_gap(chars, cursor);
+    cursor = skip_js_trivia(chars, cursor);
     if chars.get(cursor) != Some(&'(') {
         return None;
     }
-    cursor = skip_js_gap(chars, cursor + 1);
+    cursor = skip_js_trivia(chars, cursor + 1);
     read_wsh_string(chars, cursor, true)
+}
+
+/// Space and comments between JScript tokens. A `//` comment ends at
+/// the newline, which stays so the next gap can skip it.
+fn skip_js_trivia(chars: &[char], mut cursor: usize) -> usize {
+    loop {
+        let start = cursor;
+        cursor = skip_js_gap(chars, cursor);
+        if starts_with(chars, cursor, "//") {
+            cursor = skip_line(chars, cursor);
+            continue;
+        }
+        if starts_with(chars, cursor, "/*") {
+            cursor = skip_block(chars, cursor + 2);
+            continue;
+        }
+        if cursor == start {
+            return cursor;
+        }
+    }
 }
 
 fn skip_js_gap(chars: &[char], mut cursor: usize) -> usize {
@@ -32937,8 +32958,10 @@ mod tests {
     }
 
     /// A bare JScript `eval` of a string runs that text. The same
-    /// `Run` inside the string is the command. `obj.eval` is a method
-    /// call, and a name that only starts with `eval` is not `eval`.
+    /// `Run` inside the string is the command. A comment may sit
+    /// between `eval` and `(`, and between `(` and the string.
+    /// `obj.eval` is a method call, and a name that only starts with
+    /// `eval` is not `eval`.
     #[test]
     fn wsh_jscript_eval_runs_the_string() {
         assert_eq!(
@@ -32969,6 +32992,27 @@ mod tests {
         assert_eq!(
             super::vbs_shell_runs("eval('WScript.Echo(\"git push origin main\")');\n", true,),
             Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval /* hide */ ('new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval // hide\n('new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval( /* hide */ 'new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
         );
     }
 
