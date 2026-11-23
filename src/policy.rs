@@ -9790,6 +9790,20 @@ fn join_wsh_strings(
             depth -= 1;
             look = skip_wsh_join_gap(chars, look + 1, jscript);
         }
+        // JScript's comma operator yields the last value. It only
+        // applies inside a group this join opened. `Run("git", 0)` is
+        // an argument list, so a comma at depth 0 stays put.
+        if jscript && depth > 0 && chars.get(look) == Some(&',') {
+            command.clear();
+            let (next_look, opened) = skip_wsh_open_groups(chars, look + 1, jscript);
+            depth += opened;
+            let Some((next, next_end)) = read_wsh_string(chars, next_look, jscript) else {
+                break;
+            };
+            command = next;
+            end = next_end;
+            continue;
+        }
         let joins = match chars.get(look) {
             Some('+') => true,
             Some('&') => !jscript,
@@ -33191,6 +33205,34 @@ mod tests {
                 true,
             ),
             vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run(('echo ok', 'git push origin main'));\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run(('echo ok', 'git ' + 'push origin main'));\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run(('git ' + 'push origin main', 'echo ok'));\n",
+                true,
+            ),
+            vec!["echo ok".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git push', 0, true);\n",
+                true,
+            ),
+            vec!["git push".to_string()],
         );
         assert!(
             super::vbs_shell_runs("WScript.Echo('git ' + 'push origin main');\n", true,).is_empty()
