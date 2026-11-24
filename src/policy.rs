@@ -9634,8 +9634,10 @@ fn score_wsh<'a>(
     let script_path = shell_path(script, dir);
     match load_script_file(&script_path) {
         Some(ScriptFile::Text(text)) => {
-            let commands = if wsh_wsf(&script_path) {
-                wsf_shell_runs_at(&text, Some(&script_path), engine_js)
+            let commands = if wsh_wsf(&script_path) && engine_js.is_none() {
+                wsf_shell_runs_at(&text, Some(&script_path), None)
+            } else if wsh_wsf(&script_path) && wsf_markup(&text) {
+                Vec::new()
             } else {
                 let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
                 vbs_shell_runs(&text, jscript)
@@ -9657,6 +9659,14 @@ fn wsh_wsf(path: &str) -> bool {
     wsh_extension(path).is_some_and(|ext| ext.eq_ignore_ascii_case("wsf"))
 }
 
+/// A Windows Script File package starts with `<`. `/E` compiles the
+/// file as a raw script, so that package fails before a block runs.
+fn wsf_markup(text: &str) -> bool {
+    text.trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
+}
+
 fn wsh_extension(path: &str) -> Option<&str> {
     let name = path
         .rsplit(['/', '\\'])
@@ -9670,7 +9680,8 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// `JavaScript` scores that body as JScript. Any other language
 /// stays VBScript. A `<![CDATA[` wrapper is not part of the script.
 /// `src` is loaded from beside the `.wsf` file. A block with no
-/// language is JScript, unless `/E` names another engine.
+/// language is JScript. `/E` does not retarget a block: the host
+/// compiles that `.wsf` file as a raw script.
 fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>, engine_js: Option<bool>) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
@@ -10083,7 +10094,10 @@ fn skip_js_gap(chars: &[char], mut cursor: usize) -> usize {
 /// does not run.
 /// `/E:JScript` and `//E:JScript` force JScript. `/E:VBScript` forces
 /// VBScript. The flag may sit before or after the script path. The
-/// extension is used when this flag is absent.
+/// extension is used when this flag is absent. On a `.wsf` package
+/// the flag does not select a block language. The host compiles the
+/// file as one raw script, and a file that starts with `<` does not
+/// run. A raw script saved with that extension does run.
 fn wsh_engine_js(arg: &str) -> Option<bool> {
     let rest = arg.strip_prefix("//").or_else(|| arg.strip_prefix('/'))?;
     let (name, value) = rest.split_once(':')?;
@@ -34128,6 +34142,53 @@ mod tests {
         let loaded = super::wsf_shell_runs_at(text, Some(&wsf.display().to_string()), None);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(loaded, vec!["git push origin main".to_string()]);
+    }
+
+    /// `/E` compiles a `.wsf` file as a raw script. A package that
+    /// starts with `<` fails before any block runs. A raw script with
+    /// that extension runs under the named engine, and without `/E`
+    /// the host reports that the file has no jobs.
+    #[test]
+    fn wsf_engine_flag_scores_a_raw_script_not_a_package() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let package = root.join("job.wsf");
+        std::fs::write(
+            &package,
+            "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
+        )
+        .expect("package");
+        let raw = root.join("raw.wsf");
+        std::fs::write(
+            &raw,
+            "new ActiveXObject('WScript.Shell').Run('git push origin main');\n",
+        )
+        .expect("raw");
+        let package = package.display().to_string();
+        let raw = raw.display().to_string();
+        let hit = |command: String| {
+            matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string())
+        };
+        assert_eq!(
+            hit(format!("cscript {package}")),
+            Some("git.push".to_string())
+        );
+        assert!(hit(format!("cscript /E:VBScript {package}")).is_none());
+        assert!(hit(format!("cscript {package} /E:JScript")).is_none());
+        assert!(hit(format!("cscript {raw}")).is_none());
+        assert_eq!(
+            hit(format!("cscript /E:JScript {raw}")),
+            Some("git.push".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
