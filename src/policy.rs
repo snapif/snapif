@@ -9688,7 +9688,9 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// compiles that `.wsf` file as a raw script. Only the first `<job>`
 /// runs unless `/Job:` names one, and the name match is
 /// case-insensitive. A `<script>` body is opaque, so `</job>` inside
-/// it is text. A package with no `<job>` does not run.
+/// it is text. `<!-- -->` hides jobs and scripts. An unclosed
+/// comment hides the rest of the file. A package with no `<job>`
+/// does not run.
 fn wsf_shell_runs_at(
     text: &str,
     wsf_path: Option<&str>,
@@ -9777,6 +9779,16 @@ fn wsf_job_bodies(text: &str) -> Vec<(Option<String>, String)> {
 /// script opaque until `</script>`.
 fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
     while index < chars.len() {
+        if let Some(comment) = wsf_comment_at(chars, index) {
+            let job_close = wsf_close_tag(chars, index, "job");
+            let script = wsf_script_tag(chars, index);
+            let before_close = job_close.is_none_or(|close| comment < close);
+            let before_script = script.is_none_or(|script| comment < script);
+            if before_close && before_script {
+                index = wsf_comment_resume(chars, comment);
+                continue;
+            }
+        }
         let job_close = wsf_close_tag(chars, index, "job");
         let Some(script) = wsf_script_tag(chars, index) else {
             return job_close;
@@ -9803,9 +9815,36 @@ fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
     None
 }
 
+/// Index of the next `<!--`, if one starts at or after `index`.
+fn wsf_comment_at(chars: &[char], mut index: usize) -> Option<usize> {
+    while index + 3 < chars.len() {
+        if starts_with(chars, index, "<!--") {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Index just after `-->`. An unclosed comment runs to the end.
+fn wsf_comment_resume(chars: &[char], start: usize) -> usize {
+    let mut index = start + 4;
+    while index + 2 < chars.len() {
+        if chars[index] == '-' && chars[index + 1] == '-' && chars[index + 2] == '>' {
+            return index + 3;
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
 fn wsf_open_tag(chars: &[char], mut index: usize, name: &str) -> Option<usize> {
     while index < chars.len() {
         if chars[index] == '<' {
+            if starts_with(chars, index, "<!--") {
+                index = wsf_comment_resume(chars, index);
+                continue;
+            }
             let mut cursor = index + 1;
             while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
                 cursor += 1;
@@ -34369,6 +34408,36 @@ mod tests {
         assert_eq!(
             super::wsf_shell_runs_at(jobs, None, None, Some("two")),
             vec!["rm -rf /tmp/x".to_string()]
+        );
+    }
+
+    /// `<!-- -->` hides jobs and scripts. An unclosed comment hides
+    /// the rest of the file. `<!--` inside a script is text, so the
+    /// command after it still runs.
+    #[test]
+    fn wsf_xml_comments_hide_jobs_and_scripts() {
+        let commented_first = "<package>\n<!--\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n-->\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(commented_first, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        assert!(super::wsf_shell_runs_at(commented_first, None, None, Some("one")).is_empty());
+        let commented_script = "<job id=\"one\">\n<!--\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n-->\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(commented_script, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let unclosed = "<!--\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert!(super::wsf_shell_runs_at(unclosed, None, None, None).is_empty());
+        let inside = "<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"<!--\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(inside, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let fake_end = "<job id=\"one\">\n<!-- </job> -->\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(fake_end, None, None, None),
+            vec!["git push origin main".to_string()]
         );
     }
 
