@@ -9687,7 +9687,8 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// language is JScript. `/E` does not retarget a block: the host
 /// compiles that `.wsf` file as a raw script. Only the first `<job>`
 /// runs unless `/Job:` names one, and the name match is
-/// case-insensitive. A package with no `<job>` does not run.
+/// case-insensitive. A `<script>` body is opaque, so `</job>` inside
+/// it is text. A package with no `<job>` does not run.
 fn wsf_shell_runs_at(
     text: &str,
     wsf_path: Option<&str>,
@@ -9759,7 +9760,7 @@ fn wsf_job_bodies(text: &str) -> Vec<(Option<String>, String)> {
             continue;
         }
         let body_start = header_end + 1;
-        let Some(close) = wsf_close_tag(&chars, body_start, "job") else {
+        let Some(close) = wsf_job_close(&chars, body_start) else {
             break;
         };
         let body: String = chars[body_start..close].iter().collect();
@@ -9770,6 +9771,36 @@ fn wsf_job_bodies(text: &str) -> Vec<(Option<String>, String)> {
         index = close + rel_end + 1;
     }
     jobs
+}
+
+/// `</job>` inside a `<script>` body is text. The host keeps that
+/// script opaque until `</script>`.
+fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
+    while index < chars.len() {
+        let job_close = wsf_close_tag(chars, index, "job");
+        let Some(script) = wsf_script_tag(chars, index) else {
+            return job_close;
+        };
+        if job_close.is_some_and(|close| close < script) {
+            return job_close;
+        }
+        let Some(rel) = chars[script..].iter().position(|ch| *ch == '>') else {
+            return None;
+        };
+        let header_end = script + rel;
+        if chars.get(header_end.wrapping_sub(1)) == Some(&'/') {
+            index = header_end + 1;
+            continue;
+        }
+        let Some(script_close) = wsf_script_close(chars, header_end + 1) else {
+            return None;
+        };
+        let Some(end_rel) = chars[script_close..].iter().position(|ch| *ch == '>') else {
+            return None;
+        };
+        index = script_close + end_rel + 1;
+    }
+    None
 }
 
 fn wsf_open_tag(chars: &[char], mut index: usize, name: &str) -> Option<usize> {
@@ -34323,6 +34354,22 @@ mod tests {
         );
         assert!(hit(format!("cscript //Job:missing {path}")).is_none());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A script body is opaque. `"</job>"` inside the script is text.
+    /// The host still runs the command after that string, and `//Job:`
+    /// still finds the next job.
+    #[test]
+    fn wsf_job_end_inside_a_script_string_is_text() {
+        let jobs = "<package>\n<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"</job>\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(jobs, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        assert_eq!(
+            super::wsf_shell_runs_at(jobs, None, None, Some("two")),
+            vec!["rm -rf /tmp/x".to_string()]
+        );
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
