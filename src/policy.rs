@@ -677,7 +677,8 @@ fn check_action(
 /// so `/?` does not skip ahead to a later file. A missing file
 /// stays unmatched. `WScript.Shell` `Run` or `Exec` of a string is
 /// the command. `['Run']` and `["Exec"]` are those calls, including
-/// a name joined with `+`. A `.js`
+/// a name joined with `+`, grouping parentheses, and a comma
+/// expression inside the brackets. A `.js`
 /// file also reads a single-quoted string. `+` joins quoted pieces
 /// in both languages, and `&` joins them only in VBScript. A `.js`
 /// `&` keeps the first piece. `WScript.` joined to `Shell` is still
@@ -9897,7 +9898,7 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32, inherited: bool) 
             continue;
         }
         if let Some((body, end)) = read_wsh_string(&chars, index, jscript) {
-            let (_, end) = join_wsh_strings(&chars, body, end, jscript, 0);
+            let (_, end) = join_wsh_strings(&chars, body, end, jscript, 0, false);
             index = end;
             continue;
         }
@@ -9948,7 +9949,7 @@ fn wsh_frame_has_shell(chars: &[char], jscript: bool) -> bool {
             continue;
         }
         if let Some((body, end)) = read_wsh_string(chars, index, jscript) {
-            let (body, end) = join_wsh_strings(chars, body, end, jscript, 0);
+            let (body, end) = join_wsh_strings(chars, body, end, jscript, 0, false);
             if body.eq_ignore_ascii_case("WScript.Shell") {
                 return true;
             }
@@ -9990,13 +9991,16 @@ fn js_eval_string(chars: &[char], index: usize) -> Option<(String, usize)> {
     cursor = skip_js_trivia(chars, cursor + 1);
     let (cursor, depth) = skip_wsh_open_groups(chars, cursor, true);
     let (body, end) = read_wsh_string(chars, cursor, true)?;
-    Some(join_wsh_strings(chars, body, end, true, depth))
+    Some(join_wsh_strings(chars, body, end, true, depth, false))
 }
 
 /// `['Run']` and `["Exec"]` take the command string. Space may sit
 /// inside the brackets and before the command. Pieces joined with
-/// `+` are one name. JScript `&` is not a join. A longer name is not
-/// this call. The `)` that ends the call stays put.
+/// `+` are one name. Grouping parentheses and a comma expression
+/// inside the brackets are part of that name: the comma yields the
+/// last quoted piece, and a grouping `)` is consumed so `]` can
+/// follow it. JScript `&` is not a join. A longer name is not this
+/// call. The `)` that ends the call stays put.
 fn js_bracket_call(chars: &[char], index: usize) -> Option<(String, usize)> {
     if chars.get(index) != Some(&'[') {
         return None;
@@ -10004,7 +10008,7 @@ fn js_bracket_call(chars: &[char], index: usize) -> Option<(String, usize)> {
     let cursor = skip_wsh_call_gap(chars, index + 1, true);
     let (mut cursor, depth) = skip_wsh_open_groups(chars, cursor, true);
     let (name, after_name) = read_wsh_string(chars, cursor, true)?;
-    let (name, after_name) = join_wsh_strings(chars, name, after_name, true, depth);
+    let (name, after_name) = join_wsh_strings(chars, name, after_name, true, depth, true);
     if !name.eq_ignore_ascii_case("run") && !name.eq_ignore_ascii_case("exec") {
         return None;
     }
@@ -10123,34 +10127,51 @@ fn wsh_switch(arg: &str) -> bool {
 /// not space. A `_` with only spaces or tabs before the newline is the
 /// VBScript continuation, so the join keeps looking. Parentheses
 /// around a quoted piece are grouping, so the join reads that piece.
-/// A `)` closes only a `(` this join opened. The `)` that ends `Run(`
-/// stays put, so a `+` after the call is not part of the command.
-/// A piece that is not a quoted string stops the join and keeps the
-/// text already read.
+/// A `)` closes only a `(` this join opened, and the end moves to just
+/// after that `)`. The `)` that ends `Run(` or `eval(` stays put, so a
+/// `+` after the call is not part of the command. A JScript comma
+/// yields the next quoted piece. Inside a group it replaces only the
+/// text that group added, so a prefix outside the parentheses stays.
+/// At depth 0 a comma is an argument list, as in `Run("git push", 0)`,
+/// unless `expr_comma` is set for a bracket name: there the comma
+/// yields the last quoted piece. A following piece that is not a
+/// quoted string stops the join and keeps the text already read.
+/// VBScript's comma is not a join.
 fn join_wsh_strings(
     chars: &[char],
     mut command: String,
     mut end: usize,
     jscript: bool,
     mut depth: usize,
+    expr_comma: bool,
 ) -> (String, usize) {
+    // Each mark is `command.len()` when that `(` opened, so a comma
+    // can drop only the text inside its group.
+    let mut marks = vec![0usize; depth];
     loop {
         let mut look = skip_wsh_join_gap(chars, end, jscript);
         while depth > 0 && chars.get(look) == Some(&')') {
             depth -= 1;
-            look = skip_wsh_join_gap(chars, look + 1, jscript);
+            let _ = marks.pop();
+            end = look + 1;
+            look = skip_wsh_join_gap(chars, end, jscript);
         }
-        // JScript's comma operator yields the last value. It only
-        // applies inside a group this join opened. `Run("git", 0)` is
-        // an argument list, so a comma at depth 0 stays put.
-        if jscript && depth > 0 && chars.get(look) == Some(&',') {
-            command.clear();
+        if jscript && (depth > 0 || expr_comma) && chars.get(look) == Some(&',') {
             let (next_look, opened) = skip_wsh_open_groups(chars, look + 1, jscript);
-            depth += opened;
             let Some((next, next_end)) = read_wsh_string(chars, next_look, jscript) else {
                 break;
             };
-            command = next;
+            let mark = if depth > 0 {
+                marks.last().copied().unwrap_or(0)
+            } else {
+                0
+            };
+            command.truncate(mark);
+            for _ in 0..opened {
+                marks.push(command.len());
+            }
+            depth += opened;
+            command.push_str(&next);
             end = next_end;
             continue;
         }
@@ -10164,10 +10185,13 @@ fn join_wsh_strings(
         }
         look += 1;
         let (next_look, opened) = skip_wsh_open_groups(chars, look, jscript);
-        depth += opened;
         let Some((next, next_end)) = read_wsh_string(chars, next_look, jscript) else {
             break;
         };
+        for _ in 0..opened {
+            marks.push(command.len());
+        }
+        depth += opened;
         command.push_str(&next);
         end = next_end;
     }
@@ -10287,7 +10311,7 @@ fn wsh_command_at(chars: &[char], mut cursor: usize, jscript: bool) -> Option<(S
     }
     let (cursor, depth) = skip_wsh_open_groups(chars, cursor, jscript);
     let (command, end) = read_wsh_string(chars, cursor, jscript)?;
-    Some(join_wsh_strings(chars, command, end, jscript, depth))
+    Some(join_wsh_strings(chars, command, end, jscript, depth, false))
 }
 
 /// `.Run` and `.Exec` take the command string. `.Execute` and
@@ -33706,6 +33730,55 @@ mod tests {
                 true,
             )
             .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')[('Ru' + 'n')]('git push origin main');",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['nope', 'Run']('git push origin main');",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['nope', 'Ex' + 'ec']('git push origin main');",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git' + ('push', ' push origin main'));",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['x' + ('y', 'Ru') + 'n']('git push origin main');",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' + 'n', 'nope']('git push origin main');",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git push', 0);",
+                true,
+            ),
+            vec!["git push".to_string()],
         );
     }
 
