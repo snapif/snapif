@@ -9667,11 +9667,10 @@ fn wsh_extension(path: &str) -> Option<&str> {
 }
 
 /// A `.wsf` file runs each `<script>` body. `language="JScript"` or
-/// `JavaScript` scores that body as JScript. Any other language,
-/// including a missing one, stays VBScript. A `<![CDATA[` wrapper is
-/// not part of the script. `src` is loaded from beside the `.wsf`
-/// file. A block with no language is JScript, unless `/E` names
-/// another engine.
+/// `JavaScript` scores that body as JScript. Any other language
+/// stays VBScript. A `<![CDATA[` wrapper is not part of the script.
+/// `src` is loaded from beside the `.wsf` file. A block with no
+/// language is JScript, unless `/E` names another engine.
 fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>, engine_js: Option<bool>) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let mut commands = Vec::new();
