@@ -9688,9 +9688,9 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// compiles that `.wsf` file as a raw script. Only the first `<job>`
 /// runs unless `/Job:` names one, and the name match is
 /// case-insensitive. A `<script>` body is opaque, so `</job>` inside
-/// it is text. `<!-- -->` hides jobs and scripts. An unclosed
-/// comment hides the rest of the file. A package with no `<job>`
-/// does not run.
+/// it is text. `<!-- -->` and `<![CDATA[` hide jobs and scripts.
+/// An unclosed comment or CDATA section hides the rest of the file.
+/// A package with no `<job>` does not run.
 fn wsf_shell_runs_at(
     text: &str,
     wsf_path: Option<&str>,
@@ -9779,13 +9779,13 @@ fn wsf_job_bodies(text: &str) -> Vec<(Option<String>, String)> {
 /// script opaque until `</script>`.
 fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
     while index < chars.len() {
-        if let Some(comment) = wsf_comment_at(chars, index) {
+        if let Some((hidden, resume)) = wsf_hidden_at(chars, index) {
             let job_close = wsf_close_tag(chars, index, "job");
             let script = wsf_script_tag(chars, index);
-            let before_close = job_close.is_none_or(|close| comment < close);
-            let before_script = script.is_none_or(|script| comment < script);
+            let before_close = job_close.is_none_or(|close| hidden < close);
+            let before_script = script.is_none_or(|script| hidden < script);
             if before_close && before_script {
-                index = wsf_comment_resume(chars, comment);
+                index = resume;
                 continue;
             }
         }
@@ -9815,15 +9815,30 @@ fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
     None
 }
 
-/// Index of the next `<!--`, if one starts at or after `index`.
-fn wsf_comment_at(chars: &[char], mut index: usize) -> Option<usize> {
-    while index + 3 < chars.len() {
+/// The next `<!--` or `<![CDATA[` outside a script, and where to resume.
+fn wsf_hidden_at(chars: &[char], mut index: usize) -> Option<(usize, usize)> {
+    while index < chars.len() {
         if starts_with(chars, index, "<!--") {
-            return Some(index);
+            return Some((index, wsf_comment_resume(chars, index)));
+        }
+        if starts_with(chars, index, "<![CDATA[") {
+            return Some((index, wsf_cdata_resume(chars, index)));
         }
         index += 1;
     }
     None
+}
+
+/// Index just after `]]>`. An unclosed CDATA section runs to the end.
+fn wsf_cdata_resume(chars: &[char], start: usize) -> usize {
+    let mut index = start + "<![CDATA[".chars().count();
+    while index + 2 < chars.len() {
+        if chars[index] == ']' && chars[index + 1] == ']' && chars[index + 2] == '>' {
+            return index + 3;
+        }
+        index += 1;
+    }
+    chars.len()
 }
 
 /// Index just after `-->`. An unclosed comment runs to the end.
@@ -9843,6 +9858,10 @@ fn wsf_open_tag(chars: &[char], mut index: usize, name: &str) -> Option<usize> {
         if chars[index] == '<' {
             if starts_with(chars, index, "<!--") {
                 index = wsf_comment_resume(chars, index);
+                continue;
+            }
+            if starts_with(chars, index, "<![CDATA[") {
+                index = wsf_cdata_resume(chars, index);
                 continue;
             }
             let mut cursor = index + 1;
@@ -34439,6 +34458,24 @@ mod tests {
             super::wsf_shell_runs_at(fake_end, None, None, None),
             vec!["git push origin main".to_string()]
         );
+        let cdata_job = "<package>\n<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n]]>\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(cdata_job, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        assert!(super::wsf_shell_runs_at(cdata_job, None, None, Some("one")).is_empty());
+        let cdata_end = "<job id=\"one\">\n<![CDATA[ </job> ]]>\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(cdata_end, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let cdata_text = "<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"<![CDATA[\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(cdata_text, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let cdata_open = "<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert!(super::wsf_shell_runs_at(cdata_open, None, None, None).is_empty());
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
