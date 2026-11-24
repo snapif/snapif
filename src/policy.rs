@@ -676,7 +676,8 @@ fn check_action(
 /// word, in any ASCII case. Any other `/word` is the script name,
 /// so `/?` does not skip ahead to a later file. A missing file
 /// stays unmatched. `WScript.Shell` `Run` or `Exec` of a string is
-/// the command. `['Run']` and `["Exec"]` are those calls. A `.js`
+/// the command. `['Run']` and `["Exec"]` are those calls, including
+/// a name joined with `+`. A `.js`
 /// file also reads a single-quoted string. `+` joins quoted pieces
 /// in both languages, and `&` joins them only in VBScript. A `.js`
 /// `&` keeps the first piece. `WScript.` joined to `Shell` is still
@@ -9993,14 +9994,17 @@ fn js_eval_string(chars: &[char], index: usize) -> Option<(String, usize)> {
 }
 
 /// `['Run']` and `["Exec"]` take the command string. Space may sit
-/// inside the brackets and before the command. A longer name is not
+/// inside the brackets and before the command. Pieces joined with
+/// `+` are one name. JScript `&` is not a join. A longer name is not
 /// this call. The `)` that ends the call stays put.
 fn js_bracket_call(chars: &[char], index: usize) -> Option<(String, usize)> {
     if chars.get(index) != Some(&'[') {
         return None;
     }
-    let mut cursor = skip_wsh_call_gap(chars, index + 1, true);
+    let cursor = skip_wsh_call_gap(chars, index + 1, true);
+    let (mut cursor, depth) = skip_wsh_open_groups(chars, cursor, true);
     let (name, after_name) = read_wsh_string(chars, cursor, true)?;
+    let (name, after_name) = join_wsh_strings(chars, name, after_name, true, depth);
     if !name.eq_ignore_ascii_case("run") && !name.eq_ignore_ascii_case("exec") {
         return None;
     }
@@ -33631,6 +33635,34 @@ mod tests {
                 true,
             ),
             vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' + 'n']('git push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')[\"Ex\" + \"ec\"](\"git push origin main\");\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' + 'nning']('git push origin main');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' & 'n']('git push origin main');\n",
+                true,
+            ),
+            Vec::<String>::new(),
         );
         assert_eq!(
             super::vbs_shell_runs(
