@@ -9690,7 +9690,9 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// case-insensitive. A `<script>` body is opaque, so `</job>` inside
 /// it is text. `<!-- -->` and `<![CDATA[` hide jobs and scripts.
 /// An unclosed comment or CDATA section hides the rest of the file.
-/// A package with no `<job>` does not run.
+/// `<object progid="WScript.Shell">` in that job arms `Run` and
+/// `Exec` in its scripts. A package-level object does not. A package
+/// with no `<job>` does not run.
 fn wsf_shell_runs_at(
     text: &str,
     wsf_path: Option<&str>,
@@ -9709,6 +9711,7 @@ fn wsf_shell_runs_at(
         return Vec::new();
     };
     let chars: Vec<char> = selected.chars().collect();
+    let object_shell = wsf_job_object_shell(&chars);
     let mut commands = Vec::new();
     let mut index = 0usize;
     while index < chars.len() {
@@ -9724,7 +9727,7 @@ fn wsf_shell_runs_at(
         if let Some(src) = wsf_attr(&header, "src").filter(|src| !src.is_empty()) {
             let path = wsf_src_file(&src, wsf_path);
             if let Some(ScriptFile::Text(src_text)) = load_script_file(&path) {
-                commands.extend(vbs_shell_runs(&src_text, jscript));
+                commands.extend(vbs_shell_runs_depth(&src_text, jscript, 0, object_shell));
             }
         }
         if header_end > tag && chars[header_end - 1] == '/' {
@@ -9736,10 +9739,108 @@ fn wsf_shell_runs_at(
             break;
         };
         let body: String = chars[body_start..close].iter().collect();
-        commands.extend(vbs_shell_runs(&wsf_strip_cdata(&body), jscript));
+        commands.extend(vbs_shell_runs_depth(
+            &wsf_strip_cdata(&body),
+            jscript,
+            0,
+            object_shell,
+        ));
         index = close + "</script>".chars().count();
     }
     commands
+}
+
+/// An `<object progid="WScript.Shell">` in this job, outside a script.
+fn wsf_job_object_shell(chars: &[char]) -> bool {
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((hidden, resume)) = wsf_hidden_at(chars, index) {
+            let object = wsf_open_tag(chars, index, "object");
+            let script = wsf_script_tag(chars, index);
+            let before_object = object.is_none_or(|tag| hidden < tag);
+            let before_script = script.is_none_or(|tag| hidden < tag);
+            if before_object && before_script {
+                index = resume;
+                continue;
+            }
+        }
+        let object = wsf_open_tag(chars, index, "object");
+        let script = wsf_script_tag(chars, index);
+        if let Some(script_at) = script {
+            if object.is_none_or(|tag| script_at < tag) {
+                let Some(next) = wsf_element_end(chars, script_at, "script") else {
+                    return false;
+                };
+                index = next;
+                continue;
+            }
+        }
+        let Some(tag) = object else {
+            return false;
+        };
+        if wsf_object_tag_is_shell(chars, tag) {
+            return true;
+        }
+        let Some(next) = wsf_element_end(chars, tag, "object") else {
+            return false;
+        };
+        index = next;
+    }
+    false
+}
+
+fn wsf_element_end(chars: &[char], tag: usize, name: &str) -> Option<usize> {
+    let rel = chars[tag..].iter().position(|ch| *ch == '>')?;
+    let header_end = tag + rel;
+    if header_end > tag && chars[header_end - 1] == '/' {
+        return Some(header_end + 1);
+    }
+    let close = wsf_close_tag(chars, header_end + 1, name)?;
+    let end_rel = chars[close..].iter().position(|ch| *ch == '>')?;
+    Some(close + end_rel + 1)
+}
+
+fn wsf_object_tag_is_shell(chars: &[char], tag: usize) -> bool {
+    let Some(rel) = chars[tag..].iter().position(|ch| *ch == '>') else {
+        return false;
+    };
+    let header: String = chars[tag..tag + rel].iter().collect();
+    wsf_attr(&header, "progid").is_some_and(|value| wsf_is_shell_progid(&value))
+        || wsf_attr(&header, "classid").is_some_and(|value| wsf_is_shell_classid(&value))
+}
+
+/// `WScript.Shell` and `WScript.Shell.1` are that object.
+fn wsf_is_shell_progid(value: &str) -> bool {
+    let value = value.trim();
+    let stem = "WScript.Shell";
+    let Some(prefix) = value.get(..stem.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(stem) {
+        return false;
+    }
+    let rest = &value[stem.len()..];
+    if rest.is_empty() {
+        return true;
+    }
+    let mut chars = rest.chars();
+    if chars.next() != Some('.') {
+        return false;
+    }
+    let version: String = chars.collect();
+    !version.is_empty() && version.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// `clsid:72C24DD5-D70A-438B-8A42-98424B88AFB8` is `WScript.Shell`.
+fn wsf_is_shell_classid(value: &str) -> bool {
+    let mut id = value.trim();
+    if let Some(prefix) = id.get(..6) {
+        if prefix.eq_ignore_ascii_case("clsid:") {
+            id = &id[6..];
+        }
+    }
+    let id = id.trim_matches(|ch: char| ch == '{' || ch == '}' || ch.is_whitespace());
+    id.eq_ignore_ascii_case("72C24DD5-D70A-438B-8A42-98424B88AFB8")
 }
 
 fn wsf_job_bodies(text: &str) -> Vec<(Option<String>, String)> {
@@ -34476,6 +34577,37 @@ mod tests {
         );
         let cdata_open = "<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
         assert!(super::wsf_shell_runs_at(cdata_open, None, None, None).is_empty());
+    }
+
+    /// `<object progid="WScript.Shell">` in the job creates that
+    /// object for the scripts in the job. A package-level object does
+    /// not, and a commented-out object does not.
+    #[test]
+    fn wsf_object_shell_arms_run_in_that_job() {
+        let job = "<job>\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(job, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let jscript = "<job>\n<object id=\"sh\" progid=\"wscript.shell\"/>\n<script language=\"JScript\">\nsh.Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(jscript, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let versioned = "<job>\n<object id=\"sh\" progid=\"WScript.Shell.1\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(versioned, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let classid = "<job>\n<object id=\"sh\" classid=\"clsid:72C24DD5-D70A-438B-8A42-98424B88AFB8\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert_eq!(
+            super::wsf_shell_runs_at(classid, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let package = "<package>\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n<job id=\"one\">\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n</package>\n";
+        assert!(super::wsf_shell_runs_at(package, None, None, None).is_empty());
+        let commented = "<job>\n<!--\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n-->\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert!(super::wsf_shell_runs_at(commented, None, None, None).is_empty());
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
