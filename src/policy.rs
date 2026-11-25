@@ -9766,14 +9766,14 @@ fn wsf_job_object_shell(chars: &[char]) -> bool {
         }
         let object = wsf_open_tag(chars, index, "object");
         let script = wsf_script_tag(chars, index);
-        if let Some(script_at) = script {
-            if object.is_none_or(|tag| script_at < tag) {
-                let Some(next) = wsf_element_end(chars, script_at, "script") else {
-                    return false;
-                };
-                index = next;
-                continue;
-            }
+        if let Some(script_at) = script
+            && object.is_none_or(|tag| script_at < tag)
+        {
+            let Some(next) = wsf_element_end(chars, script_at, "script") else {
+                return false;
+            };
+            index = next;
+            continue;
         }
         let Some(tag) = object else {
             return false;
@@ -9834,10 +9834,10 @@ fn wsf_is_shell_progid(value: &str) -> bool {
 /// `clsid:72C24DD5-D70A-438B-8A42-98424B88AFB8` is `WScript.Shell`.
 fn wsf_is_shell_classid(value: &str) -> bool {
     let mut id = value.trim();
-    if let Some(prefix) = id.get(..6) {
-        if prefix.eq_ignore_ascii_case("clsid:") {
-            id = &id[6..];
-        }
+    if let Some(prefix) = id.get(..6)
+        && prefix.eq_ignore_ascii_case("clsid:")
+    {
+        id = &id[6..];
     }
     let id = id.trim_matches(|ch: char| ch == '{' || ch == '}' || ch.is_whitespace());
     id.eq_ignore_ascii_case("72C24DD5-D70A-438B-8A42-98424B88AFB8")
@@ -9897,20 +9897,14 @@ fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
         if job_close.is_some_and(|close| close < script) {
             return job_close;
         }
-        let Some(rel) = chars[script..].iter().position(|ch| *ch == '>') else {
-            return None;
-        };
+        let rel = chars[script..].iter().position(|ch| *ch == '>')?;
         let header_end = script + rel;
         if chars.get(header_end.wrapping_sub(1)) == Some(&'/') {
             index = header_end + 1;
             continue;
         }
-        let Some(script_close) = wsf_script_close(chars, header_end + 1) else {
-            return None;
-        };
-        let Some(end_rel) = chars[script_close..].iter().position(|ch| *ch == '>') else {
-            return None;
-        };
+        let script_close = wsf_script_close(chars, header_end + 1)?;
+        let end_rel = chars[script_close..].iter().position(|ch| *ch == '>')?;
         index = script_close + end_rel + 1;
     }
     None
