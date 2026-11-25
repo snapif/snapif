@@ -20168,7 +20168,14 @@ fn literal_hits(
             ranges.push(at..end);
             start = end.max(at + 1);
         } else {
-            start = at + 1;
+            // `at + 1` lands inside a multibyte character and the next
+            // slice panics. Step one character, which is one byte for ASCII.
+            let step = hay[at..]
+                .chars()
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(1);
+            start = at + step;
         }
     }
     if ranges.is_empty() {
@@ -26621,6 +26628,18 @@ mod tests {
     use super::{HarmClass, Policy, effective_gates, matched_action, verdict_with_blocks};
     use crate::ids::ActionId;
     use crate::verdict::Verdict;
+
+    #[test]
+    fn grep_word_rejects_a_multibyte_hit_without_panicking() {
+        let missed = super::grep_lines("xλ\n", "λ", true, false, true, false, false);
+        assert_eq!(missed.as_deref(), Some(""));
+        let hit = super::grep_lines("λ\n", "λ", true, false, true, false, false);
+        assert_eq!(hit.as_deref(), Some("λ\n"));
+        let ascii = super::grep_lines("git push\n", "git", true, false, true, false, false);
+        assert_eq!(ascii.as_deref(), Some("git push\n"));
+        let ascii_miss = super::grep_lines("xgit\n", "git", true, false, true, false, false);
+        assert_eq!(ascii_miss.as_deref(), Some(""));
+    }
 
     fn drive_letter_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
