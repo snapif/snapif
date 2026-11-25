@@ -20070,7 +20070,7 @@ fn grep_lines(
     let mut out = String::new();
     for line in text.split_inclusive('\n') {
         let body = line.trim_end_matches('\n');
-        if star || (plus && plus_matches(body, pattern)) {
+        if star || (plus && plus_matches(body, pattern, ignore_case)) {
             out.push_str(body);
             out.push('\n');
             continue;
@@ -20106,9 +20106,23 @@ fn plus_prefix(pattern: &str) -> Option<&str> {
     Some(prefix)
 }
 
-fn plus_matches(line: &str, pattern: &str) -> bool {
+fn plus_matches(line: &str, pattern: &str, ignore_case: bool) -> bool {
     let Some(prefix) = plus_prefix(pattern) else {
         return false;
+    };
+    let line_folded;
+    let prefix_folded;
+    let line = if ignore_case {
+        line_folded = line.to_ascii_lowercase();
+        line_folded.as_str()
+    } else {
+        line
+    };
+    let prefix = if ignore_case {
+        prefix_folded = prefix.to_ascii_lowercase();
+        prefix_folded.as_str()
+    } else {
+        prefix
     };
     let Some(last) = prefix.chars().next_back() else {
         return false;
@@ -26639,6 +26653,16 @@ mod tests {
         assert_eq!(ascii.as_deref(), Some("git push\n"));
         let ascii_miss = super::grep_lines("xgit\n", "git", true, false, true, false, false);
         assert_eq!(ascii_miss.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn grep_extended_plus_honors_ignore_case() {
+        let hit = super::grep_lines("AAA\n", "a+", false, true, false, false, true);
+        assert_eq!(hit.as_deref(), Some("AAA\n"));
+        let miss = super::grep_lines("AAA\n", "a+", false, false, false, false, true);
+        assert_eq!(miss.as_deref(), Some(""));
+        let low = super::grep_lines("aaa\n", "a+", false, false, false, false, true);
+        assert_eq!(low.as_deref(), Some("aaa\n"));
     }
 
     fn drive_letter_lock() -> std::sync::MutexGuard<'static, ()> {
