@@ -51,4 +51,5 @@ check: ## fmt, stealth, clippy, rustdoc, test, deny, workflow lint
 	bash scripts/forbid-deps.sh fuzz/Cargo.toml
 	python3 scripts/test_workflow_triggers.py
 	python3 scripts/test_forbid_deps.py
+	python3 scripts/test_release_please_after_merge.py
 	$(MAKE) workflows

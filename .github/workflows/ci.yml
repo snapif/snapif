@@ -83,6 +83,7 @@ jobs:
       - run: bash scripts/forbid-deps.sh
       - run: python3 scripts/test_workflow_triggers.py
       - run: python3 scripts/test_forbid_deps.py
+      - run: python3 scripts/test_release_please_after_merge.py
 
   workflows:
     name: Workflows
