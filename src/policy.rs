@@ -676,10 +676,16 @@ fn check_action(
 /// word, in any ASCII case. Any other `/word` is the script name,
 /// so `/?` does not skip ahead to a later file. A missing file
 /// stays unmatched. `WScript.Shell` `Run` or `Exec` of a string is
-/// the command. A `.js` file also reads a single-quoted string.
-/// `+` joins quoted pieces in both languages, and `&` joins them only
-/// in VBScript. A `.js` `&` keeps the first piece. A script that only
-/// prints stays unmatched.
+/// the command. `['Run']` and `["Exec"]` are those calls, including
+/// a name joined with `+`, grouping parentheses, and a comma
+/// expression inside the brackets. A `.js`
+/// file also reads a single-quoted string. `+` joins quoted pieces
+/// in both languages, and `&` joins them only in VBScript. A `.js`
+/// `&` keeps the first piece. `WScript.` joined to `Shell` is still
+/// that object. A bare `Execute` or `ExecuteGlobal` runs that string
+/// as VBScript. `.Execute` is not that statement. JScript `eval`
+/// joins `+` pieces before it runs them. A script that only prints
+/// stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -9584,7 +9590,11 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// script name. `WScript.Shell` `Run` or `Exec` of a string is the
 /// command. A `.js` file also reads a single-quoted string.
 /// `+` joins quoted pieces in both languages, and `&` joins them only
-/// in VBScript. A `.js` `&` keeps the first piece. A
+/// in VBScript. A `.js` `&` keeps the first piece. `WScript.` joined
+/// to `Shell` is still that object. A bare `Execute` or
+/// `ExecuteGlobal` runs that string as VBScript. `.Execute` is not
+/// that statement. JScript `eval` joins `+` pieces before it runs
+/// them. `['Run']` and `["Exec"]` are `.Run` and `.Exec`. A
 /// VBScript `_` at the end of a line continues `Run` or `Exec`. A
 /// missing file stays unmatched.
 #[allow(clippy::too_many_arguments)]
@@ -9606,11 +9616,15 @@ fn score_wsh<'a>(
         return;
     }
     let mut engine_js = None;
+    let mut job_id = None;
     let mut script = None;
     for arg in argv.iter().skip(1) {
         if wsh_switch(arg) {
             if let Some(js) = wsh_engine_js(arg) {
                 engine_js = Some(js);
+            }
+            if let Some(id) = wsh_job_name(arg) {
+                job_id = Some(id.to_string());
             }
             continue;
         }
@@ -9624,8 +9638,16 @@ fn score_wsh<'a>(
     let script_path = shell_path(script, dir);
     match load_script_file(&script_path) {
         Some(ScriptFile::Text(text)) => {
-            let commands = if wsh_wsf(&script_path) {
-                wsf_shell_runs_at(&text, Some(&script_path), engine_js)
+            let commands = if wsh_wsf(&script_path) && engine_js.is_none() {
+                match wsf_shell_runs_at(&text, Some(&script_path), None, job_id.as_deref()) {
+                    WsfRuns::Unscanned(commands) => {
+                        prefer(policy, best, unscanned_action(policy));
+                        commands
+                    }
+                    WsfRuns::Commands(commands) => commands,
+                }
+            } else if wsh_wsf(&script_path) && wsf_markup(&text) {
+                Vec::new()
             } else {
                 let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
                 vbs_shell_runs(&text, jscript)
@@ -9647,6 +9669,14 @@ fn wsh_wsf(path: &str) -> bool {
     wsh_extension(path).is_some_and(|ext| ext.eq_ignore_ascii_case("wsf"))
 }
 
+/// A Windows Script File package starts with `<`. `/E` compiles the
+/// file as a raw script, so that package fails before a block runs.
+fn wsf_markup(text: &str) -> bool {
+    text.trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with('<')
+}
+
 fn wsh_extension(path: &str) -> Option<&str> {
     let name = path
         .rsplit(['/', '\\'])
@@ -9657,14 +9687,51 @@ fn wsh_extension(path: &str) -> Option<&str> {
 }
 
 /// A `.wsf` file runs each `<script>` body. `language="JScript"` or
-/// `JavaScript` scores that body as JScript. Any other language,
-/// including a missing one, stays VBScript. A `<![CDATA[` wrapper is
-/// not part of the script. `src` is loaded from beside the `.wsf`
-/// file. A block with no language is JScript, unless `/E` names
-/// another engine.
-fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>, engine_js: Option<bool>) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
+/// `JavaScript` scores that body as JScript. Any other language
+/// stays VBScript. A `<![CDATA[` wrapper is not part of the script.
+/// `src` is loaded from beside the `.wsf` file. A `src` past one
+/// megabyte is `shell.deep`, the same as the package file itself.
+/// The other scripts in that job are still scored, and a stricter
+/// command replaces `shell.deep`.
+/// A block with no language is JScript. `/E` does not retarget a
+/// block: the host
+/// compiles that `.wsf` file as a raw script. Only the first `<job>`
+/// runs unless `/Job:` names one, and the name match is
+/// case-insensitive. A `<script>` body is opaque, so `</job>` inside
+/// it is text. `<!-- -->` and `<![CDATA[` hide jobs and scripts.
+/// An unclosed comment or CDATA section hides the rest of the file.
+/// `<object progid="WScript.Shell">` in that job arms `Run` and
+/// `Exec` in its scripts. A package-level object does not. A package
+/// with no `<job>` does not run.
+enum WsfRuns {
+    Commands(Vec<String>),
+    /// Readable commands from the job, plus at least one `src` past
+    /// the cap. `shell.deep` is preferred, then a stricter command
+    /// replaces it.
+    Unscanned(Vec<String>),
+}
+
+fn wsf_shell_runs_at(
+    text: &str,
+    wsf_path: Option<&str>,
+    engine_js: Option<bool>,
+    job_id: Option<&str>,
+) -> WsfRuns {
+    let jobs = wsf_job_bodies(text);
+    let selected = match job_id {
+        Some(id) => jobs.into_iter().find(|(job, _)| {
+            job.as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case(id))
+        }),
+        None => jobs.into_iter().next(),
+    };
+    let Some((_, selected)) = selected else {
+        return WsfRuns::Commands(Vec::new());
+    };
+    let chars: Vec<char> = selected.chars().collect();
+    let object_shell = wsf_job_object_shell(&chars);
     let mut commands = Vec::new();
+    let mut unscanned = false;
     let mut index = 0usize;
     while index < chars.len() {
         let Some(tag) = wsf_script_tag(&chars, index) else {
@@ -9678,8 +9745,12 @@ fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>, engine_js: Option<bool>
         let jscript = wsf_block_jscript(&header, engine_js);
         if let Some(src) = wsf_attr(&header, "src").filter(|src| !src.is_empty()) {
             let path = wsf_src_file(&src, wsf_path);
-            if let Some(ScriptFile::Text(src_text)) = load_script_file(&path) {
-                commands.extend(vbs_shell_runs(&src_text, jscript));
+            match load_script_file(&path) {
+                Some(ScriptFile::Text(src_text)) => {
+                    commands.extend(vbs_shell_runs_depth(&src_text, jscript, 0, object_shell));
+                }
+                Some(ScriptFile::Unscanned) => unscanned = true,
+                None => {}
             }
         }
         if header_end > tag && chars[header_end - 1] == '/' {
@@ -9691,21 +9762,236 @@ fn wsf_shell_runs_at(text: &str, wsf_path: Option<&str>, engine_js: Option<bool>
             break;
         };
         let body: String = chars[body_start..close].iter().collect();
-        commands.extend(vbs_shell_runs(&wsf_strip_cdata(&body), jscript));
+        commands.extend(vbs_shell_runs_depth(
+            &wsf_strip_cdata(&body),
+            jscript,
+            0,
+            object_shell,
+        ));
         index = close + "</script>".chars().count();
     }
-    commands
+    if unscanned {
+        WsfRuns::Unscanned(commands)
+    } else {
+        WsfRuns::Commands(commands)
+    }
 }
 
-fn wsf_script_tag(chars: &[char], mut index: usize) -> Option<usize> {
+/// An `<object progid="WScript.Shell">` in this job, outside a script.
+fn wsf_job_object_shell(chars: &[char]) -> bool {
+    let mut index = 0usize;
+    while index < chars.len() {
+        if let Some((hidden, resume)) = wsf_hidden_at(chars, index) {
+            let object = wsf_open_tag(chars, index, "object");
+            let script = wsf_script_tag(chars, index);
+            let before_object = object.is_none_or(|tag| hidden < tag);
+            let before_script = script.is_none_or(|tag| hidden < tag);
+            if before_object && before_script {
+                index = resume;
+                continue;
+            }
+        }
+        let object = wsf_open_tag(chars, index, "object");
+        let script = wsf_script_tag(chars, index);
+        if let Some(script_at) = script
+            && object.is_none_or(|tag| script_at < tag)
+        {
+            let Some(next) = wsf_element_end(chars, script_at, "script") else {
+                return false;
+            };
+            index = next;
+            continue;
+        }
+        let Some(tag) = object else {
+            return false;
+        };
+        if wsf_object_tag_is_shell(chars, tag) {
+            return true;
+        }
+        let Some(next) = wsf_element_end(chars, tag, "object") else {
+            return false;
+        };
+        index = next;
+    }
+    false
+}
+
+fn wsf_element_end(chars: &[char], tag: usize, name: &str) -> Option<usize> {
+    let rel = chars[tag..].iter().position(|ch| *ch == '>')?;
+    let header_end = tag + rel;
+    if header_end > tag && chars[header_end - 1] == '/' {
+        return Some(header_end + 1);
+    }
+    let close = wsf_close_tag(chars, header_end + 1, name)?;
+    let end_rel = chars[close..].iter().position(|ch| *ch == '>')?;
+    Some(close + end_rel + 1)
+}
+
+fn wsf_object_tag_is_shell(chars: &[char], tag: usize) -> bool {
+    let Some(rel) = chars[tag..].iter().position(|ch| *ch == '>') else {
+        return false;
+    };
+    let header: String = chars[tag..tag + rel].iter().collect();
+    wsf_attr(&header, "progid").is_some_and(|value| wsf_is_shell_progid(&value))
+        || wsf_attr(&header, "classid").is_some_and(|value| wsf_is_shell_classid(&value))
+}
+
+/// `WScript.Shell` and `WScript.Shell.1` are that object.
+fn wsf_is_shell_progid(value: &str) -> bool {
+    let value = value.trim();
+    let stem = "WScript.Shell";
+    let Some(prefix) = value.get(..stem.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(stem) {
+        return false;
+    }
+    let rest = &value[stem.len()..];
+    if rest.is_empty() {
+        return true;
+    }
+    let mut chars = rest.chars();
+    if chars.next() != Some('.') {
+        return false;
+    }
+    let version: String = chars.collect();
+    !version.is_empty() && version.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// `clsid:72C24DD5-D70A-438B-8A42-98424B88AFB8` is `WScript.Shell`.
+fn wsf_is_shell_classid(value: &str) -> bool {
+    let mut id = value.trim();
+    if let Some(prefix) = id.get(..6)
+        && prefix.eq_ignore_ascii_case("clsid:")
+    {
+        id = &id[6..];
+    }
+    let id = id.trim_matches(|ch: char| ch == '{' || ch == '}' || ch.is_whitespace());
+    id.eq_ignore_ascii_case("72C24DD5-D70A-438B-8A42-98424B88AFB8")
+}
+
+fn wsf_job_bodies(text: &str) -> Vec<(Option<String>, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut jobs = Vec::new();
+    let mut index = 0usize;
+    while index < chars.len() {
+        let Some(tag) = wsf_open_tag(&chars, index, "job") else {
+            break;
+        };
+        let Some(rel) = chars[tag..].iter().position(|ch| *ch == '>') else {
+            break;
+        };
+        let header_end = tag + rel;
+        let header: String = chars[tag..header_end].iter().collect();
+        let id = wsf_attr(&header, "id");
+        if chars.get(header_end.wrapping_sub(1)) == Some(&'/') {
+            jobs.push((id, String::new()));
+            index = header_end + 1;
+            continue;
+        }
+        let body_start = header_end + 1;
+        let Some(close) = wsf_job_close(&chars, body_start) else {
+            break;
+        };
+        let body: String = chars[body_start..close].iter().collect();
+        let Some(rel_end) = chars[close..].iter().position(|ch| *ch == '>') else {
+            break;
+        };
+        jobs.push((id, body));
+        index = close + rel_end + 1;
+    }
+    jobs
+}
+
+/// `</job>` inside a `<script>` body is text. The host keeps that
+/// script opaque until `</script>`.
+fn wsf_job_close(chars: &[char], mut index: usize) -> Option<usize> {
+    while index < chars.len() {
+        if let Some((hidden, resume)) = wsf_hidden_at(chars, index) {
+            let job_close = wsf_close_tag(chars, index, "job");
+            let script = wsf_script_tag(chars, index);
+            let before_close = job_close.is_none_or(|close| hidden < close);
+            let before_script = script.is_none_or(|script| hidden < script);
+            if before_close && before_script {
+                index = resume;
+                continue;
+            }
+        }
+        let job_close = wsf_close_tag(chars, index, "job");
+        let Some(script) = wsf_script_tag(chars, index) else {
+            return job_close;
+        };
+        if job_close.is_some_and(|close| close < script) {
+            return job_close;
+        }
+        let rel = chars[script..].iter().position(|ch| *ch == '>')?;
+        let header_end = script + rel;
+        if chars.get(header_end.wrapping_sub(1)) == Some(&'/') {
+            index = header_end + 1;
+            continue;
+        }
+        let script_close = wsf_script_close(chars, header_end + 1)?;
+        let end_rel = chars[script_close..].iter().position(|ch| *ch == '>')?;
+        index = script_close + end_rel + 1;
+    }
+    None
+}
+
+/// The next `<!--` or `<![CDATA[` outside a script, and where to resume.
+fn wsf_hidden_at(chars: &[char], mut index: usize) -> Option<(usize, usize)> {
+    while index < chars.len() {
+        if starts_with(chars, index, "<!--") {
+            return Some((index, wsf_comment_resume(chars, index)));
+        }
+        if starts_with(chars, index, "<![CDATA[") {
+            return Some((index, wsf_cdata_resume(chars, index)));
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Index just after `]]>`. An unclosed CDATA section runs to the end.
+fn wsf_cdata_resume(chars: &[char], start: usize) -> usize {
+    let mut index = start + "<![CDATA[".chars().count();
+    while index + 2 < chars.len() {
+        if chars[index] == ']' && chars[index + 1] == ']' && chars[index + 2] == '>' {
+            return index + 3;
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+/// Index just after `-->`. An unclosed comment runs to the end.
+fn wsf_comment_resume(chars: &[char], start: usize) -> usize {
+    let mut index = start + 4;
+    while index + 2 < chars.len() {
+        if chars[index] == '-' && chars[index + 1] == '-' && chars[index + 2] == '>' {
+            return index + 3;
+        }
+        index += 1;
+    }
+    chars.len()
+}
+
+fn wsf_open_tag(chars: &[char], mut index: usize, name: &str) -> Option<usize> {
     while index < chars.len() {
         if chars[index] == '<' {
-            let mut name = index + 1;
-            while chars.get(name).is_some_and(|ch| ch.is_whitespace()) {
-                name += 1;
+            if starts_with(chars, index, "<!--") {
+                index = wsf_comment_resume(chars, index);
+                continue;
             }
-            if starts_with_ignore(chars, name, "script") {
-                let after = name + "script".len();
+            if starts_with(chars, index, "<![CDATA[") {
+                index = wsf_cdata_resume(chars, index);
+                continue;
+            }
+            let mut cursor = index + 1;
+            while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+                cursor += 1;
+            }
+            if starts_with_ignore(chars, cursor, name) {
+                let after = cursor + name.chars().count();
                 if !chars
                     .get(after)
                     .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
@@ -9719,17 +10005,17 @@ fn wsf_script_tag(chars: &[char], mut index: usize) -> Option<usize> {
     None
 }
 
-fn wsf_script_close(chars: &[char], mut index: usize) -> Option<usize> {
+fn wsf_close_tag(chars: &[char], mut index: usize, name: &str) -> Option<usize> {
     while index < chars.len() {
         if chars[index] == '<' {
-            let mut name = index + 1;
-            if chars.get(name) == Some(&'/') {
-                name += 1;
-                while chars.get(name).is_some_and(|ch| ch.is_whitespace()) {
-                    name += 1;
+            let mut cursor = index + 1;
+            if chars.get(cursor) == Some(&'/') {
+                cursor += 1;
+                while chars.get(cursor).is_some_and(|ch| ch.is_whitespace()) {
+                    cursor += 1;
                 }
-                if starts_with_ignore(chars, name, "script") {
-                    let after = name + "script".len();
+                if starts_with_ignore(chars, cursor, name) {
+                    let after = cursor + name.chars().count();
                     if !chars
                         .get(after)
                         .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
@@ -9742,6 +10028,14 @@ fn wsf_script_close(chars: &[char], mut index: usize) -> Option<usize> {
         index += 1;
     }
     None
+}
+
+fn wsf_script_tag(chars: &[char], index: usize) -> Option<usize> {
+    wsf_open_tag(chars, index, "script")
+}
+
+fn wsf_script_close(chars: &[char], index: usize) -> Option<usize> {
+    wsf_close_tag(chars, index, "script")
 }
 
 fn wsf_block_jscript(header: &str, engine_js: Option<bool>) -> bool {
@@ -9835,19 +10129,25 @@ fn wsf_strip_cdata(body: &str) -> String {
 }
 
 fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
-    vbs_shell_runs_depth(text, jscript, 0)
+    vbs_shell_runs_depth(text, jscript, 0, false)
 }
 
-/// Bare JScript `eval("...")` runs that text. A chain stops at
-/// `MAX_SHELL_DEPTH`. `obj.eval` and a longer name are not this call.
-fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32) -> Vec<String> {
+/// Bare JScript `eval("...")` runs that text, including pieces joined
+/// with `+`. A bare VBScript `Execute` or `ExecuteGlobal` runs that
+/// string. A chain stops at `MAX_SHELL_DEPTH`. `obj.eval` and a longer
+/// name are not `eval`. `.Execute` is not the `Execute` statement.
+/// `['Run']` and `['Exec']` pass the same command `.Run` and `.Exec` do.
+/// `WScript.Shell` in this script keeps a `Run` inside `Execute` or
+/// `eval`. A literal that appears only inside that string does not
+/// keep a `Run` written outside it.
+fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32, inherited: bool) -> Vec<String> {
     if depth > MAX_SHELL_DEPTH {
         return Vec::new();
     }
     let chars: Vec<char> = text.chars().collect();
+    let shell = inherited || wsh_frame_has_shell(&chars, jscript);
     let mut commands = Vec::new();
     let mut nested = Vec::new();
-    let mut shell = false;
     let mut index = 0usize;
     while index < chars.len() {
         if jscript {
@@ -9862,35 +10162,38 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32) -> Vec<String> {
             if js_eval_at(&chars, index)
                 && let Some((body, end)) = js_eval_string(&chars, index)
             {
-                nested.extend(vbs_shell_runs_depth(&body, true, depth + 1));
+                nested.extend(vbs_shell_runs_depth(&body, true, depth + 1, shell));
                 index = end;
                 continue;
             }
-        } else if vbs_comment(&chars, index) {
-            index = skip_line(&chars, index);
-            continue;
-        }
-        if let Some((body, end)) = read_wsh_string(&chars, index, jscript) {
-            if body.eq_ignore_ascii_case("WScript.Shell") {
-                shell = true;
-            }
-            index = end;
-            continue;
-        }
-        if let Some(after) = vbs_call_at(&chars, index) {
-            let mut cursor = skip_wsh_call_gap(&chars, after, jscript);
-            if cursor < chars.len() && chars[cursor] == '(' {
-                cursor = skip_wsh_call_gap(&chars, cursor + 1, jscript);
-            }
-            let (cursor, depth) = skip_wsh_open_groups(&chars, cursor, jscript);
-            if let Some((command, end)) = read_wsh_string(&chars, cursor, jscript) {
-                let (command, end) = join_wsh_strings(&chars, command, end, jscript, depth);
+            if let Some((command, end)) = js_bracket_call(&chars, index) {
                 if !command.is_empty() {
                     commands.push(command);
                 }
                 index = end;
                 continue;
             }
+        } else if vbs_comment(&chars, index) {
+            index = skip_line(&chars, index);
+            continue;
+        } else if let Some((body, end)) = vbs_execute_string(&chars, index) {
+            nested.extend(vbs_shell_runs_depth(&body, false, depth + 1, shell));
+            index = end;
+            continue;
+        }
+        if let Some((body, end)) = read_wsh_string(&chars, index, jscript) {
+            let (_, end) = join_wsh_strings(&chars, body, end, jscript, 0, false);
+            index = end;
+            continue;
+        }
+        if let Some(after) = vbs_call_at(&chars, index)
+            && let Some((command, end)) = wsh_command_at(&chars, after, jscript)
+        {
+            if !command.is_empty() {
+                commands.push(command);
+            }
+            index = end;
+            continue;
         }
         index += 1;
     }
@@ -9899,6 +10202,47 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32) -> Vec<String> {
     }
     commands.extend(nested);
     commands
+}
+
+/// `WScript.Shell` in this text, outside `Execute` and `eval` arguments.
+/// Those arguments are separate scripts. A literal only inside one of
+/// them must not arm `Run` written beside the call.
+fn wsh_frame_has_shell(chars: &[char], jscript: bool) -> bool {
+    let mut index = 0usize;
+    while index < chars.len() {
+        if jscript {
+            if starts_with(chars, index, "//") {
+                index = skip_line(chars, index);
+                continue;
+            }
+            if starts_with(chars, index, "/*") {
+                index = skip_block(chars, index + 2);
+                continue;
+            }
+            if js_eval_at(chars, index)
+                && let Some((_, end)) = js_eval_string(chars, index)
+            {
+                index = end;
+                continue;
+            }
+        } else if vbs_comment(chars, index) {
+            index = skip_line(chars, index);
+            continue;
+        } else if let Some((_, end)) = vbs_execute_string(chars, index) {
+            index = end;
+            continue;
+        }
+        if let Some((body, end)) = read_wsh_string(chars, index, jscript) {
+            let (body, end) = join_wsh_strings(chars, body, end, jscript, 0, false);
+            if body.eq_ignore_ascii_case("WScript.Shell") {
+                return true;
+            }
+            index = end;
+            continue;
+        }
+        index += 1;
+    }
+    false
 }
 
 /// `eval` at `index`, not a method and not a longer name.
@@ -9919,8 +10263,9 @@ fn js_eval_at(chars: &[char], index: usize) -> bool {
 }
 
 /// The string argument of `eval`. Space, line breaks, and comments
-/// may sit before `(`, and between `(` and the string. A non-string
-/// argument is not this call.
+/// may sit before `(`, and between `(` and the string. Pieces joined
+/// with `+` are one script. A `+` after the closing `)` is outside
+/// this call. A non-string argument is not this call.
 fn js_eval_string(chars: &[char], index: usize) -> Option<(String, usize)> {
     let mut cursor = index + 4;
     cursor = skip_js_trivia(chars, cursor);
@@ -9928,7 +10273,61 @@ fn js_eval_string(chars: &[char], index: usize) -> Option<(String, usize)> {
         return None;
     }
     cursor = skip_js_trivia(chars, cursor + 1);
-    read_wsh_string(chars, cursor, true)
+    let (cursor, depth) = skip_wsh_open_groups(chars, cursor, true);
+    let (body, end) = read_wsh_string(chars, cursor, true)?;
+    Some(join_wsh_strings(chars, body, end, true, depth, false))
+}
+
+/// `['Run']` and `["Exec"]` take the command string. Space may sit
+/// inside the brackets and before the command. Pieces joined with
+/// `+` are one name. Grouping parentheses and a comma expression
+/// inside the brackets are part of that name: the comma yields the
+/// last quoted piece, and a grouping `)` is consumed so `]` can
+/// follow it. JScript `&` is not a join. A longer name is not this
+/// call. The `)` that ends the call stays put.
+fn js_bracket_call(chars: &[char], index: usize) -> Option<(String, usize)> {
+    if chars.get(index) != Some(&'[') {
+        return None;
+    }
+    let cursor = skip_wsh_call_gap(chars, index + 1, true);
+    let (mut cursor, depth) = skip_wsh_open_groups(chars, cursor, true);
+    let (name, after_name) = read_wsh_string(chars, cursor, true)?;
+    let (name, after_name) = join_wsh_strings(chars, name, after_name, true, depth, true);
+    if !name.eq_ignore_ascii_case("run") && !name.eq_ignore_ascii_case("exec") {
+        return None;
+    }
+    cursor = skip_wsh_call_gap(chars, after_name, true);
+    if chars.get(cursor) != Some(&']') {
+        return None;
+    }
+    wsh_command_at(chars, cursor + 1, true)
+}
+
+/// Bare `Execute` and `ExecuteGlobal` run the string as VBScript.
+/// `.Execute` and a longer name are not this statement. The argument
+/// may be in parentheses, and a `_` line continuation may precede it.
+fn vbs_execute_string(chars: &[char], index: usize) -> Option<(String, usize)> {
+    if index > 0 {
+        let prev = chars[index - 1];
+        if prev.is_ascii_alphanumeric() || matches!(prev, '_' | '.') {
+            return None;
+        }
+    }
+    let name = if starts_with_ignore(chars, index, "executeglobal") {
+        "executeglobal"
+    } else if starts_with_ignore(chars, index, "execute") {
+        "execute"
+    } else {
+        return None;
+    };
+    let after = index + name.len();
+    if chars
+        .get(after)
+        .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+    {
+        return None;
+    }
+    wsh_command_at(chars, after, false)
 }
 
 /// Space and comments between JScript tokens. A `//` comment ends at
@@ -9969,7 +10368,20 @@ fn skip_js_gap(chars: &[char], mut cursor: usize) -> usize {
 /// does not run.
 /// `/E:JScript` and `//E:JScript` force JScript. `/E:VBScript` forces
 /// VBScript. The flag may sit before or after the script path. The
-/// extension is used when this flag is absent.
+/// extension is used when this flag is absent. On a `.wsf` package
+/// the flag does not select a block language. The host compiles the
+/// file as one raw script, and a file that starts with `<` does not
+/// run. A raw script saved with that extension does run.
+fn wsh_job_name(arg: &str) -> Option<&str> {
+    let rest = arg.strip_prefix("//").or_else(|| arg.strip_prefix('/'))?;
+    let (name, value) = rest.split_once(':')?;
+    if name.eq_ignore_ascii_case("job") && !value.is_empty() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 fn wsh_engine_js(arg: &str) -> Option<bool> {
     let rest = arg.strip_prefix("//").or_else(|| arg.strip_prefix('/'))?;
     let (name, value) = rest.split_once(':')?;
@@ -10012,34 +10424,51 @@ fn wsh_switch(arg: &str) -> bool {
 /// not space. A `_` with only spaces or tabs before the newline is the
 /// VBScript continuation, so the join keeps looking. Parentheses
 /// around a quoted piece are grouping, so the join reads that piece.
-/// A `)` closes only a `(` this join opened. The `)` that ends `Run(`
-/// stays put, so a `+` after the call is not part of the command.
-/// A piece that is not a quoted string stops the join and keeps the
-/// text already read.
+/// A `)` closes only a `(` this join opened, and the end moves to just
+/// after that `)`. The `)` that ends `Run(` or `eval(` stays put, so a
+/// `+` after the call is not part of the command. A JScript comma
+/// yields the next quoted piece. Inside a group it replaces only the
+/// text that group added, so a prefix outside the parentheses stays.
+/// At depth 0 a comma is an argument list, as in `Run("git push", 0)`,
+/// unless `expr_comma` is set for a bracket name: there the comma
+/// yields the last quoted piece. A following piece that is not a
+/// quoted string stops the join and keeps the text already read.
+/// VBScript's comma is not a join.
 fn join_wsh_strings(
     chars: &[char],
     mut command: String,
     mut end: usize,
     jscript: bool,
     mut depth: usize,
+    expr_comma: bool,
 ) -> (String, usize) {
+    // Each mark is `command.len()` when that `(` opened, so a comma
+    // can drop only the text inside its group.
+    let mut marks = vec![0usize; depth];
     loop {
         let mut look = skip_wsh_join_gap(chars, end, jscript);
         while depth > 0 && chars.get(look) == Some(&')') {
             depth -= 1;
-            look = skip_wsh_join_gap(chars, look + 1, jscript);
+            let _ = marks.pop();
+            end = look + 1;
+            look = skip_wsh_join_gap(chars, end, jscript);
         }
-        // JScript's comma operator yields the last value. It only
-        // applies inside a group this join opened. `Run("git", 0)` is
-        // an argument list, so a comma at depth 0 stays put.
-        if jscript && depth > 0 && chars.get(look) == Some(&',') {
-            command.clear();
+        if jscript && (depth > 0 || expr_comma) && chars.get(look) == Some(&',') {
             let (next_look, opened) = skip_wsh_open_groups(chars, look + 1, jscript);
-            depth += opened;
             let Some((next, next_end)) = read_wsh_string(chars, next_look, jscript) else {
                 break;
             };
-            command = next;
+            let mark = if depth > 0 {
+                marks.last().copied().unwrap_or(0)
+            } else {
+                0
+            };
+            command.truncate(mark);
+            for _ in 0..opened {
+                marks.push(command.len());
+            }
+            depth += opened;
+            command.push_str(&next);
             end = next_end;
             continue;
         }
@@ -10053,10 +10482,13 @@ fn join_wsh_strings(
         }
         look += 1;
         let (next_look, opened) = skip_wsh_open_groups(chars, look, jscript);
-        depth += opened;
         let Some((next, next_end)) = read_wsh_string(chars, next_look, jscript) else {
             break;
         };
+        for _ in 0..opened {
+            marks.push(command.len());
+        }
+        depth += opened;
         command.push_str(&next);
         end = next_end;
     }
@@ -10165,6 +10597,18 @@ fn vbs_comment(chars: &[char], index: usize) -> bool {
         }
     }
     true
+}
+
+/// The command string after a call name. An opening `(` is the call.
+/// Further `(` group a quoted piece. A missing string is not a call.
+fn wsh_command_at(chars: &[char], mut cursor: usize, jscript: bool) -> Option<(String, usize)> {
+    cursor = skip_wsh_call_gap(chars, cursor, jscript);
+    if chars.get(cursor) == Some(&'(') {
+        cursor = skip_wsh_call_gap(chars, cursor + 1, jscript);
+    }
+    let (cursor, depth) = skip_wsh_open_groups(chars, cursor, jscript);
+    let (command, end) = read_wsh_string(chars, cursor, jscript)?;
+    Some(join_wsh_strings(chars, command, end, jscript, depth, false))
 }
 
 /// `.Run` and `.Exec` take the command string. `.Execute` and
@@ -33294,6 +33738,348 @@ mod tests {
         );
     }
 
+    /// VBScript `Execute` and `ExecuteGlobal` run the string. The pieces
+    /// joined with `&` are one script. A `_` line continuation still
+    /// reaches that string. `.Execute` is the method, not the statement.
+    /// A comment, an `Echo`, and the same word in JScript stay unmatched.
+    #[test]
+    fn wsh_vbscript_execute_runs_the_string() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "Execute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "ExecuteGlobal \"CreateObject(\"\"WScript.Shell\"\").Run \"\"rm -rf /tmp/x\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["rm -rf /tmp/x".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "executeglobal \"createobject(\"\"wscript.shell\"\").run \"\"git push origin main\"\", 0, true\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "Execute \"CreateObject(\"\"WScript.Shell\"\").\" & \"Run \"\"git push origin main\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "Execute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git \"\" + \"\"push origin main\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "Execute(\"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\")\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "ExecuteGlobal _\n\"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            wsf_commands(
+                "<job><script language=\"VBScript\">\nExecute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n</script></job>\n",
+                None,
+                None,
+                None,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.Shell\").Execute \"git push origin main\"\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "Execute \"WScript.Echo \"\"git push origin main\"\"\"\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "' Execute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "Execute(\"new ActiveXObject('WScript.Shell').Run('git push origin main')\");\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "Set sh = CreateObject(\"WScript.Shell\")\nExecute \"sh.Run \"\"git push origin main\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "Execute \"sh.Run \"\"git push origin main\"\", 0, True\"\nSet sh = CreateObject(\"WScript.Shell\")\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "Execute \"sh.Run \"\"git push origin main\"\", 0, True\"\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "foo.Run \"git push origin main\", 0, True\nExecute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"cmd /c echo ok\"\", 0, True\"\n",
+                false,
+            ),
+            vec!["cmd /c echo ok".to_string()],
+        );
+    }
+
+    /// `eval` of pieces joined with `+` runs the joined script. A `+`
+    /// after the closing `)` is outside the call. Grouping parentheses
+    /// stay inside. `obj.eval` and an `Echo` stay unmatched.
+    #[test]
+    fn wsh_jscript_eval_joins_the_argument() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval('new ActiveXObject(\"WScript.Shell\").Run(\"' + 'git push origin main' + '\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval('new ActiveXObject(\"WScript.Shell\").Run(\"git push\")') + ' origin main';\n",
+                true,
+            ),
+            vec!["git push".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval(('new ActiveXObject(\"WScript.Shell\").Run(\"' + 'git push origin main' + '\")'));\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "eval('WScript.Echo(\"' + 'git push origin main' + '\")');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "obj.eval('new ActiveXObject(\"WScript.Shell\").Run(\"' + 'git push origin main' + '\")');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "var shell = new ActiveXObject('WScript.Shell');\neval('shell.Run(\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "var shell = new ActiveXObject('WScript.Shell');\neval('shell[\"Run\"](\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+    }
+
+    /// `['Run']` and `["Exec"]` are the same calls as `.Run` and `.Exec`.
+    /// The name is case-insensitive. A joined `WScript.` + `Shell` is
+    /// still that object. A `+` after the call stays outside. A longer
+    /// name, a bracket call with no shell object, and a bare `['Run']`
+    /// stay unmatched.
+    #[test]
+    fn wsh_jscript_bracket_call_is_run_or_exec() {
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Run']('git push origin main', 0, true);\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "var shell = WScript.CreateObject('WScript.Shell');\nshell['Run']('git push origin main', 0, true);\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "eval('new ActiveXObject(\"WScript.Shell\")[\"Run\"](\"git push origin main\")');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')[\"Exec\"](\"git push origin main\");\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')[ 'run' ] ( 'git ' + 'push origin main' );\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' + 'n']('git push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')[\"Ex\" + \"ec\"](\"git push origin main\");\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' + 'nning']('git push origin main');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' & 'n']('git push origin main');\n",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.' + 'Shell')['Run']('git push origin main');\n",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "CreateObject(\"WScript.\" & \"Shell\").Run \"git push origin main\", 0, True\n",
+                false,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Run']('git push') + ' origin main';\n",
+                true,
+            ),
+            vec!["git push".to_string()],
+        );
+        assert!(super::vbs_shell_runs("foo['Run']('git push origin main');\n", true,).is_empty());
+        assert!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Running']('git push origin main');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Execute']('git push origin main');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Run'];\nWScript.Echo('git push origin main');\n",
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')[('Ru' + 'n')]('git push origin main');",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['nope', 'Run']('git push origin main');",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['nope', 'Ex' + 'ec']('git push origin main');",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git' + ('push', ' push origin main'));",
+                true,
+            ),
+            vec!["git push origin main".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['x' + ('y', 'Ru') + 'n']('git push origin main');",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell')['Ru' + 'n', 'nope']('git push origin main');",
+                true,
+            ),
+            Vec::<String>::new(),
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "new ActiveXObject('WScript.Shell').Run('git push', 0);",
+                true,
+            ),
+            vec!["git push".to_string()],
+        );
+    }
+
     /// JScript joins strings with `+`, including across a newline or
     /// CR. JScript `&` is bitwise AND, so that call keeps the first
     /// piece. VBScript accepts `+` as well as `&`. A line break is not
@@ -33562,30 +34348,45 @@ mod tests {
         );
     }
 
+    fn wsf_commands(
+        text: &str,
+        wsf_path: Option<&str>,
+        engine_js: Option<bool>,
+        job_id: Option<&str>,
+    ) -> Vec<String> {
+        match super::wsf_shell_runs_at(text, wsf_path, engine_js, job_id) {
+            super::WsfRuns::Commands(commands) => commands,
+            super::WsfRuns::Unscanned(_) => panic!("unscanned src"),
+        }
+    }
+
     /// A `.wsf` `<script language="JScript">` block is JScript, so
     /// single quotes are strings. Scoring the file as VBScript turns
     /// the quote into a comment and drops the command.
     #[test]
     fn wsf_jscript_block_scores_single_quotes() {
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
                 None,
                 None,
+                None,
             ),
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
                 None,
                 None,
+                None,
             ),
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language='JScript'><![CDATA[\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n]]></script></job>\n",
+                None,
                 None,
                 None,
             ),
@@ -33599,18 +34400,20 @@ mod tests {
     #[test]
     fn wsf_block_without_language_is_jscript() {
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
+                None,
                 None,
                 None,
             ),
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
                 None,
                 Some(false),
+                None,
             ),
             Vec::<String>::new(),
         );
@@ -33638,9 +34441,255 @@ mod tests {
         let wsf = root.join("job.wsf");
         let text = "<job><script language=\"JScript\" src=\"push.js\"/></job>\n";
         std::fs::write(&wsf, text).expect("wsf");
-        let loaded = super::wsf_shell_runs_at(text, Some(&wsf.display().to_string()), None);
+        let loaded = wsf_commands(text, Some(&wsf.display().to_string()), None, None);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(loaded, vec!["git push origin main".to_string()]);
+    }
+
+    /// A `<script src>` past one megabyte is `shell.deep`. The host
+    /// still runs that file. Leaving it unmatched would be `auto`.
+    #[test]
+    fn wsf_script_src_over_the_cap_is_shell_deep() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let script = root.join("big.js");
+        std::fs::write(&script, vec![b' '; (1024 * 1024) + 1]).expect("js");
+        let wsf = root.join("job.wsf");
+        let text = "<job><script language=\"JScript\" src=\"big.js\"/></job>\n";
+        std::fs::write(&wsf, text).expect("wsf");
+        let command = format!("cscript {}", wsf.display());
+        let hit = matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some("shell.deep".to_string()));
+    }
+
+    /// The other scripts in that job still run. `bash.rm` outranks
+    /// `shell.deep`, so an `rm` beside an oversized `src` stays `rm`.
+    #[test]
+    fn wsf_script_src_over_the_cap_keeps_a_stricter_command() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-cap-rm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(root.join("big.js"), vec![b' '; (1024 * 1024) + 1]).expect("js");
+        let wsf = root.join("job.wsf");
+        let text = "<job>\n<script language=\"JScript\" src=\"big.js\"/>\n<script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"rm -rf /tmp/x\", 0, True\n</script>\n</job>\n";
+        std::fs::write(&wsf, text).expect("wsf");
+        let command = format!("cscript {}", wsf.display());
+        let hit = matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some("bash.rm".to_string()));
+    }
+
+    /// `/E` compiles a `.wsf` file as a raw script. A package that
+    /// starts with `<` fails before any block runs. A raw script with
+    /// that extension runs under the named engine, and without `/E`
+    /// the host reports that the file has no jobs.
+    #[test]
+    fn wsf_engine_flag_scores_a_raw_script_not_a_package() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-e-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let package = root.join("job.wsf");
+        std::fs::write(
+            &package,
+            "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
+        )
+        .expect("package");
+        let raw = root.join("raw.wsf");
+        std::fs::write(
+            &raw,
+            "new ActiveXObject('WScript.Shell').Run('git push origin main');\n",
+        )
+        .expect("raw");
+        let package = package.display().to_string();
+        let raw = raw.display().to_string();
+        let hit = |command: String| {
+            matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string())
+        };
+        assert_eq!(
+            hit(format!("cscript {package}")),
+            Some("git.push".to_string())
+        );
+        assert!(hit(format!("cscript /E:VBScript {package}")).is_none());
+        assert!(hit(format!("cscript {package} /E:JScript")).is_none());
+        assert!(hit(format!("cscript {raw}")).is_none());
+        assert_eq!(
+            hit(format!("cscript /E:JScript {raw}")),
+            Some("git.push".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The host runs every script in one `<job>`, and only the first
+    /// job unless `/Job:` names another. The name is case-insensitive.
+    /// A missing name runs nothing. A `<script>` outside a job does
+    /// not run.
+    #[test]
+    fn wsf_job_flag_runs_only_the_named_job() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let jobs = "<package>\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin other');\n</script>\n</job>\n<job id=\"two\">\n<script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"rm -rf /tmp/x\", 0, True\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            wsf_commands(jobs, None, None, None),
+            vec![
+                "git push origin main".to_string(),
+                "git push origin other".to_string()
+            ]
+        );
+        assert_eq!(
+            wsf_commands(jobs, None, None, Some("two")),
+            vec!["rm -rf /tmp/x".to_string()]
+        );
+        assert_eq!(
+            wsf_commands(jobs, None, None, Some("TWO")),
+            vec!["rm -rf /tmp/x".to_string()]
+        );
+        assert!(wsf_commands(jobs, None, None, Some("missing")).is_empty());
+        assert!(wsf_commands(
+            "<package><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></package>\n",
+            None,
+            None,
+            None,
+        )
+        .is_empty());
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-job-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let path = root.join("jobs.wsf");
+        std::fs::write(&path, jobs).expect("jobs");
+        let path = path.display().to_string();
+        let hit = |command: String| {
+            matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string())
+        };
+        assert_eq!(hit(format!("cscript {path}")), Some("git.push".to_string()));
+        assert_eq!(
+            hit(format!("cscript //Job:two {path}")),
+            Some("bash.rm".to_string())
+        );
+        assert!(hit(format!("cscript //Job:missing {path}")).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A script body is opaque. `"</job>"` inside the script is text.
+    /// The host still runs the command after that string, and `//Job:`
+    /// still finds the next job.
+    #[test]
+    fn wsf_job_end_inside_a_script_string_is_text() {
+        let jobs = "<package>\n<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"</job>\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            wsf_commands(jobs, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        assert_eq!(
+            wsf_commands(jobs, None, None, Some("two")),
+            vec!["rm -rf /tmp/x".to_string()]
+        );
+    }
+
+    /// `<!-- -->` hides jobs and scripts. An unclosed comment hides
+    /// the rest of the file. `<!--` inside a script is text, so the
+    /// command after it still runs.
+    #[test]
+    fn wsf_xml_comments_hide_jobs_and_scripts() {
+        let commented_first = "<package>\n<!--\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n-->\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            wsf_commands(commented_first, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        assert!(wsf_commands(commented_first, None, None, Some("one")).is_empty());
+        let commented_script = "<job id=\"one\">\n<!--\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n-->\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(commented_script, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let unclosed = "<!--\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert!(wsf_commands(unclosed, None, None, None).is_empty());
+        let inside = "<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"<!--\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(inside, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let fake_end = "<job id=\"one\">\n<!-- </job> -->\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(fake_end, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let cdata_job = "<package>\n<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n]]>\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n</package>\n";
+        assert_eq!(
+            wsf_commands(cdata_job, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        assert!(wsf_commands(cdata_job, None, None, Some("one")).is_empty());
+        let cdata_end = "<job id=\"one\">\n<![CDATA[ </job> ]]>\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(cdata_end, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let cdata_text = "<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"<![CDATA[\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(cdata_text, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let cdata_open = "<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
+        assert!(wsf_commands(cdata_open, None, None, None).is_empty());
+    }
+
+    /// `<object progid="WScript.Shell">` in the job creates that
+    /// object for the scripts in the job. A package-level object does
+    /// not, and a commented-out object does not.
+    #[test]
+    fn wsf_object_shell_arms_run_in_that_job() {
+        let job = "<job>\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(job, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let jscript = "<job>\n<object id=\"sh\" progid=\"wscript.shell\"/>\n<script language=\"JScript\">\nsh.Run('git push origin main');\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(jscript, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let versioned = "<job>\n<object id=\"sh\" progid=\"WScript.Shell.1\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(versioned, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let classid = "<job>\n<object id=\"sh\" classid=\"clsid:72C24DD5-D70A-438B-8A42-98424B88AFB8\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert_eq!(
+            wsf_commands(classid, None, None, None),
+            vec!["git push origin main".to_string()]
+        );
+        let package = "<package>\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n<job id=\"one\">\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n</package>\n";
+        assert!(wsf_commands(package, None, None, None).is_empty());
+        let commented = "<job>\n<!--\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n-->\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
+        assert!(wsf_commands(commented, None, None, None).is_empty());
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
@@ -33839,6 +34888,38 @@ mod tests {
             "CreateObject(\"WScript.Shell\").Execute \"git push origin main\"\n",
         );
         write_host(
+            "stmt.vbs",
+            "Execute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n",
+        );
+        write_host(
+            "global.vbs",
+            "ExecuteGlobal \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n",
+        );
+        write_host(
+            "rm-global.vbs",
+            "ExecuteGlobal \"CreateObject(\"\"WScript.Shell\"\").Run \"\"rm -rf /tmp/x\"\", 0, True\"\n",
+        );
+        write_host(
+            "evalplus.js",
+            "eval('new ActiveXObject(\"WScript.Shell\").Run(\"' + 'git push origin main' + '\")');\n",
+        );
+        write_host(
+            "bracket.js",
+            "new ActiveXObject('WScript.Shell')['Run']('git push origin main', 0, true);\n",
+        );
+        write_host(
+            "bracket-exec.js",
+            "new ActiveXObject('WScript.Shell')[\"Exec\"](\"git push origin main\");\n",
+        );
+        write_host(
+            "set-exec.vbs",
+            "Set sh = CreateObject(\"WScript.Shell\")\nExecute \"sh.Run \"\"git push origin main\"\", 0, True\"\n",
+        );
+        write_host(
+            "eval-shell.js",
+            "var shell = new ActiveXObject('WScript.Shell');\neval('shell.Run(\"git push origin main\")');\n",
+        );
+        write_host(
             "quote-note.vbs",
             "CreateObject(\"WScript.Shell\").Run 'git push origin main'\n",
         );
@@ -33985,6 +35066,13 @@ mod tests {
             format!("cscript //nologo {}", path("exec-call.vbs")),
             format!("cscript //nologo {}", path("continue.vbs")),
             format!("cscript //nologo {}", path("unicode.js")),
+            format!("cscript //nologo {}", path("stmt.vbs")),
+            format!("cscript //nologo {}", path("global.vbs")),
+            format!("cscript //nologo {}", path("evalplus.js")),
+            format!("cscript //nologo {}", path("bracket.js")),
+            format!("cscript //nologo {}", path("bracket-exec.js")),
+            format!("cscript //nologo {}", path("set-exec.vbs")),
+            format!("cscript //nologo {}", path("eval-shell.js")),
         ];
         for command in &review {
             assert_eq!(
@@ -34093,6 +35181,15 @@ mod tests {
             matched_action(&policy, "Bash", Some("cmd /c \"git push origin main.bat\""))
                 .map(|id| id.0.as_str()),
             Some("git.push")
+        );
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("cscript //nologo {}", path("rm-global.vbs")))
+            )
+            .map(|id| id.0.as_str()),
+            Some("bash.rm")
         );
         drop(files);
     }
