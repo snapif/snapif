@@ -9640,9 +9640,9 @@ fn score_wsh<'a>(
         Some(ScriptFile::Text(text)) => {
             let commands = if wsh_wsf(&script_path) && engine_js.is_none() {
                 match wsf_shell_runs_at(&text, Some(&script_path), None, job_id.as_deref()) {
-                    WsfRuns::Unscanned => {
+                    WsfRuns::Unscanned(commands) => {
                         prefer(policy, best, unscanned_action(policy));
-                        return;
+                        commands
                     }
                     WsfRuns::Commands(commands) => commands,
                 }
@@ -9691,6 +9691,8 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// stays VBScript. A `<![CDATA[` wrapper is not part of the script.
 /// `src` is loaded from beside the `.wsf` file. A `src` past one
 /// megabyte is `shell.deep`, the same as the package file itself.
+/// The other scripts in that job are still scored, and a stricter
+/// command replaces `shell.deep`.
 /// A block with no language is JScript. `/E` does not retarget a
 /// block: the host
 /// compiles that `.wsf` file as a raw script. Only the first `<job>`
@@ -9703,7 +9705,10 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// with no `<job>` does not run.
 enum WsfRuns {
     Commands(Vec<String>),
-    Unscanned,
+    /// Readable commands from the job, plus at least one `src` past
+    /// the cap. `shell.deep` is preferred, then a stricter command
+    /// replaces it.
+    Unscanned(Vec<String>),
 }
 
 fn wsf_shell_runs_at(
@@ -9726,6 +9731,7 @@ fn wsf_shell_runs_at(
     let chars: Vec<char> = selected.chars().collect();
     let object_shell = wsf_job_object_shell(&chars);
     let mut commands = Vec::new();
+    let mut unscanned = false;
     let mut index = 0usize;
     while index < chars.len() {
         let Some(tag) = wsf_script_tag(&chars, index) else {
@@ -9743,7 +9749,7 @@ fn wsf_shell_runs_at(
                 Some(ScriptFile::Text(src_text)) => {
                     commands.extend(vbs_shell_runs_depth(&src_text, jscript, 0, object_shell));
                 }
-                Some(ScriptFile::Unscanned) => return WsfRuns::Unscanned,
+                Some(ScriptFile::Unscanned) => unscanned = true,
                 None => {}
             }
         }
@@ -9764,7 +9770,11 @@ fn wsf_shell_runs_at(
         ));
         index = close + "</script>".chars().count();
     }
-    WsfRuns::Commands(commands)
+    if unscanned {
+        WsfRuns::Unscanned(commands)
+    } else {
+        WsfRuns::Commands(commands)
+    }
 }
 
 /// An `<object progid="WScript.Shell">` in this job, outside a script.
@@ -34346,7 +34356,7 @@ mod tests {
     ) -> Vec<String> {
         match super::wsf_shell_runs_at(text, wsf_path, engine_js, job_id) {
             super::WsfRuns::Commands(commands) => commands,
-            super::WsfRuns::Unscanned => panic!("unscanned src"),
+            super::WsfRuns::Unscanned(_) => panic!("unscanned src"),
         }
     }
 
@@ -34459,6 +34469,30 @@ mod tests {
         let hit = matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string());
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(hit, Some("shell.deep".to_string()));
+    }
+
+    /// The other scripts in that job still run. `bash.rm` outranks
+    /// `shell.deep`, so an `rm` beside an oversized `src` stays `rm`.
+    #[test]
+    fn wsf_script_src_over_the_cap_keeps_a_stricter_command() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-cap-rm-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        std::fs::write(root.join("big.js"), vec![b' '; (1024 * 1024) + 1]).expect("js");
+        let wsf = root.join("job.wsf");
+        let text = "<job>\n<script language=\"JScript\" src=\"big.js\"/>\n<script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"rm -rf /tmp/x\", 0, True\n</script>\n</job>\n";
+        std::fs::write(&wsf, text).expect("wsf");
+        let command = format!("cscript {}", wsf.display());
+        let hit = matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some("bash.rm".to_string()));
     }
 
     /// `/E` compiles a `.wsf` file as a raw script. A package that
