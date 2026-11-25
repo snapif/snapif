@@ -157,11 +157,17 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertIn("workflow_run:", on_block)
         self.assertIn("workflow_dispatch:", on_block)
         self.assertIn('workflows: ["CI", "Auto-approve"]', after)
-        self.assertIn('gh workflow run "Release Please"', after)
-        self.assertIn("github-actions", after)
-        self.assertIn("release-please*)", after)
-        self.assertIn("draft pull request", after)
-        self.assertIn('[ "$TRIGGER" = "Auto-approve" ] && [ "$i" -le 6 ]', after)
+        self.assertIn("python3 scripts/release_please_after_merge.py", after)
+        self.assertIn("github.event.workflow_run.head_sha", after)
+        script = (ROOT / "scripts" / "release_please_after_merge.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"Release Please"', script)
+        self.assertIn("github-actions[bot]", script)
+        self.assertIn('head.startswith("release-please")', script)
+        self.assertIn("draft pull request", script)
+        self.assertIn('trigger == "Auto-approve" and attempt <= 6', script)
+        self.assertIn('if trigger == "Auto-approve":\n        return 1', script)
 
     def test_composite_action_does_not_interpolate_inputs_in_run(self) -> None:
         text = (ROOT / ".github" / "actions" / "snapif" / "action.yml").read_text(
