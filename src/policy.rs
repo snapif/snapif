@@ -942,9 +942,13 @@ fn consider_segment<'a>(
             } else {
                 score_script_path(policy, tool_name, path, depth, local, git, best);
             }
-        } else if let Some(scripts) =
+        } else if let Some((scripts, truncated)) =
             eval_script(&executed.argv, &executed.in_eval, scope, exported, local)
         {
+            if truncated {
+                // The rest is not scored. Missing it would use default_action, which can auto.
+                prefer(policy, best, unscanned_action(policy));
+            }
             for script in &scripts {
                 score_here(
                     policy, tool_name, script, depth, functions, local, exported, scope, git, best,
@@ -4100,7 +4104,7 @@ fn eval_script(
     scope: &ShellScope,
     exported: &[(String, String)],
     command_env: &[(String, String)],
-) -> Option<Vec<String>> {
+) -> Option<(Vec<String>, bool)> {
     let base = command_basename(tokens.first()?);
     if !base.eq_ignore_ascii_case("eval") {
         return None;
@@ -4113,12 +4117,18 @@ fn eval_script(
         return None;
     }
     let mut variants = vec![String::new()];
+    let mut truncated = false;
     for (offset, token) in tokens[start..].iter().enumerate() {
         let single = in_eval.get(start + offset).copied().unwrap_or(false);
-        let pieces = expand_eval_word(token, single, scope, exported, command_env);
-        variants = join_eval_words(&variants, &pieces);
+        let (pieces, piece_capped) = expand_eval_word(token, single, scope, exported, command_env);
+        let (next, join_capped) = join_eval_words(&variants, &pieces);
+        variants = next;
+        truncated |= piece_capped || join_capped;
+        if truncated {
+            break;
+        }
     }
-    Some(variants)
+    Some((variants, truncated))
 }
 
 /// `$name` and `${name}` in one `eval` word. One pass: the value is not
@@ -4131,7 +4141,7 @@ fn expand_eval_word(
     scope: &ShellScope,
     exported: &[(String, String)],
     command_env: &[(String, String)],
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
     let mut pieces: Vec<Vec<String>> = Vec::new();
     let mut literal = String::new();
     let mut rest = token;
@@ -4175,13 +4185,19 @@ fn expand_eval_word(
     literal.push_str(rest);
     push_eval_literal(&mut literal, &mut pieces);
     if pieces.is_empty() {
-        return vec![String::new()];
+        return (vec![String::new()], false);
     }
     let mut acc = vec![String::new()];
+    let mut truncated = false;
     for piece in &pieces {
-        acc = concat_eval_pieces(&acc, piece);
+        let (next, capped) = concat_eval_pieces(&acc, piece);
+        acc = next;
+        if capped {
+            truncated = true;
+            break;
+        }
     }
-    acc
+    (acc, truncated)
 }
 
 fn push_eval_literal(literal: &mut String, pieces: &mut Vec<Vec<String>>) {
@@ -4256,12 +4272,12 @@ fn array_param(spec: ParamRef<'_>, values: &[String]) -> String {
     }
 }
 
-fn join_eval_words(prefixes: &[String], words: &[String]) -> Vec<String> {
+fn join_eval_words(prefixes: &[String], words: &[String]) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     for prefix in prefixes {
         for word in words {
             if out.len() == EVAL_VARIANT_CAP {
-                return out;
+                return (out, true);
             }
             if prefix.is_empty() {
                 out.push(word.clone());
@@ -4270,15 +4286,15 @@ fn join_eval_words(prefixes: &[String], words: &[String]) -> Vec<String> {
             }
         }
     }
-    out
+    (out, false)
 }
 
-fn concat_eval_pieces(prefixes: &[String], parts: &[String]) -> Vec<String> {
+fn concat_eval_pieces(prefixes: &[String], parts: &[String]) -> (Vec<String>, bool) {
     let mut out = Vec::new();
     for prefix in prefixes {
         for part in parts {
             if out.len() == EVAL_VARIANT_CAP {
-                return out;
+                return (out, true);
             }
             let mut next = String::with_capacity(prefix.len() + part.len());
             next.push_str(prefix);
@@ -4286,7 +4302,7 @@ fn concat_eval_pieces(prefixes: &[String], parts: &[String]) -> Vec<String> {
             out.push(next);
         }
     }
-    out
+    (out, false)
 }
 
 #[derive(Clone, Copy)]
@@ -26663,6 +26679,29 @@ mod tests {
         assert_eq!(miss.as_deref(), Some(""));
         let low = super::grep_lines("aaa\n", "a+", false, false, false, false, true);
         assert_eq!(low.as_deref(), Some("aaa\n"));
+    }
+
+    /// Nine conditional values overflow the eval cap. The value that
+    /// does not fit must not disappear into `default_action`.
+    #[test]
+    fn eval_past_the_variant_cap_is_shell_deep() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let mut command = String::new();
+        for index in 1..8 {
+            command.push_str(&format!("if true; then x='echo {index}'; fi; "));
+        }
+        command.push_str("if true; then x='rm -rf /tmp/x'; fi; ");
+        command.push_str("if true; then x='echo last'; fi; eval \"$x\"");
+        let hit = matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string());
+        assert_eq!(hit.as_deref(), Some("shell.deep"));
+
+        let mut exact = String::new();
+        for index in 1..8 {
+            exact.push_str(&format!("if true; then x='echo {index}'; fi; "));
+        }
+        exact.push_str("if true; then x='git push origin main'; fi; eval \"$x\"");
+        let within = matched_action(&policy, "Bash", Some(&exact)).map(|id| id.0.to_string());
+        assert_eq!(within.as_deref(), Some("git.push"));
     }
 
     fn drive_letter_lock() -> std::sync::MutexGuard<'static, ()> {
