@@ -684,8 +684,9 @@ fn check_action(
 /// `&` keeps the first piece. `WScript.` joined to `Shell` is still
 /// that object. A bare `Execute` or `ExecuteGlobal` runs that string
 /// as VBScript. `.Execute` is not that statement. JScript `eval`
-/// joins `+` pieces before it runs them. A script that only prints
-/// stays unmatched.
+/// joins `+` pieces before it runs them. A chain past the depth cap
+/// is `shell.deep`, and a stricter command still replaces it. A script
+/// that only prints stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
 /// unmatched. `powershell -EncodedCommand`, `-E`,
 /// and `-EC` match once that value is decoded from UTF-16LE base64.
@@ -9611,8 +9612,9 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// `ExecuteGlobal` runs that string as VBScript. `.Execute` is not
 /// that statement. JScript `eval` joins `+` pieces before it runs
 /// them. `['Run']` and `["Exec"]` are `.Run` and `.Exec`. A
-/// VBScript `_` at the end of a line continues `Run` or `Exec`. A
-/// missing file stays unmatched.
+/// VBScript `_` at the end of a line continues `Run` or `Exec`. An
+/// `eval` or `Execute` chain past the depth cap is `shell.deep`, and
+/// a stricter command still replaces it. A missing file stays unmatched.
 #[allow(clippy::too_many_arguments)]
 fn score_wsh<'a>(
     policy: &'a Policy,
@@ -9654,20 +9656,24 @@ fn score_wsh<'a>(
     let script_path = shell_path(script, dir);
     match load_script_file(&script_path) {
         Some(ScriptFile::Text(text)) => {
-            let commands = if wsh_wsf(&script_path) && engine_js.is_none() {
+            let (commands, truncated) = if wsh_wsf(&script_path) && engine_js.is_none() {
                 match wsf_shell_runs_at(&text, Some(&script_path), None, job_id.as_deref()) {
                     WsfRuns::Unscanned(commands) => {
                         prefer(policy, best, unscanned_action(policy));
-                        commands
+                        (commands, false)
                     }
-                    WsfRuns::Commands(commands) => commands,
+                    WsfRuns::Commands(commands) => (commands, false),
                 }
             } else if wsh_wsf(&script_path) && wsf_markup(&text) {
-                Vec::new()
+                (Vec::new(), false)
             } else {
                 let jscript = engine_js.unwrap_or_else(|| wsh_jscript(&script_path));
-                vbs_shell_runs(&text, jscript)
+                vbs_shell_runs_depth(&text, jscript, 0, false)
             };
+            if truncated {
+                // The rest is not scored. Missing it would use default_action, which can auto.
+                prefer(policy, best, unscanned_action(policy));
+            }
             scan_isolated(policy, tool_name, &commands, depth, local, git, best);
         }
         Some(ScriptFile::Unscanned) => prefer(policy, best, unscanned_action(policy)),
@@ -9706,7 +9712,8 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// `JavaScript` scores that body as JScript. Any other language
 /// stays VBScript. A `<![CDATA[` wrapper is not part of the script.
 /// `src` is loaded from beside the `.wsf` file. A `src` past one
-/// megabyte is `shell.deep`, the same as the package file itself.
+/// megabyte, or an `eval` or `Execute` chain past the depth cap, is
+/// `shell.deep`, the same as the package file itself.
 /// The other scripts in that job are still scored, and a stricter
 /// command replaces `shell.deep`.
 /// A block with no language is JScript. `/E` does not retarget a
@@ -9722,8 +9729,9 @@ fn wsh_extension(path: &str) -> Option<&str> {
 enum WsfRuns {
     Commands(Vec<String>),
     /// Readable commands from the job, plus at least one `src` past
-    /// the cap. `shell.deep` is preferred, then a stricter command
-    /// replaces it.
+    /// the cap or one script whose `eval` or `Execute` chain passed
+    /// the depth cap. `shell.deep` is preferred, then a stricter
+    /// command replaces it.
     Unscanned(Vec<String>),
 }
 
@@ -9763,7 +9771,9 @@ fn wsf_shell_runs_at(
             let path = wsf_src_file(&src, wsf_path);
             match load_script_file(&path) {
                 Some(ScriptFile::Text(src_text)) => {
-                    commands.extend(vbs_shell_runs_depth(&src_text, jscript, 0, object_shell));
+                    let (found, deep) = vbs_shell_runs_depth(&src_text, jscript, 0, object_shell);
+                    commands.extend(found);
+                    unscanned |= deep;
                 }
                 Some(ScriptFile::Unscanned) => unscanned = true,
                 None => {}
@@ -9778,12 +9788,9 @@ fn wsf_shell_runs_at(
             break;
         };
         let body: String = chars[body_start..close].iter().collect();
-        commands.extend(vbs_shell_runs_depth(
-            &wsf_strip_cdata(&body),
-            jscript,
-            0,
-            object_shell,
-        ));
+        let (found, deep) = vbs_shell_runs_depth(&wsf_strip_cdata(&body), jscript, 0, object_shell);
+        commands.extend(found);
+        unscanned |= deep;
         index = close + "</script>".chars().count();
     }
     if unscanned {
@@ -10144,26 +10151,38 @@ fn wsf_strip_cdata(body: &str) -> String {
     chars["<![cdata[".len()..end].iter().collect()
 }
 
+#[cfg(test)]
 fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
-    vbs_shell_runs_depth(text, jscript, 0, false)
+    vbs_shell_runs_depth(text, jscript, 0, false).0
 }
 
 /// Bare JScript `eval("...")` runs that text, including pieces joined
 /// with `+`. A bare VBScript `Execute` or `ExecuteGlobal` runs that
-/// string. A chain stops at `MAX_SHELL_DEPTH`. `obj.eval` and a longer
-/// name are not `eval`. `.Execute` is not the `Execute` statement.
+/// string. A chain past `MAX_SHELL_DEPTH` is not scanned. Callers
+/// score that rest as `shell.deep`. `obj.eval` and a longer name are
+/// not `eval`. `.Execute` is not the `Execute` statement.
 /// `['Run']` and `['Exec']` pass the same command `.Run` and `.Exec` do.
 /// `WScript.Shell` in this script keeps a `Run` inside `Execute` or
 /// `eval`. A literal that appears only inside that string does not
 /// keep a `Run` written outside it.
-fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32, inherited: bool) -> Vec<String> {
+fn vbs_shell_runs_depth(
+    text: &str,
+    jscript: bool,
+    depth: u32,
+    inherited: bool,
+) -> (Vec<String>, bool) {
     if depth > MAX_SHELL_DEPTH {
-        return Vec::new();
+        // The rest is not scanned. Missing it would score default_action, which can auto.
+        if text.trim().is_empty() {
+            return (Vec::new(), false);
+        }
+        return (Vec::new(), true);
     }
     let chars: Vec<char> = text.chars().collect();
     let shell = inherited || wsh_frame_has_shell(&chars, jscript);
     let mut commands = Vec::new();
     let mut nested = Vec::new();
+    let mut truncated = false;
     let mut index = 0usize;
     while index < chars.len() {
         if jscript {
@@ -10178,7 +10197,9 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32, inherited: bool) 
             if js_eval_at(&chars, index)
                 && let Some((body, end)) = js_eval_string(&chars, index)
             {
-                nested.extend(vbs_shell_runs_depth(&body, true, depth + 1, shell));
+                let (inner, deep) = vbs_shell_runs_depth(&body, true, depth + 1, shell);
+                nested.extend(inner);
+                truncated |= deep;
                 index = end;
                 continue;
             }
@@ -10193,7 +10214,9 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32, inherited: bool) 
             index = skip_line(&chars, index);
             continue;
         } else if let Some((body, end)) = vbs_execute_string(&chars, index) {
-            nested.extend(vbs_shell_runs_depth(&body, false, depth + 1, shell));
+            let (inner, deep) = vbs_shell_runs_depth(&body, false, depth + 1, shell);
+            nested.extend(inner);
+            truncated |= deep;
             index = end;
             continue;
         }
@@ -10217,7 +10240,7 @@ fn vbs_shell_runs_depth(text: &str, jscript: bool, depth: u32, inherited: bool) 
         commands.clear();
     }
     commands.extend(nested);
-    commands
+    (commands, truncated)
 }
 
 /// `WScript.Shell` in this text, outside `Execute` and `eval` arguments.
@@ -26702,6 +26725,62 @@ mod tests {
         exact.push_str("if true; then x='git push origin main'; fi; eval \"$x\"");
         let within = matched_action(&policy, "Bash", Some(&exact)).map(|id| id.0.to_string());
         assert_eq!(within.as_deref(), Some("git.push"));
+    }
+
+    /// Nine nested JScript `eval` calls pass `MAX_SHELL_DEPTH`. The
+    /// command inside the last call must not disappear into `default_action`.
+    #[test]
+    fn wsh_eval_past_shell_depth_is_shell_deep() {
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsh-depth-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let inner = "new ActiveXObject(\"WScript.Shell\").Run(\"git push origin main\");";
+        let write = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, body).expect(name);
+            path.display().to_string()
+        };
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let score = |file: &str| {
+            let command = format!("cscript //nologo {file}");
+            matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string())
+        };
+        let deep = write("deep.js", &nested_js_eval(inner, 9));
+        let fit = write("fit.js", &nested_js_eval(inner, 8));
+        assert_eq!(score(&deep).as_deref(), Some("shell.deep"), "{deep}");
+        assert_eq!(score(&fit).as_deref(), Some("git.push"), "{fit}");
+        let mut both =
+            String::from("new ActiveXObject(\"WScript.Shell\").Run(\"rm -rf /tmp/x\");\n");
+        both.push_str(&nested_js_eval(inner, 9));
+        let both_file = write("both.js", &both);
+        assert_eq!(score(&both_file).as_deref(), Some("bash.rm"), "{both_file}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn nested_js_eval(inner: &str, layers: u32) -> String {
+        let mut body = inner.to_string();
+        for _ in 0..layers {
+            body = format!("eval({});", js_single_quote(&body));
+        }
+        body
+    }
+
+    fn js_single_quote(body: &str) -> String {
+        let mut out = String::from("'");
+        for ch in body.chars() {
+            if ch == '\\' || ch == '\'' {
+                out.push('\\');
+            }
+            out.push(ch);
+        }
+        out.push('\'');
+        out
     }
 
     fn drive_letter_lock() -> std::sync::MutexGuard<'static, ()> {
