@@ -9639,7 +9639,13 @@ fn score_wsh<'a>(
     match load_script_file(&script_path) {
         Some(ScriptFile::Text(text)) => {
             let commands = if wsh_wsf(&script_path) && engine_js.is_none() {
-                wsf_shell_runs_at(&text, Some(&script_path), None, job_id.as_deref())
+                match wsf_shell_runs_at(&text, Some(&script_path), None, job_id.as_deref()) {
+                    WsfRuns::Unscanned => {
+                        prefer(policy, best, unscanned_action(policy));
+                        return;
+                    }
+                    WsfRuns::Commands(commands) => commands,
+                }
             } else if wsh_wsf(&script_path) && wsf_markup(&text) {
                 Vec::new()
             } else {
@@ -9683,8 +9689,10 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// A `.wsf` file runs each `<script>` body. `language="JScript"` or
 /// `JavaScript` scores that body as JScript. Any other language
 /// stays VBScript. A `<![CDATA[` wrapper is not part of the script.
-/// `src` is loaded from beside the `.wsf` file. A block with no
-/// language is JScript. `/E` does not retarget a block: the host
+/// `src` is loaded from beside the `.wsf` file. A `src` past one
+/// megabyte is `shell.deep`, the same as the package file itself.
+/// A block with no language is JScript. `/E` does not retarget a
+/// block: the host
 /// compiles that `.wsf` file as a raw script. Only the first `<job>`
 /// runs unless `/Job:` names one, and the name match is
 /// case-insensitive. A `<script>` body is opaque, so `</job>` inside
@@ -9693,12 +9701,17 @@ fn wsh_extension(path: &str) -> Option<&str> {
 /// `<object progid="WScript.Shell">` in that job arms `Run` and
 /// `Exec` in its scripts. A package-level object does not. A package
 /// with no `<job>` does not run.
+enum WsfRuns {
+    Commands(Vec<String>),
+    Unscanned,
+}
+
 fn wsf_shell_runs_at(
     text: &str,
     wsf_path: Option<&str>,
     engine_js: Option<bool>,
     job_id: Option<&str>,
-) -> Vec<String> {
+) -> WsfRuns {
     let jobs = wsf_job_bodies(text);
     let selected = match job_id {
         Some(id) => jobs.into_iter().find(|(job, _)| {
@@ -9708,7 +9721,7 @@ fn wsf_shell_runs_at(
         None => jobs.into_iter().next(),
     };
     let Some((_, selected)) = selected else {
-        return Vec::new();
+        return WsfRuns::Commands(Vec::new());
     };
     let chars: Vec<char> = selected.chars().collect();
     let object_shell = wsf_job_object_shell(&chars);
@@ -9726,8 +9739,12 @@ fn wsf_shell_runs_at(
         let jscript = wsf_block_jscript(&header, engine_js);
         if let Some(src) = wsf_attr(&header, "src").filter(|src| !src.is_empty()) {
             let path = wsf_src_file(&src, wsf_path);
-            if let Some(ScriptFile::Text(src_text)) = load_script_file(&path) {
-                commands.extend(vbs_shell_runs_depth(&src_text, jscript, 0, object_shell));
+            match load_script_file(&path) {
+                Some(ScriptFile::Text(src_text)) => {
+                    commands.extend(vbs_shell_runs_depth(&src_text, jscript, 0, object_shell));
+                }
+                Some(ScriptFile::Unscanned) => return WsfRuns::Unscanned,
+                None => {}
             }
         }
         if header_end > tag && chars[header_end - 1] == '/' {
@@ -9747,7 +9764,7 @@ fn wsf_shell_runs_at(
         ));
         index = close + "</script>".chars().count();
     }
-    commands
+    WsfRuns::Commands(commands)
 }
 
 /// An `<object progid="WScript.Shell">` in this job, outside a script.
@@ -33767,7 +33784,7 @@ mod tests {
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language=\"VBScript\">\nExecute \"CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True\"\n</script></job>\n",
                 None,
                 None,
@@ -34321,13 +34338,25 @@ mod tests {
         );
     }
 
+    fn wsf_commands(
+        text: &str,
+        wsf_path: Option<&str>,
+        engine_js: Option<bool>,
+        job_id: Option<&str>,
+    ) -> Vec<String> {
+        match super::wsf_shell_runs_at(text, wsf_path, engine_js, job_id) {
+            super::WsfRuns::Commands(commands) => commands,
+            super::WsfRuns::Unscanned => panic!("unscanned src"),
+        }
+    }
+
     /// A `.wsf` `<script language="JScript">` block is JScript, so
     /// single quotes are strings. Scoring the file as VBScript turns
     /// the quote into a comment and drops the command.
     #[test]
     fn wsf_jscript_block_scores_single_quotes() {
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
                 None,
                 None,
@@ -34336,7 +34365,7 @@ mod tests {
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"git push origin main\", 0, True\n</script></job>\n",
                 None,
                 None,
@@ -34345,7 +34374,7 @@ mod tests {
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script language='JScript'><![CDATA[\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n]]></script></job>\n",
                 None,
                 None,
@@ -34361,7 +34390,7 @@ mod tests {
     #[test]
     fn wsf_block_without_language_is_jscript() {
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
                 None,
                 None,
@@ -34370,7 +34399,7 @@ mod tests {
             vec!["git push origin main".to_string()],
         );
         assert_eq!(
-            super::wsf_shell_runs_at(
+            wsf_commands(
                 "<job><script>\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></job>\n",
                 None,
                 Some(false),
@@ -34402,9 +34431,34 @@ mod tests {
         let wsf = root.join("job.wsf");
         let text = "<job><script language=\"JScript\" src=\"push.js\"/></job>\n";
         std::fs::write(&wsf, text).expect("wsf");
-        let loaded = super::wsf_shell_runs_at(text, Some(&wsf.display().to_string()), None, None);
+        let loaded = wsf_commands(text, Some(&wsf.display().to_string()), None, None);
         let _ = std::fs::remove_dir_all(&root);
         assert_eq!(loaded, vec!["git push origin main".to_string()]);
+    }
+
+    /// A `<script src>` past one megabyte is `shell.deep`. The host
+    /// still runs that file. Leaving it unmatched would be `auto`.
+    #[test]
+    fn wsf_script_src_over_the_cap_is_shell_deep() {
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsf-cap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let script = root.join("big.js");
+        std::fs::write(&script, vec![b' '; (1024 * 1024) + 1]).expect("js");
+        let wsf = root.join("job.wsf");
+        let text = "<job><script language=\"JScript\" src=\"big.js\"/></job>\n";
+        std::fs::write(&wsf, text).expect("wsf");
+        let command = format!("cscript {}", wsf.display());
+        let hit = matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string());
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(hit, Some("shell.deep".to_string()));
     }
 
     /// `/E` compiles a `.wsf` file as a raw script. A package that
@@ -34463,22 +34517,22 @@ mod tests {
         let policy = Policy::shipped("tool-gate").expect("tool-gate");
         let jobs = "<package>\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin other');\n</script>\n</job>\n<job id=\"two\">\n<script language=\"VBScript\">\nCreateObject(\"WScript.Shell\").Run \"rm -rf /tmp/x\", 0, True\n</script>\n</job>\n</package>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(jobs, None, None, None),
+            wsf_commands(jobs, None, None, None),
             vec![
                 "git push origin main".to_string(),
                 "git push origin other".to_string()
             ]
         );
         assert_eq!(
-            super::wsf_shell_runs_at(jobs, None, None, Some("two")),
+            wsf_commands(jobs, None, None, Some("two")),
             vec!["rm -rf /tmp/x".to_string()]
         );
         assert_eq!(
-            super::wsf_shell_runs_at(jobs, None, None, Some("TWO")),
+            wsf_commands(jobs, None, None, Some("TWO")),
             vec!["rm -rf /tmp/x".to_string()]
         );
-        assert!(super::wsf_shell_runs_at(jobs, None, None, Some("missing")).is_empty());
-        assert!(super::wsf_shell_runs_at(
+        assert!(wsf_commands(jobs, None, None, Some("missing")).is_empty());
+        assert!(wsf_commands(
             "<package><script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script></package>\n",
             None,
             None,
@@ -34516,11 +34570,11 @@ mod tests {
     fn wsf_job_end_inside_a_script_string_is_text() {
         let jobs = "<package>\n<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"</job>\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n</package>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(jobs, None, None, None),
+            wsf_commands(jobs, None, None, None),
             vec!["git push origin main".to_string()]
         );
         assert_eq!(
-            super::wsf_shell_runs_at(jobs, None, None, Some("two")),
+            wsf_commands(jobs, None, None, Some("two")),
             vec!["rm -rf /tmp/x".to_string()]
         );
     }
@@ -34532,45 +34586,45 @@ mod tests {
     fn wsf_xml_comments_hide_jobs_and_scripts() {
         let commented_first = "<package>\n<!--\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n-->\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n</package>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(commented_first, None, None, None),
+            wsf_commands(commented_first, None, None, None),
             vec!["git push origin main".to_string()]
         );
-        assert!(super::wsf_shell_runs_at(commented_first, None, None, Some("one")).is_empty());
+        assert!(wsf_commands(commented_first, None, None, Some("one")).is_empty());
         let commented_script = "<job id=\"one\">\n<!--\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n-->\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(commented_script, None, None, None),
+            wsf_commands(commented_script, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let unclosed = "<!--\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
-        assert!(super::wsf_shell_runs_at(unclosed, None, None, None).is_empty());
+        assert!(wsf_commands(unclosed, None, None, None).is_empty());
         let inside = "<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"<!--\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(inside, None, None, None),
+            wsf_commands(inside, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let fake_end = "<job id=\"one\">\n<!-- </job> -->\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(fake_end, None, None, None),
+            wsf_commands(fake_end, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let cdata_job = "<package>\n<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('rm -rf /tmp/x');\n</script>\n</job>\n]]>\n<job id=\"two\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n</package>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(cdata_job, None, None, None),
+            wsf_commands(cdata_job, None, None, None),
             vec!["git push origin main".to_string()]
         );
-        assert!(super::wsf_shell_runs_at(cdata_job, None, None, Some("one")).is_empty());
+        assert!(wsf_commands(cdata_job, None, None, Some("one")).is_empty());
         let cdata_end = "<job id=\"one\">\n<![CDATA[ </job> ]]>\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(cdata_end, None, None, None),
+            wsf_commands(cdata_end, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let cdata_text = "<job id=\"one\">\n<script language=\"JScript\">\nvar marker = \"<![CDATA[\";\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(cdata_text, None, None, None),
+            wsf_commands(cdata_text, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let cdata_open = "<![CDATA[\n<job id=\"one\">\n<script language=\"JScript\">\nnew ActiveXObject('WScript.Shell').Run('git push origin main');\n</script>\n</job>\n";
-        assert!(super::wsf_shell_runs_at(cdata_open, None, None, None).is_empty());
+        assert!(wsf_commands(cdata_open, None, None, None).is_empty());
     }
 
     /// `<object progid="WScript.Shell">` in the job creates that
@@ -34580,28 +34634,28 @@ mod tests {
     fn wsf_object_shell_arms_run_in_that_job() {
         let job = "<job>\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(job, None, None, None),
+            wsf_commands(job, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let jscript = "<job>\n<object id=\"sh\" progid=\"wscript.shell\"/>\n<script language=\"JScript\">\nsh.Run('git push origin main');\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(jscript, None, None, None),
+            wsf_commands(jscript, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let versioned = "<job>\n<object id=\"sh\" progid=\"WScript.Shell.1\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(versioned, None, None, None),
+            wsf_commands(versioned, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let classid = "<job>\n<object id=\"sh\" classid=\"clsid:72C24DD5-D70A-438B-8A42-98424B88AFB8\"/>\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
         assert_eq!(
-            super::wsf_shell_runs_at(classid, None, None, None),
+            wsf_commands(classid, None, None, None),
             vec!["git push origin main".to_string()]
         );
         let package = "<package>\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n<job id=\"one\">\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n</package>\n";
-        assert!(super::wsf_shell_runs_at(package, None, None, None).is_empty());
+        assert!(wsf_commands(package, None, None, None).is_empty());
         let commented = "<job>\n<!--\n<object id=\"sh\" progid=\"WScript.Shell\"/>\n-->\n<script language=\"VBScript\">\nsh.Run \"git push origin main\", 0, True\n</script>\n</job>\n";
-        assert!(super::wsf_shell_runs_at(commented, None, None, None).is_empty());
+        assert!(wsf_commands(commented, None, None, None).is_empty());
     }
 
     /// Notepad "Unicode" is UTF-16 LE with a BOM. `cscript` runs that
