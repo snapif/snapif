@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.2.13](https://github.com/snapif/snapif/compare/snapif-v0.2.12...snapif-v0.2.13) (2026-11-25)
+
+
+### Bug Fixes
+
+* do not panic on a multibyte grep -w miss ([#301](https://github.com/snapif/snapif/issues/301)) ([48fdc4e](https://github.com/snapif/snapif/commit/48fdc4e3c3c88be235e57c73b39bcc227fd14cf7))
+* score shell.deep when a WSH eval chain overflows ([#303](https://github.com/snapif/snapif/issues/303)) ([d823b26](https://github.com/snapif/snapif/commit/d823b2602643ca052be890a16b8f3a1466cb4cb3))
+* score shell.deep when eval variants overflow ([#302](https://github.com/snapif/snapif/issues/302)) ([76e664a](https://github.com/snapif/snapif/commit/76e664ad27f9c5f1703e3994fcee9ec7cdd21240))
+* score VBScript Execute and JScript bracket calls ([#295](https://github.com/snapif/snapif/issues/295)) ([beec773](https://github.com/snapif/snapif/commit/beec773f9976abeb87ad5e43c440b6afe6089a0c))
+
 ## [0.2.12](https://github.com/snapif/snapif/compare/snapif-v0.2.11...snapif-v0.2.12) (2026-11-23)
 
 
