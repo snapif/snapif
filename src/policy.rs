@@ -25647,6 +25647,12 @@ enum PathBody {
 }
 
 fn path_body(path: &str) -> PathBody {
+    // Bash has these devices even when this process cannot open them.
+    // A read does not finish, so the substitution is not a script.
+    match path {
+        "/dev/zero" | "/dev/full" | "/dev/random" | "/dev/urandom" => return PathBody::Hang,
+        _ => {}
+    }
     let owned = openable_path(path);
     let path = owned.as_ref();
     let meta = match std::fs::metadata(path) {
@@ -36560,7 +36566,12 @@ mod tests {
     }
 
     fn plain_script_path(path: &std::path::Path) -> String {
-        let text = path.display().to_string();
+        // A Windows temp path uses `\`. The command is one shell word, so
+        // the same path is written with `/`, which the loader accepts.
+        let mut text = path.display().to_string().replace('\\', "/");
+        if let Some(rest) = text.strip_prefix("//?/") {
+            text = rest.to_string();
+        }
         assert!(
             text.chars().all(|ch| {
                 ch.is_ascii_graphic()
