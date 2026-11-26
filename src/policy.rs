@@ -10521,7 +10521,7 @@ fn wsh_string_assign(
     chars: &[char],
     index: usize,
     jscript: bool,
-    bindings: &WshBindings,
+    bindings: &mut WshBindings,
 ) -> Option<(String, Option<String>, usize)> {
     let first = *chars.get(index)?;
     if !(first.is_ascii_alphabetic() || first == '_' || (jscript && first == '$')) {
@@ -10556,11 +10556,12 @@ fn wsh_string_assign(
 /// The string value of an assignment. `None` means the value is not a
 /// string this scan can know. A JScript comma inside parentheses
 /// yields the last value. A comma after the value ends a `var` list.
+/// `t = "..."` on the right stores `t` and yields that string.
 fn wsh_fold_value(
     chars: &[char],
     start: usize,
     jscript: bool,
-    bindings: &WshBindings,
+    bindings: &mut WshBindings,
 ) -> Option<(String, usize)> {
     let cursor = wsh_expr_gap(chars, start, jscript);
     let (cursor, mut depth) = skip_wsh_open_groups(chars, cursor, jscript);
@@ -10613,7 +10614,7 @@ fn wsh_fold_atom(
     chars: &[char],
     cursor: usize,
     jscript: bool,
-    bindings: &WshBindings,
+    bindings: &mut WshBindings,
 ) -> Option<(String, usize)> {
     if let Some((body, end)) = read_wsh_string(chars, cursor, jscript) {
         return Some((body, end));
@@ -10622,6 +10623,11 @@ fn wsh_fold_atom(
     let look = wsh_expr_gap(chars, end, jscript);
     if matches!(chars.get(look), Some('.' | '(' | '[')) {
         return None;
+    }
+    if jscript && chars.get(look) == Some(&'=') && chars.get(look + 1) != Some(&'=') {
+        let (text, text_end) = wsh_fold_value(chars, look + 1, true, bindings)?;
+        bindings.insert(wsh_bind_key(&name, true), Some(text.clone()));
+        return Some((text, text_end));
     }
     match bindings.get(&wsh_bind_key(&name, jscript)) {
         Some(Some(text)) => Some((text.clone(), end)),
@@ -34528,6 +34534,13 @@ mod tests {
                 true,
             )
             .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var s = t = \"{js_push}\";\neval(s);\neval(t);\n"),
+                true,
+            ),
+            vec![push.to_string(), push.to_string()],
         );
         assert_eq!(
             super::vbs_shell_runs(
