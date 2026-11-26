@@ -31236,7 +31236,7 @@ mod tests {
         let kind =
             |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
         write("pre-commit", "rm -rf /tmp/x\n");
-        let dir = hooks.display().to_string();
+        let dir = plain_script_path(&hooks);
         let commit = format!("git -c core.hooksPath={dir} commit -m probe");
         assert_eq!(kind(&commit), Some("bash.rm"), "{commit}");
         let status = format!("git -c core.hooksPath={dir} status");
@@ -31350,11 +31350,11 @@ mod tests {
         };
         let kind =
             |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
-        let repo_s = repo.display().to_string();
-        let root_s = root.display().to_string();
-        let other_s = other.display().to_string();
-        let empty_s = empty.display().to_string();
-        let hooks_s = hooks.display().to_string();
+        let repo_s = plain_script_path(&repo);
+        let root_s = plain_script_path(&root);
+        let other_s = plain_script_path(&other);
+        let empty_s = plain_script_path(&empty);
+        let hooks_s = plain_script_path(&hooks);
         let checkout = format!("git -C {repo_s} checkout side");
         #[cfg(unix)]
         {
@@ -31415,9 +31415,9 @@ mod tests {
         write("quiet", 0o644);
         let kind =
             |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
-        let root_s = root.display().to_string();
-        let proj_s = proj.display().to_string();
-        let empty_s = empty.display().to_string();
+        let root_s = plain_script_path(&root);
+        let proj_s = plain_script_path(&proj);
+        let empty_s = plain_script_path(&empty);
         let push = "git push origin main";
         let cases = [
             (
@@ -31702,7 +31702,7 @@ mod tests {
         );
         let kind =
             |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
-        let root_s = root.display().to_string();
+        let root_s = plain_script_path(&root);
         let cases = [
             (
                 "crystal eval 'print `git push origin main`'".to_string(),
@@ -31863,11 +31863,11 @@ mod tests {
         .expect("build");
         let kind =
             |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
-        let py_s = py.display().to_string();
-        let js_s = js.display().to_string();
-        let go_s = gomod.display().to_string();
-        let rk_s = rk.display().to_string();
-        let cg_s = cg.display().to_string();
+        let py_s = plain_script_path(&py);
+        let js_s = plain_script_path(&js);
+        let go_s = plain_script_path(&gomod);
+        let rk_s = plain_script_path(&rk);
+        let cg_s = plain_script_path(&cg);
         let cases = [
             (format!("cd {py_s} && pytest -q"), Some("git.push")),
             (
@@ -31897,7 +31897,7 @@ mod tests {
         std::fs::create_dir_all(&py_nm).expect("pyonly");
         std::fs::write(py_only.join("test_quiet.py"), quiet).expect("quiet");
         std::fs::write(py_nm.join("test_hidden.py"), push).expect("hid");
-        let py_only_s = py_only.display().to_string();
+        let py_only_s = plain_script_path(&py_only);
         let ignored = format!("cd {py_only_s} && pytest -q");
         assert_eq!(kind(&ignored), None, "{ignored}");
         std::fs::write(js.join("push.test.js"), "console.log(1)\n").expect("quietjs");
@@ -31924,8 +31924,8 @@ mod tests {
         std::fs::write(runpkg.join("Cargo.toml"), package).expect("cargo toml");
         std::fs::write(runpkg.join("src/main.rs"), "fn main() {}\n").expect("main");
         std::fs::write(runpkg.join(".cargo/config.toml"), runner).expect("runner");
-        let run_s = runpkg.display().to_string();
-        let away_s = away.display().to_string();
+        let run_s = plain_script_path(&runpkg);
+        let away_s = plain_script_path(&away);
         assert_eq!(
             kind(&format!("cd {run_s} && cargo run -q")),
             Some("git.push")
@@ -31956,7 +31956,7 @@ mod tests {
         std::fs::write(child.join("Cargo.toml"), package).expect("child toml");
         std::fs::write(child.join("src/main.rs"), "fn main() {}\n").expect("child main");
         std::fs::write(parent.join(".cargo/config.toml"), runner).expect("parent runner");
-        let child_s = child.display().to_string();
+        let child_s = plain_script_path(&child);
         assert_eq!(
             kind(&format!("cd {child_s} && cargo run -q")),
             Some("git.push")
@@ -31987,7 +31987,7 @@ mod tests {
         std::fs::write(lib.join("Cargo.toml"), package).expect("lib toml");
         std::fs::write(lib.join("src/lib.rs"), "pub fn f() {}\n").expect("lib");
         std::fs::write(lib.join(".cargo/config.toml"), runner).expect("lib runner");
-        let lib_s = lib.display().to_string();
+        let lib_s = plain_script_path(&lib);
         assert_eq!(kind(&format!("cd {lib_s} && cargo run -q")), None);
         assert_eq!(
             kind(&format!("cd {lib_s} && cargo test -q")),
@@ -32003,7 +32003,7 @@ mod tests {
         std::fs::write(ws.join("member/Cargo.toml"), package).expect("member toml");
         std::fs::write(ws.join("member/src/main.rs"), "fn main() {}\n").expect("member main");
         std::fs::write(ws.join(".cargo/config.toml"), runner).expect("ws runner");
-        let ws_s = ws.display().to_string();
+        let ws_s = plain_script_path(&ws);
         assert_eq!(
             kind(&format!("cd {ws_s} && cargo run -q")),
             Some("git.push")
@@ -32039,7 +32039,7 @@ mod tests {
             "[alias]\npushy = \"run\"\nclip = \"clippy -q\"\n",
         )
         .expect("alias");
-        let alias_s = alias.display().to_string();
+        let alias_s = plain_script_path(&alias);
         assert_eq!(
             kind(&format!("cd {alias_s} && cargo pushy -q")),
             Some("git.push")
@@ -32065,7 +32065,7 @@ mod tests {
             "[alias]\npushy = \"run\"\n",
         )
         .expect("parent alias");
-        let pchild_s = pchild.display().to_string();
+        let pchild_s = plain_script_path(&pchild);
         assert_eq!(
             kind(&format!("cd {pchild_s} && cargo pushy -q")),
             Some("git.push")
@@ -32094,7 +32094,7 @@ mod tests {
             "fn main() {\n    std::process::Command::new(\"echo\").arg(\"safe\").status().ok();\n}\n",
         )
         .expect("away build");
-        let away_install_s = away_install.display().to_string();
+        let away_install_s = plain_script_path(&away_install);
         assert_eq!(
             kind(&format!(
                 "cd {away_install_s} && cargo install --offline --path {run_s}"
@@ -32137,7 +32137,7 @@ mod tests {
             "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
         )
         .expect("mark");
-        let bench_s = bench.display().to_string();
+        let bench_s = plain_script_path(&bench);
         assert_eq!(
             kind(&format!("cd {bench_s} && cargo bench -q")),
             Some("git.push")
@@ -32170,7 +32170,7 @@ mod tests {
             "import std/osproc\ndiscard execCmd(\"git push origin main\")\n",
         )
         .expect("nim");
-        let nim_s = nim.display().to_string();
+        let nim_s = plain_script_path(&nim);
         assert_eq!(kind(&format!("nim c -r {nim_s}")), Some("git.push"));
         assert_eq!(kind(&format!("nim cpp -r {nim_s}")), Some("git.push"));
         assert_eq!(kind(&format!("nim r {nim_s}")), Some("git.push"));
@@ -32198,7 +32198,7 @@ mod tests {
         std::fs::write(proj.join("config.nims"), "exec \"git push origin main\"\n")
             .expect("parent nims");
         std::fs::write(sub.join("config.nims"), "exec \"echo safe\"\n").expect("sub nims");
-        let app_s = sub.join("app.nim").display().to_string();
+        let app_s = plain_script_path(&sub.join("app.nim"));
         assert_eq!(kind(&format!("nim c {app_s}")), Some("git.push"));
         std::fs::write(
             proj.join("config.nims"),
@@ -33491,7 +33491,7 @@ mod tests {
         };
         let kind =
             |command: &str| matched_action(&policy, "Bash", Some(command)).map(|id| id.0.as_str());
-        let show = root.display().to_string();
+        let show = plain_script_path(&root);
         write(
             "system.py",
             "import os\nos.system(\"git push origin main\")\n",
