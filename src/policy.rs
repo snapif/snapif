@@ -7164,7 +7164,15 @@ fn node_run_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
         return Vec::new();
     };
     let path = shell_dir(dir).join("package.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    // Stat before the read. A fifo blocks in read_to_string, and a
+    // huge manifest is not a script list.
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Vec::new();
+    };
+    if !meta.is_file() || meta.len() > SCRIPT_FILE_CAP {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -36563,6 +36571,27 @@ mod tests {
         }
         drop(guard);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn node_run_ignores_a_package_json_past_the_cap() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-node-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        let mut body = br#"{"scripts":{"test":"git push origin main"},"pad":""#.to_vec();
+        body.extend(std::iter::repeat_n(b'x', super::SCRIPT_FILE_CAP as usize));
+        body.extend(br#""}"#);
+        std::fs::write(root.join("package.json"), &body).expect("pkg");
+        let dir = plain_script_path(&root);
+        let command = format!("cd {dir} && node --run test");
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
+            None,
+            "{command}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn plain_script_path(path: &std::path::Path) -> String {
