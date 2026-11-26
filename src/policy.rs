@@ -18650,7 +18650,8 @@ fn any_inflate_decode(bytes: &[u8]) -> Option<String> {
 }
 
 fn bzip2_decode(bytes: &[u8]) -> Option<String> {
-    let mut decoder = bzip2::read::BzDecoder::new(bytes);
+    // bzip2 -dc and bzcat read every member.
+    let mut decoder = bzip2::read::MultiBzDecoder::new(bytes);
     let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
@@ -19181,7 +19182,7 @@ fn tar_magic(bytes: &[u8]) -> Option<Vec<u8>> {
         return inflate_all(flate2::read::MultiGzDecoder::new(bytes));
     }
     if bytes.starts_with(b"BZh") {
-        return inflate_all(bzip2::read::BzDecoder::new(bytes));
+        return inflate_all(bzip2::read::MultiBzDecoder::new(bytes));
     }
     if bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
         let mut input = std::io::Cursor::new(bytes);
@@ -36836,6 +36837,37 @@ mod tests {
                 &policy,
                 "Bash",
                 Some(&format!("eval \"$(gzip -dc {show})\""))
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{show}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn bzip2_later_member_is_scored() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-bz-members-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        let encode = |payload: &[u8]| {
+            let mut encoder =
+                bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            std::io::Write::write_all(&mut encoder, payload).expect("bz");
+            encoder.finish().expect("bz finish")
+        };
+        let mut bytes = encode(b"echo ok\n");
+        bytes.extend(encode(b"git push origin main\n"));
+        let path = root.join("members.bz2");
+        std::fs::write(&path, bytes).expect("bz");
+        let show = plain_script_path(&path);
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("eval \"$(bzip2 -dc {show})\""))
             )
             .map(|id| id.0.as_str()),
             Some("git.push"),
