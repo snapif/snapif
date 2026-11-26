@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -414,9 +415,12 @@ class WorkflowTriggerTests(unittest.TestCase):
             )
             bin_dir = root / "bin"
             bin_dir.mkdir()
-            for name, target in (("python3", "/usr/bin/python3"), ("git", "/usr/bin/git")):
+            for name in ("python3", "git", "grep", "dirname"):
                 wrapper = bin_dir / name
-                wrapper.write_text(f"#!/bin/sh\nexec {target} \"$@\"\n", encoding="utf-8")
+                wrapper.write_text(
+                    f"#!/bin/sh\nexec /usr/bin/{name} \"$@\"\n",
+                    encoding="utf-8",
+                )
                 wrapper.chmod(0o755)
             gh_exe = bin_dir / "gh.exe"
             gh_exe.write_text(
@@ -443,10 +447,14 @@ class WorkflowTriggerTests(unittest.TestCase):
                 cwd=root,
                 check=True,
             )
+            bash = shutil.which("bash")
+            self.assertIsNotNone(bash)
             env = os.environ.copy()
+            # Only the fake gh.exe is named gh. An absolute bash keeps
+            # Linux CI from losing the shell when PATH is that directory.
             env["PATH"] = str(bin_dir)
             result = subprocess.run(
-                ["bash", bash_path(script), "snapif/snapif"],
+                [bash, bash_path(script), "snapif/snapif"],
                 cwd=root,
                 check=False,
                 env=env,
