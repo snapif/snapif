@@ -18612,7 +18612,8 @@ impl std::io::Write for CapWriter {
 }
 
 fn gzip_flate_decode(bytes: &[u8]) -> Option<String> {
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    // gzip -dc and Python gzip.decompress read every member.
+    let mut decoder = flate2::read::MultiGzDecoder::new(bytes);
     let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
@@ -19177,7 +19178,7 @@ fn tar_magic(bytes: &[u8]) -> Option<Vec<u8>> {
         return unix_compress_decode(bytes);
     }
     if bytes.starts_with(&[0x1f, 0x8b]) {
-        return inflate_all(flate2::read::GzDecoder::new(bytes));
+        return inflate_all(flate2::read::MultiGzDecoder::new(bytes));
     }
     if bytes.starts_with(b"BZh") {
         return inflate_all(bzip2::read::BzDecoder::new(bytes));
@@ -36808,6 +36809,37 @@ mod tests {
             .map(|id| id.0.as_str()),
             None,
             "{big_s}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gzip_later_member_is_scored() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-gz-members-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        let encode = |payload: &[u8]| {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut encoder, payload).expect("gz");
+            encoder.finish().expect("gz finish")
+        };
+        let mut bytes = encode(b"echo ok\n");
+        bytes.extend(encode(b"git push origin main\n"));
+        let path = root.join("members.gz");
+        std::fs::write(&path, bytes).expect("gz");
+        let show = plain_script_path(&path);
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("eval \"$(gzip -dc {show})\""))
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{show}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
