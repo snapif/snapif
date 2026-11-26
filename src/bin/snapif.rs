@@ -185,7 +185,7 @@ fn gate_cmd(policy: Option<&str>, call: &PathBuf, shadow: bool, json: bool) -> u
         return 1;
     }
     // JSON null is an absent state or prepared value. An array is
-    // positional and can drop a sentence that an object would score.
+    // rejected. It is not scored as a positional value.
     if value
         .get("state")
         .is_some_and(|item| !item.is_null() && !item.is_object())
@@ -613,8 +613,8 @@ fn finish_checked(count: usize, what: &str) -> u8 {
     0
 }
 
-/// A JSON array in these fields is positional. `state: [null, sentence]`
-/// then scores as if the sentence were absent.
+/// `prepared`, `state`, and `extra_questions` must be objects.
+/// `state: [null, sentence]` is rejected. The sentence is not dropped.
 fn replay_shape_message(value: &Value) -> Option<String> {
     if value.get("id").is_some_and(|item| !item.is_string()) {
         return Some("id must be a string".to_string());
