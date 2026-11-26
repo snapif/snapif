@@ -8,6 +8,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bash_path import bash_path
+
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "forbid-deps.sh"
 
@@ -17,7 +19,7 @@ def _run(toml_text: str) -> subprocess.CompletedProcess[str]:
         fh.write(toml_text)
         path = fh.name
     return subprocess.run(
-        ["bash", str(SCRIPT), path],
+        ["bash", bash_path(SCRIPT), bash_path(path)],
         check=False,
         capture_output=True,
         text=True,
@@ -39,7 +41,7 @@ class ForbidDepsTests(unittest.TestCase):
 
     def test_real_cargo_toml_is_ok(self) -> None:
         result = subprocess.run(
-            ["bash", str(SCRIPT), str(ROOT / "Cargo.toml")],
+            ["bash", bash_path(SCRIPT), bash_path(ROOT / "Cargo.toml")],
             check=False,
             capture_output=True,
             text=True,

@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from bash_path import bash_path, share_with_bash
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
@@ -216,11 +218,12 @@ class WorkflowTriggerTests(unittest.TestCase):
                     "DRY_RUN": "1",
                     "TAG": "snapif-v0.2.0",
                     "REPO": "snapif/snapif",
-                    "ARTIFACTS": tmp,
+                    "ARTIFACTS": bash_path(tmp),
                 }
             )
+            env = share_with_bash(env, "DRY_RUN", "TAG", "REPO", "ARTIFACTS")
             ok = subprocess.run(
-                ["bash", str(script)],
+                ["bash", bash_path(script)],
                 check=False,
                 env=env,
                 capture_output=True,
@@ -230,7 +233,7 @@ class WorkflowTriggerTests(unittest.TestCase):
             self.assertIn("SUBJECT: snapif.tar.xz", ok.stdout)
             env["TAG"] = "v0.2.0"
             bad = subprocess.run(
-                ["bash", str(script)],
+                ["bash", bash_path(script)],
                 check=False,
                 env=env,
                 capture_output=True,
@@ -384,7 +387,7 @@ class WorkflowTriggerTests(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
             result = subprocess.run(
-                ["bash", str(script), "snapif/snapif"],
+                ["bash", bash_path(script), "snapif/snapif"],
                 cwd=root,
                 check=False,
                 env=env,
