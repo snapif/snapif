@@ -683,8 +683,10 @@ fn check_action(
 /// in both languages, and `&` joins them only in VBScript. A `.js`
 /// `&` keeps the first piece. `WScript.` joined to `Shell` is still
 /// that object. A bare `Execute` or `ExecuteGlobal` runs that string
-/// as VBScript. `.Execute` is not that statement. JScript `eval`
-/// joins `+` pieces before it runs them. A chain past the depth cap
+/// as VBScript. A name assigned from that string is the same argument.
+/// `.Execute` is not that statement. JScript `eval`
+/// joins `+` pieces before it runs them, and `eval` of a name runs
+/// the string stored in that name. A chain past the depth cap
 /// is `shell.deep`, and a stricter command still replaces it. A script
 /// that only prints stays unmatched.
 /// `cmd /c rm` stays the command string. A missing file stays
@@ -9609,9 +9611,11 @@ fn osascript_texts(argv: &[String], dir: Option<&str>) -> Vec<String> {
 /// `+` joins quoted pieces in both languages, and `&` joins them only
 /// in VBScript. A `.js` `&` keeps the first piece. `WScript.` joined
 /// to `Shell` is still that object. A bare `Execute` or
-/// `ExecuteGlobal` runs that string as VBScript. `.Execute` is not
+/// `ExecuteGlobal` runs that string as VBScript. A name assigned from
+/// that string is the same argument. `.Execute` is not
 /// that statement. JScript `eval` joins `+` pieces before it runs
-/// them. `['Run']` and `["Exec"]` are `.Run` and `.Exec`. A
+/// them, and `eval` of a name runs the string stored in that name.
+/// `['Run']` and `["Exec"]` are `.Run` and `.Exec`. A
 /// VBScript `_` at the end of a line continues `Run` or `Exec`. An
 /// `eval` or `Execute` chain past the depth cap is `shell.deep`, and
 /// a stricter command still replaces it. A missing file stays unmatched.
@@ -10158,18 +10162,36 @@ fn vbs_shell_runs(text: &str, jscript: bool) -> Vec<String> {
 
 /// Bare JScript `eval("...")` runs that text, including pieces joined
 /// with `+`. A bare VBScript `Execute` or `ExecuteGlobal` runs that
-/// string. A chain past `MAX_SHELL_DEPTH` is not scanned. Callers
+/// string. A name assigned from a quoted string, including pieces
+/// joined with `+` or `&`, is that same argument. Copying another
+/// name copies that string. An unbound VBScript name in the join is
+/// empty. An unbound JScript name is not a string. The assignment
+/// must precede the call. A later assignment replaces the name, and
+/// a value that is not a string clears it. A chain past `MAX_SHELL_DEPTH`
+/// is not scanned. Callers
 /// score that rest as `shell.deep`. `obj.eval` and a longer name are
 /// not `eval`. `.Execute` is not the `Execute` statement.
 /// `['Run']` and `['Exec']` pass the same command `.Run` and `.Exec` do.
 /// `WScript.Shell` in this script keeps a `Run` inside `Execute` or
 /// `eval`. A literal that appears only inside that string does not
-/// keep a `Run` written outside it.
+/// keep a `Run` written outside it. A name set inside the executed
+/// string stays visible to the rest of this script.
 fn vbs_shell_runs_depth(
     text: &str,
     jscript: bool,
     depth: u32,
     inherited: bool,
+) -> (Vec<String>, bool) {
+    let mut bindings = WshBindings::new();
+    vbs_shell_runs_bound(text, jscript, depth, inherited, &mut bindings)
+}
+
+fn vbs_shell_runs_bound(
+    text: &str,
+    jscript: bool,
+    depth: u32,
+    inherited: bool,
+    bindings: &mut WshBindings,
 ) -> (Vec<String>, bool) {
     if depth > MAX_SHELL_DEPTH {
         // The rest is not scanned. Missing it would score default_action, which can auto.
@@ -10195,9 +10217,9 @@ fn vbs_shell_runs_depth(
                 continue;
             }
             if js_eval_at(&chars, index)
-                && let Some((body, end)) = js_eval_string(&chars, index)
+                && let Some((body, end)) = js_eval_script(&chars, index, bindings)
             {
-                let (inner, deep) = vbs_shell_runs_depth(&body, true, depth + 1, shell);
+                let (inner, deep) = vbs_shell_runs_bound(&body, true, depth + 1, shell, bindings);
                 nested.extend(inner);
                 truncated |= deep;
                 index = end;
@@ -10213,10 +10235,25 @@ fn vbs_shell_runs_depth(
         } else if vbs_comment(&chars, index) {
             index = skip_line(&chars, index);
             continue;
-        } else if let Some((body, end)) = vbs_execute_string(&chars, index) {
-            let (inner, deep) = vbs_shell_runs_depth(&body, false, depth + 1, shell);
+        } else if let Some((body, end)) = vbs_execute_script(&chars, index, bindings) {
+            let (inner, deep) = vbs_shell_runs_bound(&body, false, depth + 1, shell, bindings);
             nested.extend(inner);
             truncated |= deep;
+            index = end;
+            continue;
+        }
+        if let Some((name, value, end)) = wsh_string_assign(&chars, index, jscript, bindings)
+            && end > index
+        {
+            let key = wsh_bind_key(&name, jscript);
+            match value {
+                Some(text) => {
+                    bindings.insert(key, Some(text));
+                }
+                None => {
+                    bindings.insert(key, None);
+                }
+            }
             index = end;
             continue;
         }
@@ -10301,6 +10338,45 @@ fn js_eval_at(chars: &[char], index: usize) -> bool {
         .is_some_and(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$'))
 }
 
+/// The string argument of `eval`, or the string stored in a bare name.
+/// Space, line breaks, and comments may sit before `(`, and between
+/// `(` and the argument. Pieces joined with `+` are one script. A `+`
+/// after the closing `)` is outside this call. A name is read only
+/// when this map holds it. `eval(s + "...")` is not a bare name.
+fn js_eval_script(chars: &[char], index: usize, bindings: &WshBindings) -> Option<(String, usize)> {
+    if let Some(found) = js_eval_string(chars, index) {
+        return Some(found);
+    }
+    if !js_eval_at(chars, index) {
+        return None;
+    }
+    let mut cursor = skip_js_trivia(chars, index + 4);
+    if chars.get(cursor) != Some(&'(') {
+        return None;
+    }
+    cursor = skip_js_trivia(chars, cursor + 1);
+    let (cursor, depth) = skip_wsh_open_groups(chars, cursor, true);
+    let (name, ident_end) = read_wsh_ident(chars, cursor, true)?;
+    let mut end = skip_js_trivia(chars, ident_end);
+    if matches!(chars.get(end), Some('.' | '(' | '+' | '[' | '&')) {
+        return None;
+    }
+    let mut opened = depth;
+    while opened > 0 {
+        if chars.get(end) != Some(&')') {
+            return None;
+        }
+        opened -= 1;
+        end = skip_js_trivia(chars, end + 1);
+    }
+    if chars.get(end) != Some(&')') {
+        return None;
+    }
+    end += 1;
+    let body = wsh_bound_string(bindings, &name, true)?;
+    Some((body, end))
+}
+
 /// The string argument of `eval`. Space, line breaks, and comments
 /// may sit before `(`, and between `(` and the string. Pieces joined
 /// with `+` are one script. A `+` after the closing `)` is outside
@@ -10345,28 +10421,285 @@ fn js_bracket_call(chars: &[char], index: usize) -> Option<(String, usize)> {
 /// Bare `Execute` and `ExecuteGlobal` run the string as VBScript.
 /// `.Execute` and a longer name are not this statement. The argument
 /// may be in parentheses, and a `_` line continuation may precede it.
+/// A bare name is that string when the map holds it.
+fn vbs_execute_script(
+    chars: &[char],
+    index: usize,
+    bindings: &WshBindings,
+) -> Option<(String, usize)> {
+    if let Some(found) = vbs_execute_string(chars, index) {
+        return Some(found);
+    }
+    let after = vbs_execute_at(chars, index)?;
+    let mut cursor = skip_wsh_call_gap(chars, after, false);
+    let mut call_paren = false;
+    if chars.get(cursor) == Some(&'(') {
+        call_paren = true;
+        cursor = skip_wsh_call_gap(chars, cursor + 1, false);
+    }
+    let (cursor, depth) = skip_wsh_open_groups(chars, cursor, false);
+    let (name, ident_end) = read_wsh_ident(chars, cursor, false)?;
+    let mut end = skip_wsh_call_gap(chars, ident_end, false);
+    if matches!(chars.get(end), Some('.' | '(' | '+' | '&' | '[')) {
+        return None;
+    }
+    let mut opened = depth;
+    while opened > 0 {
+        if chars.get(end) != Some(&')') {
+            return None;
+        }
+        opened -= 1;
+        end = skip_wsh_call_gap(chars, end + 1, false);
+    }
+    if call_paren {
+        if chars.get(end) != Some(&')') {
+            return None;
+        }
+        end += 1;
+    }
+    let body = wsh_bound_string(bindings, &name, false)?;
+    Some((body, end))
+}
+
 fn vbs_execute_string(chars: &[char], index: usize) -> Option<(String, usize)> {
+    let after = vbs_execute_at(chars, index)?;
+    wsh_command_at(chars, after, false)
+}
+
+/// The index just after bare `Execute` or `ExecuteGlobal`.
+/// `.Execute` and a longer name are not this statement.
+fn vbs_execute_at(chars: &[char], index: usize) -> Option<usize> {
     if index > 0 {
         let prev = chars[index - 1];
         if prev.is_ascii_alphanumeric() || matches!(prev, '_' | '.') {
             return None;
         }
     }
-    let name = if starts_with_ignore(chars, index, "executeglobal") {
-        "executeglobal"
+    let name_len = if starts_with_ignore(chars, index, "executeglobal") {
+        "executeglobal".len()
     } else if starts_with_ignore(chars, index, "execute") {
-        "execute"
+        "execute".len()
     } else {
         return None;
     };
-    let after = index + name.len();
+    let after = index + name_len;
     if chars
         .get(after)
         .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
     {
         return None;
     }
-    wsh_command_at(chars, after, false)
+    Some(after)
+}
+
+/// `Some` is a stored string. `None` is a name set to something that
+/// is not a string. A missing name was never set.
+type WshBindings = std::collections::HashMap<String, Option<String>>;
+
+fn wsh_bind_key(name: &str, jscript: bool) -> String {
+    if jscript {
+        name.to_string()
+    } else {
+        name.to_ascii_lowercase()
+    }
+}
+
+fn wsh_bound_string(bindings: &WshBindings, name: &str, jscript: bool) -> Option<String> {
+    match bindings.get(&wsh_bind_key(name, jscript)) {
+        Some(Some(text)) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+/// A statement that stores a string in a name. `var` introduces a
+/// JScript name. `Set` stores an object, so it clears the name.
+/// The right-hand side may be quoted pieces, names that already hold
+/// a string, or a VBScript name that was never set (that name is
+/// empty). A call, a member, a number, or an unset JScript name
+/// clears the binding. The end is where the scan resumes.
+fn wsh_string_assign(
+    chars: &[char],
+    index: usize,
+    jscript: bool,
+    bindings: &WshBindings,
+) -> Option<(String, Option<String>, usize)> {
+    let first = *chars.get(index)?;
+    if !(first.is_ascii_alphabetic() || first == '_' || (jscript && first == '$')) {
+        return None;
+    }
+    if !wsh_stmt_start(chars, index, jscript) {
+        return None;
+    }
+    let mut cursor = index;
+    if jscript && wsh_keyword(chars, cursor, "var", true) {
+        cursor = skip_js_trivia(chars, cursor + 3);
+    }
+    let clear_set = !jscript && wsh_keyword(chars, cursor, "set", false);
+    if clear_set {
+        cursor = skip_wsh_join_gap(chars, cursor + 3, false);
+    }
+    let (name, after_name) = read_wsh_ident(chars, cursor, jscript)?;
+    cursor = wsh_expr_gap(chars, after_name, jscript);
+    if chars.get(cursor) != Some(&'=') || chars.get(cursor + 1) == Some(&'=') {
+        return None;
+    }
+    let after_eq = cursor + 1;
+    if clear_set {
+        return Some((name, None, after_eq));
+    }
+    match wsh_fold_value(chars, after_eq, jscript, bindings) {
+        Some((text, end)) if end > after_eq => Some((name, Some(text), end)),
+        _ => Some((name, None, after_eq)),
+    }
+}
+
+/// The string value of an assignment. `None` means the value is not a
+/// string this scan can know. A comma inside parentheses is the comma
+/// operator, which this fold does not evaluate. A comma after the
+/// value ends a JScript `var` list.
+fn wsh_fold_value(
+    chars: &[char],
+    start: usize,
+    jscript: bool,
+    bindings: &WshBindings,
+) -> Option<(String, usize)> {
+    let cursor = wsh_expr_gap(chars, start, jscript);
+    let (cursor, mut depth) = skip_wsh_open_groups(chars, cursor, jscript);
+    let (mut value, mut end) = wsh_fold_atom(chars, cursor, jscript, bindings)?;
+    loop {
+        let mut look = wsh_expr_gap(chars, end, jscript);
+        while depth > 0 && chars.get(look) == Some(&')') {
+            depth -= 1;
+            end = look + 1;
+            look = wsh_expr_gap(chars, end, jscript);
+        }
+        if depth > 0 && chars.get(look) == Some(&',') {
+            return None;
+        }
+        let joins = match chars.get(look) {
+            Some('+') => true,
+            Some('&') => !jscript,
+            _ => false,
+        };
+        if !joins {
+            break;
+        }
+        let (next, opened) =
+            skip_wsh_open_groups(chars, wsh_expr_gap(chars, look + 1, jscript), jscript);
+        let (piece, piece_end) = wsh_fold_atom(chars, next, jscript, bindings)?;
+        depth += opened;
+        value.push_str(&piece);
+        end = piece_end;
+    }
+    if depth > 0 {
+        return None;
+    }
+    let look = wsh_expr_gap(chars, end, jscript);
+    if matches!(chars.get(look), Some('.' | '(' | '[')) {
+        return None;
+    }
+    Some((value, end))
+}
+
+fn wsh_fold_atom(
+    chars: &[char],
+    cursor: usize,
+    jscript: bool,
+    bindings: &WshBindings,
+) -> Option<(String, usize)> {
+    if let Some((body, end)) = read_wsh_string(chars, cursor, jscript) {
+        return Some((body, end));
+    }
+    let (name, end) = read_wsh_ident(chars, cursor, jscript)?;
+    let look = wsh_expr_gap(chars, end, jscript);
+    if matches!(chars.get(look), Some('.' | '(' | '[')) {
+        return None;
+    }
+    match bindings.get(&wsh_bind_key(&name, jscript)) {
+        Some(Some(text)) => Some((text.clone(), end)),
+        Some(None) => None,
+        None if jscript => None,
+        None => Some((String::new(), end)),
+    }
+}
+
+fn wsh_expr_gap(chars: &[char], cursor: usize, jscript: bool) -> usize {
+    if jscript {
+        skip_js_trivia(chars, cursor)
+    } else {
+        skip_wsh_join_gap(chars, cursor, false)
+    }
+}
+
+/// True when `index` is the first character of a statement.
+/// A VBScript `_` continuation keeps the next line in that statement.
+fn wsh_stmt_start(chars: &[char], index: usize, jscript: bool) -> bool {
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        match chars[cursor] {
+            ' ' | '\t' => continue,
+            '\n' | '\r' => {
+                if jscript {
+                    return true;
+                }
+                return !vbs_line_ends_continued(chars, cursor);
+            }
+            ';' | ':' => return true,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The previous line ends with a continuation `_`.
+fn vbs_line_ends_continued(chars: &[char], newline: usize) -> bool {
+    let mut cursor = newline;
+    if chars[cursor] == '\n' && cursor > 0 && chars[cursor - 1] == '\r' {
+        cursor -= 1;
+    }
+    if cursor == 0 {
+        return false;
+    }
+    cursor -= 1;
+    while chars[cursor] == ' ' || chars[cursor] == '\t' {
+        if cursor == 0 {
+            return false;
+        }
+        cursor -= 1;
+    }
+    chars[cursor] == '_' && (cursor == 0 || chars[cursor - 1] == ' ' || chars[cursor - 1] == '\t')
+}
+
+fn wsh_keyword(chars: &[char], index: usize, word: &str, jscript: bool) -> bool {
+    let matched = if jscript {
+        starts_with(chars, index, word)
+    } else {
+        starts_with_ignore(chars, index, word)
+    };
+    matched
+        && !chars
+            .get(index + word.len())
+            .is_some_and(|ch| wsh_ident_char(*ch, jscript))
+}
+
+fn wsh_ident_char(ch: char, jscript: bool) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || (jscript && ch == '$')
+}
+
+fn read_wsh_ident(chars: &[char], index: usize, jscript: bool) -> Option<(String, usize)> {
+    let first = *chars.get(index)?;
+    if !first.is_ascii_alphabetic() && first != '_' && !(jscript && first == '$') {
+        return None;
+    }
+    let mut end = index + 1;
+    while chars
+        .get(end)
+        .is_some_and(|ch| wsh_ident_char(*ch, jscript))
+    {
+        end += 1;
+    }
+    Some((chars[index..end].iter().collect(), end))
 }
 
 /// Space and comments between JScript tokens. A `//` comment ends at
@@ -34019,6 +34352,289 @@ mod tests {
             ),
             vec!["cmd /c echo ok".to_string()],
         );
+    }
+
+    /// A name assigned from a string is the `Execute`, `ExecuteGlobal`,
+    /// or `eval` argument. `cscript` runs that text, including a joined
+    /// literal, a copied name, a VBScript join with an unset name, a
+    /// `_` continuation, `Execute(s)`, `Call Execute(s)`, and
+    /// `eval((s))`. An unset JScript name is not a string. VBScript
+    /// names ignore case. The later assignment
+    /// replaces the earlier one. A comparison, a non-string assignment,
+    /// a use before the assignment, `.Execute`, and `obj.eval` stay
+    /// unmatched. The string stored in the name does not arm a `Run`
+    /// written beside it.
+    #[test]
+    fn wsh_execute_and_eval_read_a_variable() {
+        let push = "git push origin main";
+        let vbs_push =
+            "CreateObject(\"\"WScript.Shell\"\").Run \"\"git push origin main\"\", 0, True";
+        let vbs_rm = "CreateObject(\"\"WScript.Shell\"\").Run \"\"rm -rf /tmp/x\"\", 0, True";
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_push}\"\nExecute s\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_rm}\"\nExecuteGlobal s\n"), false),
+            vec!["rm -rf /tmp/x".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_push}\"\nExecute(s)\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("S = \"{vbs_push}\"\nExecute s\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = _\n\"{vbs_push}\"\nExecute s\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_push}\"\nExecute _\ns\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "s = \"CreateObject(\"\"WScript.Shell\"\").\" & \"Run \"\"git push origin main\"\", 0, True\"\nExecute s\n",
+                false,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("s = \"{vbs_push}\"\ns = \"{vbs_rm}\"\nExecute s\n"),
+                false,
+            ),
+            vec!["rm -rf /tmp/x".to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!(
+                    "Set sh = CreateObject(\"WScript.Shell\")\ns = \"sh.Run \"\"{push}\"\", 0, True\"\nExecute s\n"
+                ),
+                false,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_push}\"\nCall Execute(s)\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("Dim s\ns = \"{vbs_push}\"\nExecute s\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            wsf_commands(
+                &format!(
+                    "<job><script language=\"VBScript\">\ns = \"{vbs_push}\"\nExecute s\n</script></job>\n"
+                ),
+                None,
+                None,
+                None,
+            ),
+            vec![push.to_string()],
+        );
+        let js_push = "new ActiveXObject('WScript.Shell').Run('git push origin main', 0, true)";
+        assert_eq!(
+            super::vbs_shell_runs(&format!("var s = \"{js_push}\";\neval(s);\n"), true),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{js_push}\";\neval(s);\n"), true),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("var s = \"{js_push}\";\neval((s));\n"), true),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "var s = \"new ActiveXObject('WScript.Shell').\" + \"Run('git push origin main', 0, true)\";\neval(s);\n",
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!(
+                    "var shell = new ActiveXObject('WScript.Shell');\nvar s = \"shell.Run('{push}')\";\neval(s);\n"
+                ),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("t = \"{vbs_push}\"\ns = t\nExecute s\n"), false),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_push}\" & unknown\nExecute s\n"), false,),
+            vec![push.to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("n = 1\ns = n & \"{vbs_push}\"\nExecute s\n"),
+                false
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "a = \"CreateObject(\"\"WScript.Shell\"\").\"\nb = \"Run \"\"git push origin main\"\", 0, True\"\ns = a & b\nExecute s\n",
+                false,
+            ),
+            vec![push.to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("s = t\nt = \"{vbs_push}\"\nExecute s\n"), false)
+                .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var t = \"{js_push}\";\nvar s = t;\neval(s);\n"),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "var t = \"Run('git push origin main', 0, true)\";\nvar s = \"new ActiveXObject('WScript.Shell').\" + t;\neval(s);\n",
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("var s = \"{js_push}\" + unknown;\neval(s);\n"),
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("t = \"{vbs_push}\"\ns = \"Execute t\"\nExecute s\n"),
+                false,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "s = \"t = \"\"CreateObject(\"\"\"\"WScript.Shell\"\"\"\").Run \"\"\"\"git push origin main\"\"\"\", 0, True\"\"\"\nExecute s\nExecute t\n",
+                false,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var t = \"{js_push}\";\nvar s = \"eval(t)\";\neval(s);\n"),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "var s = \"t = \\\"new ActiveXObject('WScript.Shell').Run('git push origin main', 0, true)\\\"\";\neval(s);\neval(t);\n",
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("s = \"{vbs_push}\"\nt = \"s = 1\"\nExecute t\nExecute s\n"),
+                false,
+            )
+            .is_empty()
+        );
+        let (commands, deep) =
+            super::vbs_shell_runs_depth("s = \"Execute s\"\nExecute s\n", false, 0, false);
+        assert!(deep, "{commands:?}");
+        assert!(commands.is_empty());
+        assert!(
+            super::vbs_shell_runs(&format!("Execute s\ns = \"{vbs_push}\"\n"), false).is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("If s = \"{vbs_push}\" Then\nEnd If\nExecute s\n"),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("s = \"{vbs_push}\"\ns = 1\nExecute s\n"), false)
+                .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                "s = \"WScript.Echo \"\"git push origin main\"\"\"\nExecute s\n",
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("' s = \"{vbs_push}\"\nExecute s\n"), false,).is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                "s = \"CreateObject(\"\"WScript.Shell\"\").Run \"\"cmd /c echo ok\"\", 0, True\"\nfoo.Run \"git push origin main\", 0, True\nExecute s\n",
+                false,
+            ),
+            vec!["cmd /c echo ok".to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("s = \"sh.Run \"\"{push}\"\", 0, True\"\nExecute s\n"),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("s = \"{vbs_push}\"\nCreateObject(\"WScript.Shell\").Execute s\n"),
+                false,
+            )
+            .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("var S = \"{js_push}\";\neval(s);\n"), true,).is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("var s = \"{js_push}\";\nobj.eval(s);\n"), true,)
+                .is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("eval(s);\nvar s = \"{js_push}\";\n"), true,).is_empty()
+        );
+        assert!(
+            super::vbs_shell_runs(&format!("// var s = \"{js_push}\";\neval(s);\n"), true,)
+                .is_empty()
+        );
+
+        let root = std::env::temp_dir().join(format!(
+            "snapif-wsh-var-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("dir");
+        let write = |name: &str, body: &str| {
+            let path = root.join(name);
+            std::fs::write(&path, body).expect(name);
+            path.display().to_string()
+        };
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let score = |file: &str| {
+            let command = format!("cscript //nologo {file}");
+            matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.to_string())
+        };
+        let vbs = write("var.vbs", &format!("s = \"{vbs_push}\"\nExecute s\n"));
+        let js = write("var.js", &format!("var s = \"{js_push}\";\neval(s);\n"));
+        assert_eq!(score(&vbs).as_deref(), Some("git.push"), "{vbs}");
+        assert_eq!(score(&js).as_deref(), Some("git.push"), "{js}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `eval` of pieces joined with `+` runs the joined script. A `+`
