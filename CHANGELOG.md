@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.2.14](https://github.com/snapif/snapif/compare/snapif-v0.2.13...snapif-v0.2.14) (2026-11-26)
+
+
+### Bug Fixes
+
+* cap manifest reads and bound 7z extraction ([#315](https://github.com/snapif/snapif/issues/315)) ([8188e31](https://github.com/snapif/snapif/commit/8188e31df768f9cebc24f5653df89a016668342b))
+* do not score a bash read of /dev/zero ([#311](https://github.com/snapif/snapif/issues/311)) ([d661a27](https://github.com/snapif/snapif/commit/d661a2762022cc698d860b989a6102fa7b462e6f))
+* read gh.exe under WSL and skip a huge node manifest ([#314](https://github.com/snapif/snapif/issues/314)) ([ac3b228](https://github.com/snapif/snapif/commit/ac3b228e8f16c5e942ca2c354e94f5912900aa34))
+* say replay rejects a positional state array ([#319](https://github.com/snapif/snapif/issues/319)) ([b244bb5](https://github.com/snapif/snapif/commit/b244bb5625699ef365dea7246b27e641026869da))
+* score eval when a JScript name holds the script ([#307](https://github.com/snapif/snapif/issues/307)) ([b7402f8](https://github.com/snapif/snapif/commit/b7402f8e32da09247150e94a5c726b61803283f5))
+* score every bzip2 member, not only the first ([#318](https://github.com/snapif/snapif/issues/318)) ([412d82d](https://github.com/snapif/snapif/commit/412d82dc5cee97e76ffda731b754b70e70389b9a))
+* score every gzip member, not only the first ([#317](https://github.com/snapif/snapif/issues/317)) ([0a4d58b](https://github.com/snapif/snapif/commit/0a4d58b1ef3de1d5f74f2efe42e20076294d9f72))
+* score Execute and eval of a variable ([#305](https://github.com/snapif/snapif/issues/305)) ([6d76914](https://github.com/snapif/snapif/commit/6d769141ec616b5d27881c1d84399aa73ffc333f)), closes [#304](https://github.com/snapif/snapif/issues/304)
+* score Run and Exec when a name holds the command ([#308](https://github.com/snapif/snapif/issues/308)) ([5bcd51a](https://github.com/snapif/snapif/commit/5bcd51adf2795a9daef9eb65b2eb4bea8a4d330e))
+* stop decompression at the script cap ([#316](https://github.com/snapif/snapif/issues/316)) ([cad3012](https://github.com/snapif/snapif/commit/cad301216fbc7c9e07753b1e867a2789df21be28))
+
 ## [0.2.13](https://github.com/snapif/snapif/compare/snapif-v0.2.12...snapif-v0.2.13) (2026-11-25)
 
 
