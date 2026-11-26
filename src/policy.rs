@@ -18551,6 +18551,9 @@ fn unix_compress_decode(bytes: &[u8]) -> Option<Vec<u8>> {
         finchar = code;
         stack.push(finchar as u8);
         while let Some(byte) = stack.pop() {
+            if out.len() as u64 >= SCRIPT_FILE_CAP {
+                return None;
+            }
             out.push(byte);
         }
         if free_ent < limit {
@@ -18567,10 +18570,50 @@ fn unix_compress_decode(bytes: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Stop once the decoded bytes pass [`SCRIPT_FILE_CAP`]. A 1 MiB
+/// compressed file can expand far past that, and the scorer only
+/// needs a script-sized body.
+fn append_capped(out: &mut Vec<u8>, reader: &mut dyn std::io::Read) -> Option<()> {
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader.read(&mut buf).ok()?;
+        if n == 0 {
+            return Some(());
+        }
+        if out.len() as u64 + n as u64 > SCRIPT_FILE_CAP {
+            return None;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
+fn read_capped_to_end(reader: &mut dyn std::io::Read) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    append_capped(&mut out, reader)?;
+    Some(out)
+}
+
+struct CapWriter {
+    buf: Vec<u8>,
+}
+
+impl std::io::Write for CapWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len() as u64 + data.len() as u64 > SCRIPT_FILE_CAP {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "cap"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn gzip_flate_decode(bytes: &[u8]) -> Option<String> {
     let mut decoder = flate2::read::GzDecoder::new(bytes);
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
 
@@ -18585,15 +18628,13 @@ fn gzip_decode(bytes: &[u8]) -> Option<String> {
 
 fn deflate_decode(bytes: &[u8]) -> Option<String> {
     let mut decoder = flate2::read::DeflateDecoder::new(bytes);
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
 
 fn zlib_decode(bytes: &[u8]) -> Option<String> {
     let mut decoder = flate2::read::ZlibDecoder::new(bytes);
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
 
@@ -18609,23 +18650,22 @@ fn any_inflate_decode(bytes: &[u8]) -> Option<String> {
 
 fn bzip2_decode(bytes: &[u8]) -> Option<String> {
     let mut decoder = bzip2::read::BzDecoder::new(bytes);
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
 
 fn xz_decode(bytes: &[u8]) -> Option<String> {
     let mut input = std::io::Cursor::new(bytes);
-    let mut out = Vec::new();
+    let mut out = CapWriter { buf: Vec::new() };
     lzma_rs::xz_decompress(&mut input, &mut out).ok()?;
-    String::from_utf8(out).ok()
+    String::from_utf8(out.buf).ok()
 }
 
 fn lzma_decode(bytes: &[u8]) -> Option<String> {
     let mut input = std::io::Cursor::new(bytes);
-    let mut out = Vec::new();
+    let mut out = CapWriter { buf: Vec::new() };
     lzma_rs::lzma_decompress(&mut input, &mut out).ok()?;
-    String::from_utf8(out).ok()
+    String::from_utf8(out.buf).ok()
 }
 
 fn xz_or_lzma_decode(bytes: &[u8]) -> Option<String> {
@@ -18652,23 +18692,21 @@ fn zstd_frame(bytes: &[u8]) -> &[u8] {
 fn zstd_decode(bytes: &[u8]) -> Option<String> {
     let bytes = zstd_frame(bytes);
     let mut decoder = ruzstd::decoding::StreamingDecoder::new(bytes).ok()?;
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
 
 fn lz4_decode(bytes: &[u8]) -> Option<String> {
     let mut decoder = lz4_flex::frame::FrameDecoder::new(bytes);
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
+    let out = read_capped_to_end(&mut decoder)?;
     String::from_utf8(out).ok()
 }
 
 fn brotli_decode(bytes: &[u8]) -> Option<String> {
     let mut input = std::io::Cursor::new(bytes);
-    let mut out = Vec::new();
+    let mut out = CapWriter { buf: Vec::new() };
     brotli_decompressor::BrotliDecompress(&mut input, &mut out).ok()?;
-    String::from_utf8(out).ok()
+    String::from_utf8(out.buf).ok()
 }
 
 fn gzip_query(name: &str, args: &[String]) -> Option<GzipQuery> {
@@ -19111,23 +19149,19 @@ fn member_matches(path: &str, member: &str) -> bool {
 }
 
 fn inflate_all(mut decoder: impl std::io::Read) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
-    Some(out)
+    read_capped_to_end(&mut decoder)
 }
 
 fn lz4_frame_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut decoder = lz4_flex::frame::FrameDecoder::new(bytes);
-    let mut out = Vec::new();
-    std::io::Read::read_to_end(&mut decoder, &mut out).ok()?;
-    Some(out)
+    read_capped_to_end(&mut decoder)
 }
 
 fn brotli_raw_bytes(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut input = std::io::Cursor::new(bytes);
-    let mut out = Vec::new();
+    let mut out = CapWriter { buf: Vec::new() };
     brotli_decompressor::BrotliDecompress(&mut input, &mut out).ok()?;
-    Some(out)
+    Some(out.buf)
 }
 
 fn tar_payload(bytes: &[u8], compress: TarCompress) -> Option<Vec<u8>> {
@@ -19150,9 +19184,9 @@ fn tar_magic(bytes: &[u8]) -> Option<Vec<u8>> {
     }
     if bytes.starts_with(&[0xfd, b'7', b'z', b'X', b'Z', 0]) {
         let mut input = std::io::Cursor::new(bytes);
-        let mut out = Vec::new();
+        let mut out = CapWriter { buf: Vec::new() };
         lzma_rs::xz_decompress(&mut input, &mut out).ok()?;
-        return Some(out);
+        return Some(out.buf);
     }
     if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) || bytes.starts_with(&[0x50, 0x2a, 0x4d, 0x18])
     {
@@ -19174,10 +19208,10 @@ fn lzma_alone_tar(bytes: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let mut input = std::io::Cursor::new(bytes);
-    let mut out = Vec::new();
+    let mut out = CapWriter { buf: Vec::new() };
     lzma_rs::lzma_decompress(&mut input, &mut out).ok()?;
-    if out.len() > 262 && out[257..262] == *b"ustar" {
-        Some(out)
+    if out.buf.len() > 262 && out.buf[257..262] == *b"ustar" {
+        Some(out.buf)
     } else {
         None
     }
@@ -19205,7 +19239,7 @@ fn tar_text(bytes: &[u8], member: Option<&str>, compress: TarCompress) -> Option
         {
             continue;
         }
-        std::io::Read::read_to_end(&mut entry, &mut out).ok()?;
+        append_capped(&mut out, &mut entry)?;
         found = true;
         if member.is_some() {
             break;
@@ -19270,8 +19304,7 @@ fn unzip_first(bytes: &[u8]) -> Option<String> {
         if file.is_dir() {
             continue;
         }
-        let mut out = Vec::new();
-        std::io::Read::read_to_end(&mut file, &mut out).ok()?;
+        let out = read_capped_to_end(&mut file)?;
         return String::from_utf8(out).ok();
     }
     None
@@ -19282,14 +19315,14 @@ fn unzip_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
     let mut out = Vec::new();
     if let Some(member) = member {
         let mut file = archive.by_name(member).ok()?;
-        std::io::Read::read_to_end(&mut file, &mut out).ok()?;
+        append_capped(&mut out, &mut file)?;
     } else {
         for index in 0..archive.len() {
             let mut file = archive.by_index(index).ok()?;
             if file.is_dir() {
                 continue;
             }
-            std::io::Read::read_to_end(&mut file, &mut out).ok()?;
+            append_capped(&mut out, &mut file)?;
         }
     }
     if out.is_empty() {
@@ -19382,7 +19415,12 @@ fn sevenz_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
                 std::io::copy(reader, &mut std::io::sink()).map_err(sevenz_rust2::Error::from)?;
                 return Ok(true);
             }
-            std::io::Read::read_to_end(reader, &mut out).map_err(sevenz_rust2::Error::from)?;
+            append_capped(&mut out, reader).ok_or_else(|| {
+                sevenz_rust2::Error::from(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "cap",
+                ))
+            })?;
             found = true;
             Ok(true)
         },
@@ -36720,6 +36758,56 @@ mod tests {
             .map(|id| id.0.as_str()),
             None,
             "{big}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gzip_expansion_past_the_cap_is_not_scored() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-gz-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("dir");
+        let encode = |payload: &[u8]| {
+            let mut encoder =
+                flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+            std::io::Write::write_all(&mut encoder, payload).expect("gz");
+            encoder.finish().expect("gz finish")
+        };
+        let small = root.join("small.gz");
+        std::fs::write(&small, encode(b"git push origin main\n")).expect("small");
+        let small_s = plain_script_path(&small);
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("eval \"$(gzip -dc {small_s})\""))
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{small_s}"
+        );
+        let mut big = b"git push origin main\n".to_vec();
+        big.resize(super::SCRIPT_FILE_CAP as usize + 1, b'\n');
+        let encoded = encode(&big);
+        assert!(
+            (encoded.len() as u64) < super::SCRIPT_FILE_CAP,
+            "compressed {}",
+            encoded.len()
+        );
+        let big_path = root.join("big.gz");
+        std::fs::write(&big_path, &encoded).expect("big");
+        let big_s = plain_script_path(&big_path);
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("eval \"$(gzip -dc {big_s})\""))
+            )
+            .map(|id| id.0.as_str()),
+            None,
+            "{big_s}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
