@@ -10633,6 +10633,7 @@ fn wsh_expr_gap(chars: &[char], cursor: usize, jscript: bool) -> usize {
 
 /// True when `index` is the first character of a statement.
 /// A VBScript `_` continuation keeps the next line in that statement.
+/// A JScript comma starts the next name in a `var` list.
 fn wsh_stmt_start(chars: &[char], index: usize, jscript: bool) -> bool {
     let mut cursor = index;
     while cursor > 0 {
@@ -10646,6 +10647,7 @@ fn wsh_stmt_start(chars: &[char], index: usize, jscript: bool) -> bool {
                 return !vbs_line_ends_continued(chars, cursor);
             }
             ';' | ':' => return true,
+            ',' if jscript => return true,
             _ => return false,
         }
     }
@@ -34494,6 +34496,13 @@ mod tests {
         assert_eq!(
             super::vbs_shell_runs(
                 &format!("var t = \"{js_push}\";\nvar s = t;\neval(s);\n"),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var junk = \"WScript.Echo('no')\", s = \"{js_push}\";\neval(s);\n"),
                 true,
             ),
             vec![push.to_string()],
