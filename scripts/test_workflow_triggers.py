@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from bash_path import bash_path, share_with_bash
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -216,11 +219,12 @@ class WorkflowTriggerTests(unittest.TestCase):
                     "DRY_RUN": "1",
                     "TAG": "snapif-v0.2.0",
                     "REPO": "snapif/snapif",
-                    "ARTIFACTS": tmp,
+                    "ARTIFACTS": bash_path(tmp),
                 }
             )
+            env = share_with_bash(env, "DRY_RUN", "TAG", "REPO", "ARTIFACTS")
             ok = subprocess.run(
-                ["bash", str(script)],
+                ["bash", bash_path(script)],
                 check=False,
                 env=env,
                 capture_output=True,
@@ -230,7 +234,7 @@ class WorkflowTriggerTests(unittest.TestCase):
             self.assertIn("SUBJECT: snapif.tar.xz", ok.stdout)
             env["TAG"] = "v0.2.0"
             bad = subprocess.run(
-                ["bash", str(script)],
+                ["bash", bash_path(script)],
                 check=False,
                 env=env,
                 capture_output=True,
@@ -384,7 +388,7 @@ class WorkflowTriggerTests(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
             result = subprocess.run(
-                ["bash", str(script), "snapif/snapif"],
+                ["bash", bash_path(script), "snapif/snapif"],
                 cwd=root,
                 check=False,
                 env=env,
@@ -394,6 +398,72 @@ class WorkflowTriggerTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn("FAIL:", result.stdout)
             self.assertNotIn("README badges match live signals", result.stdout)
+
+    def test_stealth_uses_gh_exe_when_gh_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            script = root / "scripts" / "assert-stealth.sh"
+            script.write_text(
+                (ROOT / "scripts" / "assert-stealth.sh").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            (root / "Cargo.toml").write_text(
+                'keywords = ["cli"]\ncategories = ["command-line-utilities"]\n',
+                encoding="utf-8",
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name in ("python3", "git", "grep", "dirname"):
+                wrapper = bin_dir / name
+                wrapper.write_text(
+                    f"#!/bin/sh\nexec /usr/bin/{name} \"$@\"\n",
+                    encoding="utf-8",
+                )
+                wrapper.chmod(0o755)
+            gh_exe = bin_dir / "gh.exe"
+            gh_exe.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "repo" ]; then\n'
+                "  printf '%s\\n' "
+                '\'{"description":"Snapif","homepageUrl":"","repositoryTopics":'
+                '[{"name":"rust"}],"isPrivate":false}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            gh_exe.chmod(0o755)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/snapif/snapif.git",
+                ],
+                cwd=root,
+                check=True,
+            )
+            bash = shutil.which("bash")
+            self.assertIsNotNone(bash)
+            env = os.environ.copy()
+            # Only the fake gh.exe is named gh. An absolute bash keeps
+            # Linux CI from losing the shell when PATH is that directory.
+            env["PATH"] = str(bin_dir)
+            result = subprocess.run(
+                [bash, bash_path(script), "snapif/snapif"],
+                cwd=root,
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("FAIL:", result.stdout)
+            self.assertIn("OK: description is set", result.stdout)
 
 
 class ScheduledFailureTests(unittest.TestCase):

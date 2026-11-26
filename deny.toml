@@ -15,6 +15,7 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
+    # libfuzzer-sys in fuzz/. The root check does not see that crate.
     "NCSA",
     # foldhash 0.2, via serde_json 1.0.154. OSI approved.
     "Zlib",

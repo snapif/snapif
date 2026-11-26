@@ -18,14 +18,19 @@ repo="$1"
 owner="${repo%%/*}"
 leaks=0
 
-if ! command -v gh >/dev/null 2>&1; then
+# WSL bash on Windows has gh.exe and does not have gh.
+if gh_bin="$(command -v gh 2>/dev/null)"; then
+  :
+elif gh_bin="$(command -v gh.exe 2>/dev/null)"; then
+  :
+else
   echo "FAIL: gh not on PATH"
   echo "DONE: ok=false error=no-gh"
   exit 2
 fi
 
 echo "DO: query GitHub repo About"
-if ! repo_json="$(gh repo view "$repo" --json description,homepageUrl,repositoryTopics,isPrivate,hasWikiEnabled,hasProjectsEnabled,hasDiscussionsEnabled 2>/dev/null)"; then
+if ! repo_json="$("$gh_bin" repo view "$repo" --json description,homepageUrl,repositoryTopics,isPrivate,hasWikiEnabled,hasProjectsEnabled,hasDiscussionsEnabled 2>/dev/null)"; then
   echo "FAIL: gh repo view $repo"
   echo "DONE: ok=false error=gh-repo-view"
   exit 2
@@ -68,7 +73,7 @@ else
 fi
 
 echo "DO: query org About if $owner is an org"
-if org_json="$(gh api "orgs/$owner" --jq '{desc:.description,blog:.blog,twitter:.twitter_username,loc:.location,email:.email}' 2>/dev/null)"; then
+if org_json="$("$gh_bin" api "orgs/$owner" --jq '{desc:.description,blog:.blog,twitter:.twitter_username,loc:.location,email:.email}' 2>/dev/null)"; then
   for key in desc blog twitter loc email; do
     val="$(printf '%s' "$org_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('$key') or '')")"
     check_empty "org.$key" "$val"

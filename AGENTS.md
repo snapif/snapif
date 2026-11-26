@@ -9,7 +9,7 @@ otherwise. GitHub topics and the README are the public page.
 
 Do not depend on `bline-*`, `canact`, `wiremux`, or `wiremux-auth` in v1.
 
-Local gate: `make check`.
+Local gate: `make check`. CI also runs gitleaks, `make fuzz`, `cargo publish --dry-run --locked`, and `cargo semver-checks`.
 
 A rule in this file changes in the same commit as the code that breaks
 it. The commit message says which rule changed and why. Do not leave
