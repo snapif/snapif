@@ -10554,9 +10554,8 @@ fn wsh_string_assign(
 }
 
 /// The string value of an assignment. `None` means the value is not a
-/// string this scan can know. A comma inside parentheses is the comma
-/// operator, which this fold does not evaluate. A comma after the
-/// value ends a JScript `var` list.
+/// string this scan can know. A JScript comma inside parentheses
+/// yields the last value. A comma after the value ends a `var` list.
 fn wsh_fold_value(
     chars: &[char],
     start: usize,
@@ -10572,6 +10571,15 @@ fn wsh_fold_value(
             depth -= 1;
             end = look + 1;
             look = wsh_expr_gap(chars, end, jscript);
+        }
+        if jscript && depth > 0 && chars.get(look) == Some(&',') {
+            let (next, opened) =
+                skip_wsh_open_groups(chars, wsh_expr_gap(chars, look + 1, true), true);
+            let (piece, piece_end) = wsh_fold_atom(chars, next, true, bindings)?;
+            depth += opened;
+            value = piece;
+            end = piece_end;
+            continue;
         }
         if depth > 0 && chars.get(look) == Some(&',') {
             return None;
@@ -34506,6 +34514,20 @@ mod tests {
                 true,
             ),
             vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var s = (\"WScript.Echo('no')\", \"{js_push}\");\neval(s);\n"),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("var s = (\"{js_push}\", \"WScript.Echo('x')\");\neval(s);\n"),
+                true,
+            )
+            .is_empty()
         );
         assert_eq!(
             super::vbs_shell_runs(
