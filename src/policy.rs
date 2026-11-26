@@ -4504,6 +4504,16 @@ fn sourced_stdin(argv: &[String]) -> bool {
 /// hook. Past one megabyte the body is `shell.deep` instead of `auto`.
 const SCRIPT_FILE_CAP: u64 = 1024 * 1024;
 
+/// Stat before the read. A fifo blocks in `read_to_string`, and a file
+/// past [`SCRIPT_FILE_CAP`] is not a project manifest.
+fn read_capped_text(path: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() > SCRIPT_FILE_CAP {
+        return None;
+    }
+    std::fs::read_to_string(path).ok()
+}
+
 enum ScriptFile {
     Text(String),
     Unscanned,
@@ -6001,7 +6011,7 @@ fn just_recipe_body(argv: &[String], dir: Option<&str>) -> Option<String> {
             .map(|name| shell_path(name, dir))
             .find(|candidate| std::path::Path::new(candidate).is_file())?
     };
-    let text = std::fs::read_to_string(path).ok()?;
+    let text = read_capped_text(std::path::Path::new(&path))?;
     let mut body = Vec::new();
     let mut inside = false;
     for line in text.lines() {
@@ -7164,15 +7174,7 @@ fn node_run_bodies(argv: &[String], dir: Option<&str>) -> Vec<String> {
         return Vec::new();
     };
     let path = shell_dir(dir).join("package.json");
-    // Stat before the read. A fifo blocks in read_to_string, and a
-    // huge manifest is not a script list.
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return Vec::new();
-    };
-    if !meta.is_file() || meta.len() > SCRIPT_FILE_CAP {
-        return Vec::new();
-    }
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Some(text) = read_capped_text(&path) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -8514,7 +8516,7 @@ fn score_mix_shell<'a>(
         commands.push(command);
     }
     let root = shell_dir(dir);
-    if let Ok(text) = std::fs::read_to_string(root.join("mix.exs")) {
+    if let Some(text) = read_capped_text(&root.join("mix.exs")) {
         commands.extend(elixir_commands(&mix_startup_source(&text)));
         if let Some(task) = mix_task(argv)
             && let Some(command) = mix_alias_shell(&text, &task)
@@ -8524,7 +8526,7 @@ fn score_mix_shell<'a>(
         commands.extend(mix_path_dep_commands(&root, &mix_startup_source(&text)));
     }
     if mix_loads_runtime(argv)
-        && let Ok(text) = std::fs::read_to_string(root.join("config/runtime.exs"))
+        && let Some(text) = read_capped_text(&root.join("config/runtime.exs"))
     {
         commands.extend(elixir_commands(&text));
     }
@@ -8565,7 +8567,7 @@ fn mix_read_config(
     if depth > 8 || seen.iter().any(|item| item == path) {
         return;
     }
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = read_capped_text(path) else {
         return;
     };
     seen.push(path.to_path_buf());
@@ -8654,7 +8656,7 @@ fn mix_path_deps_into(
             root.join(path)
         };
         let manifest = dep.join("mix.exs");
-        let Ok(body) = std::fs::read_to_string(&manifest) else {
+        let Some(body) = read_capped_text(&manifest) else {
             continue;
         };
         let key = std::fs::canonicalize(&manifest).unwrap_or(manifest);
@@ -11795,7 +11797,7 @@ fn package_script_bodies(argv: &[String]) -> Vec<String> {
     let Some(name) = package_script_name(tool, argv) else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(package_dir(argv).join("package.json")) else {
+    let Some(text) = read_capped_text(&package_dir(argv).join("package.json")) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -11839,7 +11841,7 @@ fn score_maven<'a>(
         return;
     }
     let path = maven_pom_path(argv, dir);
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = read_capped_text(path.as_ref()) else {
         return;
     };
     let mut commands = maven_phase_reached(argv)
@@ -12154,7 +12156,7 @@ fn score_sbt<'a>(
         return;
     }
     let path = shell_dir(dir).join("build.sbt");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = read_capped_text(&path) else {
         return;
     };
     let commands = sbt_shell_commands(&text)
@@ -12494,7 +12496,7 @@ fn score_xcodebuild<'a>(
     let Some(project) = xcode_project_dir(argv, dir) else {
         return;
     };
-    let Ok(text) = std::fs::read_to_string(project.join("project.pbxproj")) else {
+    let Some(text) = read_capped_text(&project.join("project.pbxproj")) else {
         return;
     };
     let scripts = xcode_shell_scripts(&text, &xcode_target_names(argv));
@@ -13175,7 +13177,7 @@ fn npm_ci_has_lock(dir: &std::path::Path) -> bool {
 }
 
 fn package_lifecycle(path: &std::path::Path, keys: &[&str]) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = read_capped_text(path) else {
         return Vec::new();
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
@@ -14804,7 +14806,7 @@ fn nim_sibling_commands(nim_file: &str) -> Vec<String> {
     let Some(dir) = path.parent() else {
         return Vec::new();
     };
-    let Ok(text) = std::fs::read_to_string(dir.join(format!("{stem}.nims"))) else {
+    let Some(text) = read_capped_text(&dir.join(format!("{stem}.nims"))) else {
         return Vec::new();
     };
     nim_call_args(&text, "exec")
@@ -14817,7 +14819,7 @@ fn nim_config_commands(nim_file: &str) -> Vec<String> {
         None => return commands,
     };
     for _ in 0..32 {
-        if let Ok(text) = std::fs::read_to_string(current.join("config.nims")) {
+        if let Some(text) = read_capped_text(&current.join("config.nims")) {
             commands.extend(nim_call_args(&text, "exec"));
         }
         let Some(parent) = current.parent() else {
@@ -15832,7 +15834,7 @@ fn cargo_alias_words(name: &str, dir: Option<&str>) -> Option<Vec<String>> {
             None
         };
         if let Some(path) = chosen
-            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(text) = read_capped_text(&path)
             && let Some(value) = cargo_alias_value(&text, name)
         {
             let words: Vec<String> = value.split_whitespace().map(str::to_string).collect();
@@ -15968,7 +15970,7 @@ fn cargo_manifest_path(argv: &[String]) -> Option<String> {
 }
 
 fn cargo_runner_has_target(dir: &std::path::Path, kind: CargoInvoke) -> bool {
-    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+    let Some(text) = read_capped_text(&dir.join("Cargo.toml")) else {
         return false;
     };
     if kind == CargoInvoke::Bench {
@@ -15986,7 +15988,7 @@ fn cargo_runner_has_target(dir: &std::path::Path, kind: CargoInvoke) -> bool {
             return false;
         }
         let member_dir = dir.join(&member);
-        let Ok(body) = std::fs::read_to_string(member_dir.join("Cargo.toml")) else {
+        let Some(body) = read_capped_text(&member_dir.join("Cargo.toml")) else {
             return false;
         };
         cargo_named_package(&body) && cargo_dir_has_target(&member_dir, run)
@@ -16002,7 +16004,7 @@ fn cargo_has_bench(dir: &std::path::Path, text: &str) -> bool {
 }
 
 fn cargo_unharnessed_benches(dir: &std::path::Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(dir.join("Cargo.toml")) else {
+    let Some(text) = read_capped_text(&dir.join("Cargo.toml")) else {
         return Vec::new();
     };
     let mut files = Vec::new();
@@ -16210,7 +16212,7 @@ fn cargo_runner_command(dir: Option<&str>) -> Option<String> {
             None
         };
         if let Some(path) = chosen
-            && let Ok(text) = std::fs::read_to_string(&path)
+            && let Some(text) = read_capped_text(&path)
             && let Some(command) = cargo_unix_runner(&text)
         {
             return Some(command);
@@ -19353,12 +19355,22 @@ fn sevenz_query(args: &[String]) -> Option<ArchiveQuery> {
     })
 }
 
+fn sevenz_extract_limits() -> sevenz_rust2::ExtractLimits {
+    // Same byte cap as a script file. Entry count and decoder memory
+    // stop a header that asks for a huge table or dictionary.
+    sevenz_rust2::ExtractLimits::new()
+        .max_total_size(SCRIPT_FILE_CAP)
+        .max_entries(1_024)
+        .max_memory_kb(64 * 1024)
+}
+
 fn sevenz_text(bytes: &[u8], member: Option<&str>) -> Option<String> {
     let mut out = Vec::new();
     let mut found = false;
-    sevenz_rust2::decompress_with_extract_fn(
+    sevenz_rust2::decompress_with_extract_fn_and_limits(
         std::io::Cursor::new(bytes),
         std::env::temp_dir(),
+        sevenz_extract_limits(),
         |entry, reader, _dest| {
             if entry.is_directory() {
                 return Ok(true);
@@ -36571,6 +36583,145 @@ mod tests {
         }
         drop(guard);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn past_the_script_cap(prefix: &str) -> Vec<u8> {
+        let mut body = prefix.as_bytes().to_vec();
+        body.resize(super::SCRIPT_FILE_CAP as usize + 1, b'\n');
+        body
+    }
+
+    #[test]
+    fn config_reads_past_the_cap_are_not_scored() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-cfg-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let miss = |command: String| {
+            assert_eq!(
+                matched_action(&policy, "Bash", Some(&command)).map(|id| id.0.as_str()),
+                None,
+                "{command}"
+            );
+        };
+
+        let mix = root.join("mix");
+        std::fs::create_dir_all(&mix).expect("mix");
+        let mix_s = plain_script_path(&mix);
+        let mix_cmd = format!("cd {mix_s} && mix test");
+        std::fs::write(
+            mix.join("mix.exs"),
+            "System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n",
+        )
+        .expect("small mix.exs");
+        assert_eq!(
+            matched_action(&policy, "Bash", Some(&mix_cmd)).map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{mix_cmd}"
+        );
+        std::fs::write(
+            mix.join("mix.exs"),
+            past_the_script_cap("System.cmd(\"git\", [\"push\", \"origin\", \"main\"])\n"),
+        )
+        .expect("mix.exs");
+        miss(mix_cmd);
+
+        let npm = root.join("npm");
+        std::fs::create_dir_all(&npm).expect("npm");
+        let mut pkg = br#"{"scripts":{"test":"git push origin main"},"pad":""#.to_vec();
+        pkg.resize(super::SCRIPT_FILE_CAP as usize + 1, b'x');
+        pkg.extend(br#""}"#);
+        std::fs::write(npm.join("package.json"), pkg).expect("pkg");
+        let npm_s = plain_script_path(&npm);
+        miss(format!("npm test --prefix {npm_s}"));
+
+        let nim = root.join("nim");
+        std::fs::create_dir_all(&nim).expect("nim");
+        std::fs::write(nim.join("app.nim"), "echo \"ok\"\n").expect("nim");
+        std::fs::write(
+            nim.join("config.nims"),
+            past_the_script_cap("exec \"git push origin main\"\n"),
+        )
+        .expect("nims");
+        let app_s = plain_script_path(&nim.join("app.nim"));
+        miss(format!("nim c {app_s}"));
+
+        let xcode = root.join("xcode");
+        let project = xcode.join("Probe.xcodeproj");
+        std::fs::create_dir_all(&project).expect("xcode");
+        std::fs::write(
+            project.join("project.pbxproj"),
+            past_the_script_cap(
+                "{\n\tobjects = {\n\t\tAA00000000000000000000A1 = { isa = PBXAggregateTarget; buildPhases = ( AA00000000000000000000B1, ); name = Probe; };\n\t\tAA00000000000000000000A2 = { isa = PBXProject; targets = ( AA00000000000000000000A1, ); };\n\t\tAA00000000000000000000B1 = { isa = PBXShellScriptBuildPhase; shellScript = \"git push origin main\"; };\n\t};\n\trootObject = AA00000000000000000000A2;\n}\n",
+            ),
+        )
+        .expect("pbx");
+        let xcode_s = plain_script_path(&xcode);
+        miss(format!(
+            "cd {xcode_s} && xcodebuild -project Probe.xcodeproj -target Probe build"
+        ));
+
+        let bench = root.join("bench");
+        std::fs::create_dir_all(bench.join("benches")).expect("benches");
+        std::fs::write(
+            bench.join("benches/push.rs"),
+            "fn main() {\n    std::process::Command::new(\"git\").arg(\"push\").arg(\"origin\").arg(\"main\").status().ok();\n}\n",
+        )
+        .expect("bench rs");
+        std::fs::write(
+            bench.join("Cargo.toml"),
+            past_the_script_cap("[[bench]]\nname = \"push\"\nharness = false\n"),
+        )
+        .expect("toml");
+        let bench_s = plain_script_path(&bench);
+        miss(format!("cd {bench_s} && cargo bench -q"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sevenz_over_the_total_size_cap_is_not_scored() {
+        let _lock = drive_letter_lock();
+        let policy = Policy::shipped("tool-gate").expect("tool-gate");
+        let root = std::env::temp_dir().join(format!("snapif-7z-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let write_archive = |name: &str, payload: &[u8]| {
+            let src = root.join(format!("{name}-src"));
+            std::fs::create_dir_all(&src).expect("7z src");
+            std::fs::write(src.join("payload.sh"), payload).expect("payload");
+            let bytes = sevenz_rust2::compress(&src, std::io::Cursor::new(Vec::new()))
+                .expect("7z")
+                .into_inner();
+            let path = root.join(format!("{name}.7z"));
+            std::fs::write(&path, bytes).expect("7z write");
+            let _ = std::fs::remove_dir_all(&src);
+            plain_script_path(&path)
+        };
+        let small = write_archive("small", b"git push origin main\n");
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("eval \"$(7z x -so {small})\""))
+            )
+            .map(|id| id.0.as_str()),
+            Some("git.push"),
+            "{small}"
+        );
+        let mut big_body = b"git push origin main\n".to_vec();
+        big_body.resize(super::SCRIPT_FILE_CAP as usize + 1, b'\n');
+        let big = write_archive("big", &big_body);
+        assert_eq!(
+            matched_action(
+                &policy,
+                "Bash",
+                Some(&format!("eval \"$(7z x -so {big})\""))
+            )
+            .map(|id| id.0.as_str()),
+            None,
+            "{big}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
