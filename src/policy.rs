@@ -10521,7 +10521,7 @@ fn wsh_string_assign(
     chars: &[char],
     index: usize,
     jscript: bool,
-    bindings: &WshBindings,
+    bindings: &mut WshBindings,
 ) -> Option<(String, Option<String>, usize)> {
     let first = *chars.get(index)?;
     if !(first.is_ascii_alphabetic() || first == '_' || (jscript && first == '$')) {
@@ -10554,14 +10554,14 @@ fn wsh_string_assign(
 }
 
 /// The string value of an assignment. `None` means the value is not a
-/// string this scan can know. A comma inside parentheses is the comma
-/// operator, which this fold does not evaluate. A comma after the
-/// value ends a JScript `var` list.
+/// string this scan can know. A JScript comma inside parentheses
+/// yields the last value. A comma after the value ends a `var` list.
+/// `t = "..."` on the right stores `t` and yields that string.
 fn wsh_fold_value(
     chars: &[char],
     start: usize,
     jscript: bool,
-    bindings: &WshBindings,
+    bindings: &mut WshBindings,
 ) -> Option<(String, usize)> {
     let cursor = wsh_expr_gap(chars, start, jscript);
     let (cursor, mut depth) = skip_wsh_open_groups(chars, cursor, jscript);
@@ -10572,6 +10572,15 @@ fn wsh_fold_value(
             depth -= 1;
             end = look + 1;
             look = wsh_expr_gap(chars, end, jscript);
+        }
+        if jscript && depth > 0 && chars.get(look) == Some(&',') {
+            let (next, opened) =
+                skip_wsh_open_groups(chars, wsh_expr_gap(chars, look + 1, true), true);
+            let (piece, piece_end) = wsh_fold_atom(chars, next, true, bindings)?;
+            depth += opened;
+            value = piece;
+            end = piece_end;
+            continue;
         }
         if depth > 0 && chars.get(look) == Some(&',') {
             return None;
@@ -10605,7 +10614,7 @@ fn wsh_fold_atom(
     chars: &[char],
     cursor: usize,
     jscript: bool,
-    bindings: &WshBindings,
+    bindings: &mut WshBindings,
 ) -> Option<(String, usize)> {
     if let Some((body, end)) = read_wsh_string(chars, cursor, jscript) {
         return Some((body, end));
@@ -10614,6 +10623,11 @@ fn wsh_fold_atom(
     let look = wsh_expr_gap(chars, end, jscript);
     if matches!(chars.get(look), Some('.' | '(' | '[')) {
         return None;
+    }
+    if jscript && chars.get(look) == Some(&'=') && chars.get(look + 1) != Some(&'=') {
+        let (text, text_end) = wsh_fold_value(chars, look + 1, true, bindings)?;
+        bindings.insert(wsh_bind_key(&name, true), Some(text.clone()));
+        return Some((text, text_end));
     }
     match bindings.get(&wsh_bind_key(&name, jscript)) {
         Some(Some(text)) => Some((text.clone(), end)),
@@ -10633,6 +10647,7 @@ fn wsh_expr_gap(chars: &[char], cursor: usize, jscript: bool) -> usize {
 
 /// True when `index` is the first character of a statement.
 /// A VBScript `_` continuation keeps the next line in that statement.
+/// A JScript comma starts the next name in a `var` list.
 fn wsh_stmt_start(chars: &[char], index: usize, jscript: bool) -> bool {
     let mut cursor = index;
     while cursor > 0 {
@@ -10646,6 +10661,7 @@ fn wsh_stmt_start(chars: &[char], index: usize, jscript: bool) -> bool {
                 return !vbs_line_ends_continued(chars, cursor);
             }
             ';' | ':' => return true,
+            ',' if jscript => return true,
             _ => return false,
         }
     }
@@ -34497,6 +34513,34 @@ mod tests {
                 true,
             ),
             vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var junk = \"WScript.Echo('no')\", s = \"{js_push}\";\neval(s);\n"),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var s = (\"WScript.Echo('no')\", \"{js_push}\");\neval(s);\n"),
+                true,
+            ),
+            vec![push.to_string()],
+        );
+        assert!(
+            super::vbs_shell_runs(
+                &format!("var s = (\"{js_push}\", \"WScript.Echo('x')\");\neval(s);\n"),
+                true,
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            super::vbs_shell_runs(
+                &format!("var s = t = \"{js_push}\";\neval(s);\neval(t);\n"),
+                true,
+            ),
+            vec![push.to_string(), push.to_string()],
         );
         assert_eq!(
             super::vbs_shell_runs(
