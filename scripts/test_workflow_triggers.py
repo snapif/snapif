@@ -398,6 +398,65 @@ class WorkflowTriggerTests(unittest.TestCase):
             self.assertNotIn("FAIL:", result.stdout)
             self.assertNotIn("README badges match live signals", result.stdout)
 
+    def test_stealth_uses_gh_exe_when_gh_is_absent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "scripts").mkdir()
+            script = root / "scripts" / "assert-stealth.sh"
+            script.write_text(
+                (ROOT / "scripts" / "assert-stealth.sh").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+            (root / "Cargo.toml").write_text(
+                'keywords = ["cli"]\ncategories = ["command-line-utilities"]\n',
+                encoding="utf-8",
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            for name, target in (("python3", "/usr/bin/python3"), ("git", "/usr/bin/git")):
+                wrapper = bin_dir / name
+                wrapper.write_text(f"#!/bin/sh\nexec {target} \"$@\"\n", encoding="utf-8")
+                wrapper.chmod(0o755)
+            gh_exe = bin_dir / "gh.exe"
+            gh_exe.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "repo" ]; then\n'
+                "  printf '%s\\n' "
+                '\'{"description":"Snapif","homepageUrl":"","repositoryTopics":'
+                '[{"name":"rust"}],"isPrivate":false}\'\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n",
+                encoding="utf-8",
+            )
+            gh_exe.chmod(0o755)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "remote",
+                    "add",
+                    "origin",
+                    "https://github.com/snapif/snapif.git",
+                ],
+                cwd=root,
+                check=True,
+            )
+            env = os.environ.copy()
+            env["PATH"] = str(bin_dir)
+            result = subprocess.run(
+                ["bash", bash_path(script), "snapif/snapif"],
+                cwd=root,
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("FAIL:", result.stdout)
+            self.assertIn("OK: description is set", result.stdout)
+
 
 class ScheduledFailureTests(unittest.TestCase):
     def test_scheduled_workflows_call_the_planner(self) -> None:
